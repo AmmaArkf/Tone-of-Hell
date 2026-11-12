@@ -1,0 +1,59 @@
+name: Suggest an idea or an automation
+description: A new feature, a usability improvement, scripts and batch processing
+title: "[Idea]: "
+labels: ["feature", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tell us what is missing. Describe the problem, not only the solution: that makes it easier for us to find the best option.
+        If your idea concerns a plugin, an effect, an instrument or a format, use the "Suggest a plugin or an integration" template.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Type of suggestion
+      options:
+        - New feature
+        - Usability improvement
+        - Automation (scripts, macros, batch processing)
+        - Performance
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you solving
+      description: What is inconvenient or impossible right now? Give an example from your own work.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: How it should work
+      description: Describe the behavior you want. Sketches and diagrams are welcome, but please do not copy the interface of other programs.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What workarounds exist
+      description: How you solve the problem now and which alternatives you considered.
+  - type: dropdown
+    id: help
+    attributes:
+      label: Are you willing to help
+      options:
+        - I only want to suggest
+        - I can test
+        - I can write code
+        - I can help with documentation
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched for similar issues and did not find the same one.
+          required: true
+        - label: The suggestion contains no code or material from closed programs.
+          required: true
