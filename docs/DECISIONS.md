@@ -37,6 +37,7 @@ A short record of technical decisions: what was chosen, why, and who decided. De
 | 31 | A take is one unbroken forward run: it ends when playback stops, pauses, jumps or turns around. While recording, playback does not stop at the end of the project | Keeps every recorded frame at a known place on the timeline | Default |
 | 32 | A take is placed earlier by a "latency correction" (default: two audio buffers; adjustable). The sound card does not report its true delay, so the default is an estimate | Recordings must line up with what was heard; exact calibration needs a loopback measurement, planned later | Default |
 | 33 | Export renders the project with a second, offline engine: 16-bit, 24-bit or 32-bit float WAV, without the metronome and the monitored input, without dither | Playback is not disturbed and the file equals what the mixer produces; dither comes with mastering features | Default |
+| 34 | Version numbers are `release.prerelease.change`: the third number goes up with every committed change, the second with every pre-release, the first with every full release (see `docs/VERSIONING.md`) | Owner's rule; every build can be told apart | Owner |
 
 ## Open decisions
 

@@ -106,8 +106,9 @@ Ideas and new plugins that arrive during stabilization are not lost: they go int
 3. Write C++17 and follow the `.clang-format` file (it will appear together with the first code).
 4. Add tests for new behavior. For a bug you fix, reproduce it with a test first.
 5. Sign off your commits (`git commit -s`) and write clear messages: what changed and why.
-6. Open a pull request using the template and link it to the issue (`Fixes #number`).
-7. Respond to review comments. We try to reply quickly, but we cannot guarantee response times.
+6. Raise the third number of the version in the top-level `CMakeLists.txt` by one and describe your change at the top of `CHANGELOG.md` (see [docs/VERSIONING.md](docs/VERSIONING.md)).
+7. Open a pull request using the template and link it to the issue (`Fixes #number`).
+8. Respond to review comments. We try to reply quickly, but we cannot guarantee response times.
 
 Small pull requests are merged faster than large ones. One task per pull request.
 
