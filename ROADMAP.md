@@ -8,8 +8,8 @@ Proposals for the plan are welcome through the "Suggest an idea or an automation
 
 A stage is done when the criterion in parentheses is met and has been checked on a real computer.
 
-- [ ] **1. Audio engine and player.** A WAV file plays through the sound card and play, stop, position and loop work (no clicks or dropouts at a 256-sample buffer).
-- [ ] **2. Tracks and mixer.** Volume, pan, mute, solo, buses and level meters (8 tracks play in sync and the sum does not clip).
+- [x] **1. Audio engine and player.** A WAV file plays through the sound card and play, stop, position and loop work (no clicks or dropouts at a 256-sample buffer).
+- [x] **2. Tracks and mixer.** Volume, pan, mute, solo, buses and level meters (8 tracks play in sync and the sum does not clip).
 - [ ] **3. Timeline and regions.** Tracks with waveforms, moving, trimming, fades and a grid (an arrangement can be assembled with the mouse).
 - [ ] **4. Recording and export.** Recording from an input, monitoring and export to WAV (the recorded and exported audio line up in time with what you hear in playback).
 - [ ] **5. Project and undo.** Saving, loading, autosave and undo/redo (a project opens without losses).

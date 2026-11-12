@@ -25,11 +25,37 @@ struct Overview {
                float& high) const noexcept;
 };
 
-/// What a user interface needs to know about one track.
-struct TrackInfo {
+/// Builds the waveform overview of a clip.
+Overview make_overview(const core::ClipData& clip, std::uint32_t frames_per_bucket = 256);
+
+/// An audio file (or generated sound) that regions refer to. Never changes once created.
+struct Source {
     std::string name;  // UTF-8
     std::shared_ptr<const core::ClipData> clip;
     Overview overview;
+
+    /// Lowest and highest sample value between two frames of the clip, for drawing. Uses the
+    /// samples themselves for short ranges and the overview for long ones.
+    bool range(std::int64_t first_frame, std::int64_t last_frame, float& low,
+               float& high) const noexcept;
+};
+
+/// A piece of a source placed on a track. All values are in frames.
+struct RegionInfo {
+    std::shared_ptr<const Source> source;
+    std::int64_t start = 0;     // position on the timeline
+    std::int64_t offset = 0;    // first frame of the source that is used
+    std::int64_t length = 0;    // number of frames that are used
+    std::int64_t fade_in = 0;
+    std::int64_t fade_out = 0;
+
+    std::int64_t end() const noexcept { return start + length; }
+};
+
+/// What a user interface needs to know about one track.
+struct TrackInfo {
+    std::string name;  // UTF-8
+    std::vector<RegionInfo> regions;  // in the order they were created
     float gain = 1.0f;
     float pan = 0.0f;
     bool mute = false;
@@ -37,7 +63,7 @@ struct TrackInfo {
 };
 
 /// Settings of the built-in metronome. `bpm` counts quarter notes per minute; the time
-/// signature is `beats_per_bar` / `beat_unit`.
+/// signature is `beats_per_bar` / `beat_unit`. The same values define the timeline grid.
 struct MetronomeSettings {
     bool enabled = false;
     double bpm = 120.0;
@@ -45,6 +71,9 @@ struct MetronomeSettings {
     int beat_unit = 4;
     float volume = 0.5f;
 };
+
+/// How fine the grid is that edits snap to.
+enum class GridStep { Bar, Beat, HalfBeat, QuarterBeat };
 
 /// The state of the program that every user interface shares: the list of tracks, the engine
 /// and the audio device. A user interface only draws this state and calls these methods; it
@@ -69,12 +98,12 @@ public:
 
     // ---- Tracks --------------------------------------------------------------------------
 
-    /// Loads a file onto a new track. Playback stops. This call blocks while the file is read.
+    /// Loads a file onto a new track, as one region at the start of the timeline. This call
+    /// blocks while the file is read.
     bool add_track_from_file(const std::filesystem::path& path, std::string* error = nullptr);
     /// Adds a track with an already loaded clip (used for test tones and by tests).
     bool add_track(std::string name, std::shared_ptr<const core::ClipData> clip,
                    std::string* error = nullptr);
-    /// Removes a track. Playback stops.
     bool remove_track(std::size_t index);
 
     const std::vector<TrackInfo>& tracks() const noexcept { return tracks_; }
@@ -83,6 +112,35 @@ public:
     bool set_track_mute(std::size_t index, bool mute);
     bool set_track_solo(std::size_t index, bool solo);
     float track_peak(std::size_t index) const noexcept;
+
+    // ---- Regions -------------------------------------------------------------------------
+    // Edits never interrupt playback. Each returns false when the track or region does not
+    // exist; values out of range are limited to what is possible.
+
+    /// Moves a region so that it begins at `start` (not before the start of the timeline).
+    bool move_region(std::size_t track, std::size_t region, std::int64_t start);
+    /// Moves the beginning of a region to `start`, keeping its end and the audio in place.
+    bool trim_region_start(std::size_t track, std::size_t region, std::int64_t start);
+    /// Moves the end of a region to `end`, keeping its beginning in place.
+    bool trim_region_end(std::size_t track, std::size_t region, std::int64_t end);
+    bool set_region_fades(std::size_t track, std::size_t region, std::int64_t fade_in,
+                          std::int64_t fade_out);
+    /// Cuts a region in two at a timeline frame. The second part is added at the end of the
+    /// track's region list. Returns false when `frame` is not inside the region.
+    bool split_region(std::size_t track, std::size_t region, std::int64_t frame);
+    bool remove_region(std::size_t track, std::size_t region);
+
+    // ---- Grid ----------------------------------------------------------------------------
+
+    bool snap() const noexcept { return snap_; }
+    void set_snap(bool enabled) noexcept { snap_ = enabled; }
+    GridStep grid_step() const noexcept { return grid_step_; }
+    void set_grid_step(GridStep step) noexcept { grid_step_ = step; }
+    /// Length of one beat and of one bar in frames (fractional), from the metronome settings.
+    double beat_frames() const noexcept;
+    double bar_frames() const noexcept;
+    /// The nearest grid position when snapping is on; otherwise `frame` itself.
+    std::int64_t snap_frame(std::int64_t frame) const noexcept;
 
     // ---- Master --------------------------------------------------------------------------
 
@@ -112,7 +170,7 @@ public:
 
     bool is_playing() const noexcept { return engine_.is_playing(); }
     std::int64_t position_frames() const noexcept { return engine_.position_frames(); }
-    /// Length of the longest track, in frames.
+    /// End of the last region on any track, in frames.
     std::int64_t length_frames() const noexcept { return length_frames_; }
     std::uint32_t sample_rate() const noexcept { return config_.sample_rate; }
 
@@ -120,6 +178,8 @@ public:
     core::Engine& engine() noexcept { return engine_; }
 
 private:
+    RegionInfo* find_region(std::size_t track, std::size_t region) noexcept;
+    void sync_track_regions(std::size_t index);
     void sync_engine_tracks(std::size_t first);
     void update_length();
 
@@ -130,11 +190,10 @@ private:
     float master_gain_ = 1.0f;
     bool loop_ = false;
     bool reverse_ = false;
+    bool snap_ = true;
+    GridStep grid_step_ = GridStep::Beat;
     MetronomeSettings metronome_;
     std::int64_t length_frames_ = 0;
 };
-
-/// Builds the waveform overview of a clip.
-Overview make_overview(const core::ClipData& clip, std::uint32_t frames_per_bucket = 256);
 
 }  // namespace toh::app

@@ -52,6 +52,7 @@ Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
     frame_pos_.assign(kBlockFrames, -1);
     frame_fade_.assign(kBlockFrames, 0.0f);
     master_mix_.assign(block_samples, 0.0f);
+    track_mix_.assign(block_samples, 0.0f);
     bus_mix_.assign(block_samples * kMaxBuses, 0.0f);
 
     for (auto& peak : track_peaks_) {
@@ -64,30 +65,76 @@ Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
 
 // ---- Control thread ----------------------------------------------------------------------
 
+// Hands a track's new content to the audio thread. The engine keeps owning it (and through it
+// the clips) until the audio thread has let go of it; see collect_retired.
+bool Engine::push_content(std::uint32_t track, std::unique_ptr<TrackContent> content, bool stop) {
+    Command command(CommandType::SetTrackContent);
+    command.index = static_cast<std::int32_t>(track);
+    command.flag = stop;
+    command.content = content.get();
+    const bool owned = content != nullptr;
+    if (owned) {
+        owned_.push_back(std::move(content));
+    }
+    if (!commands_.try_push(command)) {
+        if (owned) {
+            owned_.pop_back();
+        }
+        return false;
+    }
+    return true;
+}
+
+bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& regions) {
+    if (track >= kMaxTracks) {
+        return false;
+    }
+    if (regions.empty()) {
+        return push_content(track, nullptr, false);
+    }
+
+    constexpr std::int64_t kMaxStart = std::int64_t{1} << 40;  // far beyond any real project
+    auto content = std::make_unique<TrackContent>();
+    content->regions.reserve(regions.size());
+    for (const Region& region : regions) {
+        if (!region.clip || region.clip->channels != channels_ ||
+            region.clip->sample_rate != sample_rate_ || region.start < 0 ||
+            region.start > kMaxStart || region.offset < 0 || region.length <= 0 ||
+            region.offset > region.clip->frames() - region.length) {
+            return false;
+        }
+        Region copy = region;
+        copy.fade_in = std::clamp<std::int64_t>(copy.fade_in, 0, copy.length);
+        copy.fade_out = std::clamp<std::int64_t>(copy.fade_out, 0, copy.length - copy.fade_in);
+        content->end = std::max(content->end, copy.start + copy.length);
+        content->regions.push_back(std::move(copy));
+    }
+    return push_content(track, std::move(content), false);
+}
+
 bool Engine::set_track_clip(std::uint32_t track, std::shared_ptr<const ClipData> clip) {
     if (track >= kMaxTracks || !clip || clip->channels != channels_ ||
         clip->sample_rate != sample_rate_) {
         return false;
     }
-    owned_.push_back(clip);  // keeps the clip alive until the audio thread has let go of it
-    Command command(CommandType::SetTrackClip);
-    command.index = static_cast<std::int32_t>(track);
-    command.clip = clip.get();
-    if (!commands_.try_push(command)) {
-        owned_.pop_back();
-        return false;
+    const std::int64_t frames = clip->frames();
+    if (frames <= 0) {
+        return push_content(track, nullptr, true);
     }
-    return true;
+    auto content = std::make_unique<TrackContent>();
+    Region region;
+    region.clip = std::move(clip);
+    region.length = frames;
+    content->end = frames;
+    content->regions.push_back(std::move(region));
+    return push_content(track, std::move(content), true);
 }
 
 bool Engine::clear_track(std::uint32_t track) {
     if (track >= kMaxTracks) {
         return false;
     }
-    Command command(CommandType::SetTrackClip);
-    command.index = static_cast<std::int32_t>(track);
-    command.clip = nullptr;
-    return commands_.try_push(command);
+    return push_content(track, nullptr, true);
 }
 
 bool Engine::set_track_gain(std::uint32_t track, float linear) {
@@ -230,7 +277,7 @@ bool Engine::set_metronome(bool enabled, double bpm, std::uint32_t beats_per_bar
 }
 
 void Engine::collect_retired() {
-    const ClipData* retired = nullptr;
+    const TrackContent* retired = nullptr;
     while (retired_.try_pop(retired)) {
         // Remove exactly one owner entry: every set_track_clip added one and every swap
         // retires one.
@@ -285,21 +332,24 @@ void Engine::apply(const Command& command) noexcept {
     const auto index = static_cast<std::size_t>(command.index);
 
     switch (command.type) {
-        case CommandType::SetTrackClip: {
+        case CommandType::SetTrackContent: {
             Track& track = tracks_[index];
-            if (track.clip != nullptr) {
-                retired_.try_push(track.clip);
+            if (track.content != nullptr) {
+                retired_.try_push(track.content);
             }
-            track.clip = command.clip;
-            track.frames = track.clip != nullptr ? track.clip->frames() : 0;
+            track.content = command.content;
+            track.frames = track.content != nullptr ? track.content->end : 0;
             project_frames_ = 0;
             for (const Track& other : tracks_) {
                 project_frames_ = std::max(project_frames_, other.frames);
             }
-            state_ = State::Stopped;
-            pending_ = Pending::None;
-            pos_ = 0;
-            fade_ = 0.0f;
+            if (command.flag) {  // stop and return to the start
+                state_ = State::Stopped;
+                pending_ = Pending::None;
+                reverse_ = wanted_reverse_;
+                pos_ = 0;
+                fade_ = 0.0f;
+            }
             update_targets();
             break;
         }
@@ -570,12 +620,62 @@ void Engine::mix_block(float* out, std::uint32_t frames, bool audible) noexcept 
     float* master = master_mix_.data();
     std::fill(master, master + samples, 0.0f);
 
+    // The range of timeline frames this block touches, to skip regions that lie elsewhere.
+    std::int64_t block_low = std::numeric_limits<std::int64_t>::max();
+    std::int64_t block_high = -1;
+    for (std::uint32_t i = 0; i < frames; ++i) {
+        const std::int64_t position = frame_pos_[i];
+        if (position >= 0) {
+            block_low = std::min(block_low, position);
+            block_high = std::max(block_high, position);
+        }
+    }
+
     // Tracks -> buses or master.
     for (std::size_t t = 0; t < kMaxTracks; ++t) {
         Track& track = tracks_[t];
         float peak = 0.0f;
 
-        if (track.clip != nullptr) {
+        if (track.content != nullptr) {
+            // Collect the track's regions (with their fades) in a scratch buffer first.
+            float* scratch = track_mix_.data();
+            bool any_region = false;
+            for (const Region& region : track.content->regions) {
+                const std::int64_t begin = region.start;
+                const std::int64_t end = region.start + region.length;
+                if (end <= block_low || begin > block_high) {
+                    continue;
+                }
+                if (!any_region) {
+                    std::fill(scratch, scratch + samples, 0.0f);
+                    any_region = true;
+                }
+                const float* clip_samples = region.clip->samples.data();
+                for (std::uint32_t i = 0; i < frames; ++i) {
+                    const std::int64_t position = frame_pos_[i];
+                    if (position < begin || position >= end) {
+                        continue;
+                    }
+                    const std::int64_t into = position - begin;
+                    const std::int64_t remaining = end - 1 - position;
+                    float region_fade = 1.0f;
+                    if (into < region.fade_in) {
+                        region_fade =
+                            (static_cast<float>(into) + 0.5f) / static_cast<float>(region.fade_in);
+                    }
+                    if (remaining < region.fade_out) {
+                        region_fade *= (static_cast<float>(remaining) + 0.5f) /
+                                       static_cast<float>(region.fade_out);
+                    }
+                    const float* src =
+                        clip_samples + static_cast<std::size_t>(region.offset + into) * channels;
+                    float* dst = scratch + static_cast<std::size_t>(i) * channels;
+                    for (std::size_t c = 0; c < channels; ++c) {
+                        dst[c] += src[c] * region_fade;
+                    }
+                }
+            }
+
             float* destination = master;
             if (track.bus >= 0) {
                 const auto bus = static_cast<std::size_t>(track.bus);
@@ -586,16 +686,13 @@ void Engine::mix_block(float* out, std::uint32_t frames, bool audible) noexcept 
                 }
             }
 
-            const float* source = track.clip->samples.data();
             for (std::uint32_t i = 0; i < frames; ++i) {
                 smooth(track.current_left, track.target_left, coef);
                 smooth(track.current_right, track.target_right, coef);
-
-                const std::int64_t position = frame_pos_[i];
-                if (position < 0 || position >= track.frames) {
+                if (!any_region) {
                     continue;
                 }
-                const float* src = source + static_cast<std::size_t>(position) * channels;
+                const float* src = scratch + static_cast<std::size_t>(i) * channels;
                 float* dst = destination + static_cast<std::size_t>(i) * channels;
                 if (stereo) {
                     const float left = src[0] * track.current_left;

@@ -1,6 +1,9 @@
 # The Dear ImGui user interface. SDL3 provides the window, input and file dialogs.
 
 include(FetchContent)
+if(POLICY CMP0135)
+    cmake_policy(SET CMP0135 NEW)  # extracted files get the time of extraction
+endif()
 
 # SDL3 is too large to keep in the repository, so the build downloads the official release
 # archive once and checks it against a fixed checksum.

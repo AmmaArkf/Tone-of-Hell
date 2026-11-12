@@ -65,7 +65,9 @@ TEST_CASE("Session keeps its track list and the engine in step") {
     CHECK(session.tracks().size() == 2);
     CHECK(session.length_frames() == 100000);
     CHECK(session.tracks()[1].name == "loud");
-    CHECK_FALSE(session.tracks()[0].overview.minimum.empty());
+    REQUIRE(session.tracks()[0].regions.size() == 1);
+    CHECK_FALSE(session.tracks()[0].regions[0].source->overview.minimum.empty());
+    CHECK(session.tracks()[0].regions[0].length == 100000);
 
     session.play();
     CHECK(last_left(session, 4800) == doctest::Approx(0.75f));
@@ -84,7 +86,7 @@ TEST_CASE("Session keeps its track list and the engine in step") {
     CHECK(session.length_frames() == 50000);
     session.play();
     CHECK(last_left(session, 4800) == doctest::Approx(0.25f));
-    CHECK(session.position_frames() == 4800);
+    CHECK(session.position_frames() == 3 * 4800);  // changing tracks does not stop playback
 
     REQUIRE(session.remove_track(0));
     CHECK_FALSE(session.remove_track(0));

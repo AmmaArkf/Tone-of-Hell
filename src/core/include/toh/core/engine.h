@@ -11,9 +11,19 @@
 
 namespace toh::core {
 
+/// A piece of a clip placed on the timeline of a track.
+struct Region {
+    std::shared_ptr<const ClipData> clip;
+    std::int64_t start = 0;     ///< Where it begins on the timeline, in frames.
+    std::int64_t offset = 0;    ///< First frame of the clip that is used.
+    std::int64_t length = 0;    ///< Number of frames that are used.
+    std::int64_t fade_in = 0;   ///< Length of the fade at its beginning, in frames.
+    std::int64_t fade_out = 0;  ///< Length of the fade at its end, in frames.
+};
+
 /// The audio engine: a transport (play, pause, stop, seek, loop) and a mixer.
 ///
-/// Signal path: every track plays one clip that starts at the beginning of the timeline. A
+/// Signal path: every track holds regions (pieces of clips placed on the timeline). A
 /// track has a fader, a pan control, mute and solo, and sends its signal either straight to the
 /// master or to one of the buses. Every bus has a fader and mute and feeds the master. The
 /// master has a fader. Mixing is done in 32-bit float without any clipping; levels above 1.0
@@ -44,8 +54,13 @@ public:
 
     // ---- Tracks (control thread) ---------------------------------------------------------
 
-    /// Puts a clip on a track, stops playback and returns to the start. The clip must match the
-    /// engine's sample rate and channel count (convert it when loading it).
+    /// Replaces everything on a track with the given regions, without interrupting playback.
+    /// Every clip must match the engine's sample rate and channel count (convert it when
+    /// loading it), and every region must lie inside its clip: start >= 0, offset >= 0,
+    /// length > 0 and offset + length <= clip frames. Fades longer than the region are
+    /// shortened. Regions that overlap are mixed together. An empty list empties the track.
+    bool set_track_regions(std::uint32_t track, const std::vector<Region>& regions);
+    /// Puts one whole clip at the start of a track, stops playback and returns to the start.
     bool set_track_clip(std::uint32_t track, std::shared_ptr<const ClipData> clip);
     /// Removes the clip from a track, stops playback and returns to the start.
     bool clear_track(std::uint32_t track);
@@ -134,8 +149,14 @@ public:
 private:
     static constexpr std::uint32_t kBlockFrames = 512;  // internal processing block
 
+    // Everything on one track. Built on the control thread, then only read by the audio thread.
+    struct TrackContent {
+        std::vector<Region> regions;
+        std::int64_t end = 0;  // end of the last region
+    };
+
     enum class CommandType : std::uint8_t {
-        SetTrackClip,
+        SetTrackContent,
         SetTrackGain,
         SetTrackPan,
         SetTrackMute,
@@ -166,15 +187,15 @@ private:
         std::int64_t a = 0;
         std::int64_t b = 0;
         double number = 0.0;
-        const ClipData* clip = nullptr;
+        const TrackContent* content = nullptr;
     };
 
     enum class State : std::uint8_t { Stopped, Playing, FadingOut };
     enum class Pending : std::uint8_t { None, Pause, Stop, Seek };
 
     struct Track {
-        const ClipData* clip = nullptr;
-        std::int64_t frames = 0;
+        const TrackContent* content = nullptr;
+        std::int64_t frames = 0;  // end of the last region
         float gain = 1.0f;
         float pan_left = 1.0f;
         float pan_right = 1.0f;
@@ -196,6 +217,7 @@ private:
         float meter = 0.0f;
     };
 
+    bool push_content(std::uint32_t track, std::unique_ptr<TrackContent> content, bool stop);
     void apply(const Command& command) noexcept;
     void update_targets() noexcept;
     void finish_fade() noexcept;
@@ -212,8 +234,8 @@ private:
     float gain_coef_ = 1.0f;
 
     SpscQueue<Command, 1024> commands_;               // control thread -> audio thread
-    SpscQueue<const ClipData*, 256> retired_;         // audio thread -> control thread
-    std::vector<std::shared_ptr<const ClipData>> owned_;  // control thread only
+    SpscQueue<const TrackContent*, 256> retired_;         // audio thread -> control thread
+    std::vector<std::unique_ptr<TrackContent>> owned_;  // control thread only
 
     // Audio-thread state.
     std::array<Track, kMaxTracks> tracks_{};
@@ -242,6 +264,7 @@ private:
     std::vector<std::int64_t> frame_pos_;  // timeline frame for every output frame, -1 = silence
     std::vector<float> frame_fade_;
     std::vector<float> master_mix_;
+    std::vector<float> track_mix_;
     std::vector<float> bus_mix_;
 
     // Copies of the audio-thread state for other threads to read.

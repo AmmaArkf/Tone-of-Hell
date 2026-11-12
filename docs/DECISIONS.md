@@ -27,6 +27,11 @@ A short record of technical decisions: what was chosen, why, and who decided. De
 | 21 | Switching interfaces restarts the window with the same project instead of swapping toolkits inside one process | Two windowing toolkits in one process are fragile | Default (proposed to the owner) |
 | 22 | SDL3 is downloaded by CMake with a fixed checksum instead of being copied into the repository | The source archive is about 16 MB; exception to decision 7 | Default |
 | 23 | The Qt interface is distributed under the terms of the LGPL (Qt as separate shared libraries); the project's own code stays MIT | Required by Qt's open source license | Default |
+| 24 | A track holds regions (pieces of clips with a start, an offset, a length and two fades). The audio thread receives a complete new region list for a track on every edit | Edits never stop playback and need no locks; the old list is freed on the control thread | Default |
+| 25 | Regions that overlap on one track are mixed together | Simplest rule; "the upper one wins" and crossfades can come later | Default |
+| 26 | Region fades are linear | Predictable; other curves come with the fade editor | Default |
+| 27 | The grid comes from the metronome settings (one tempo and time signature for the whole project); edits snap to bars, beats, half or quarter beats, and Alt switches snapping off while dragging | A tempo map is stage 8 | Default |
+| 28 | Reverse playback is a transport direction, not a region effect; the metronome is generated from the timeline position | Both stay in step through seeks and loops | Default |
 
 ## Open decisions
 

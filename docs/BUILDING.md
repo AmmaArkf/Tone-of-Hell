@@ -40,6 +40,21 @@ Sound goes through PulseAudio (or PipeWire's PulseAudio layer), ALSA or JACK, wh
 
 Drop audio files (WAV, FLAC or MP3) onto the window or press "Add files...". Every file becomes a track with a volume slider, a pan slider, mute (M), solo (S) and remove (X). Click or drag in the ruler or on a waveform to move the playhead. Space starts and pauses playback; Home returns to the start.
 
+Editing on the timeline:
+
+| Action | How |
+| --- | --- |
+| Move a region | Drag it |
+| Trim a region | Drag its left or right edge |
+| Fade in or out | Drag the small square in a top corner of the region |
+| Cut | `S` cuts the selected region at the playhead (without a selection: every region under it) |
+| Remove a region | Select it and press `Delete`, or right-click it |
+| Snap to the grid | "Snap to" in the toolbar; hold `Alt` while dragging to switch it off |
+| Zoom | `Ctrl` + mouse wheel, or the `-`, `+` and "Fit" buttons |
+| Scroll sideways | `Shift` + mouse wheel |
+
+The grid follows the tempo and the time signature of the metronome. "Reverse" plays backwards from the playhead.
+
 ### toh_player: the command-line test player
 
 `toh_player` plays a 440 Hz test tone, or the files given as arguments, one per track. Options: `--loop`, `--buffer <frames>` (default 256) and `--rate <hz>` (default 48000).
