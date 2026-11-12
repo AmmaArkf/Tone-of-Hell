@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and discussions
+    url: https://github.com/AmmaArkf/Tone-of-Hell/discussions
+    about: Ask a question, share your work or discuss an idea before opening an issue.
+  - name: Report a vulnerability
+    url: https://github.com/AmmaArkf/Tone-of-Hell/security/advisories/new
+    about: Report vulnerabilities privately, not in public issues.
