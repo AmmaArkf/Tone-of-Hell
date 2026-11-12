@@ -1,0 +1,80 @@
+name: Report a bug
+description: Something does not work the way it should
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug. Please search the open issues first: if you find a similar one, add a 👍 and your details.
+        Do not report vulnerabilities here, use the private channel described in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: Program version
+      description: The version number or the hash of the commit the program was built from.
+      placeholder: for example, 0.1.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 11
+        - Windows 10
+        - Linux
+        - macOS
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: audio
+    attributes:
+      label: Audio interface and driver
+      description: For example WASAPI or ASIO, the device name, buffer size and sample rate.
+      placeholder: ASIO, 256 samples, 48 kHz
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Describe what you saw or heard.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to reproduce
+      description: The steps, starting from a clean project.
+      placeholder: |
+        1. Create a new project
+        2. Add an audio track
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error log or crash message
+      description: Paste the text. Remove personal data before sending, for example your user name in file paths.
+      render: text
+  - type: textarea
+    id: extra
+    attributes:
+      label: Additional information
+      description: Screenshots, a minimal project, the list of connected plugins.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched for similar issues and did not find the same one.
+          required: true
+        - label: The files and screenshots I attach do not violate anyone's copyright.
+          required: true
