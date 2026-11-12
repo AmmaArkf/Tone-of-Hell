@@ -72,8 +72,9 @@ struct MetronomeSettings {
     float volume = 0.5f;
 };
 
-/// How fine the grid is that edits snap to.
-enum class GridStep { Bar, Beat, HalfBeat, QuarterBeat };
+/// How fine the grid is that edits snap to. `None` means no grid at all: nothing snaps and
+/// user interfaces hide the grid lines and the bar numbers.
+enum class GridStep { Bar, Beat, HalfBeat, QuarterBeat, None };
 
 /// The state of the program that every user interface shares: the list of tracks, the engine
 /// and the audio device. A user interface only draws this state and calls these methods; it

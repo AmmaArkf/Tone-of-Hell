@@ -291,6 +291,11 @@ TEST_CASE("Session snaps positions to the grid") {
     session.set_grid_step(GridStep::Beat);
     CHECK(session.snap_frame(30000) == 48000);
 
+    session.set_grid_step(GridStep::None);  // no grid: nothing snaps even with snapping on
+    CHECK(session.snap_frame(30000) == 30000);
+    session.set_grid_step(GridStep::Beat);
+    CHECK(session.snap_frame(30000) == 48000);
+
     session.set_snap(false);
     CHECK(session.snap_frame(30000) == 30000);
 }

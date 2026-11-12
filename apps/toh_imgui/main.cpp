@@ -19,6 +19,7 @@
 #include "imgui_impl_sdl3.h"
 #include "imgui_impl_sdlrenderer3.h"
 
+#include "toh/app/build_info.h"
 #include "toh/app/session.h"
 #include "toh/core/clip.h"
 
@@ -95,6 +96,11 @@ struct UiState {
     std::size_t drag_track = 0;
     std::size_t drag_region = 0;
     std::int64_t drag_grab = 0;    // distance from the region start to the grabbed frame
+    float scroll_grab = 0.0f;      // where the timeline scrollbar thumb was grabbed
+
+    bool quit = false;             // "Exit" was chosen in the menu
+    bool show_help = false;
+    bool show_about = false;
 };
 
 // ---- Small helpers -----------------------------------------------------------------------
@@ -251,6 +257,179 @@ void remove_selected_region(Session& session, UiState& ui) {
     }
 }
 
+// ---- Menu bar ----------------------------------------------------------------------------
+
+void open_file_dialog(PendingFiles& pending, SDL_Window* window) {
+    static const SDL_DialogFileFilter filters[] = {{"Audio files", "wav;flac;mp3"},
+                                                   {"All files", "*"}};
+    SDL_ShowOpenFileDialog(&file_dialog_callback, &pending, window, filters, 2, nullptr, true);
+}
+
+void draw_menu_bar(Session& session, PendingFiles& pending, SDL_Window* window, UiState& ui) {
+    if (!ImGui::BeginMenuBar()) {
+        return;
+    }
+
+    if (ImGui::BeginMenu("File")) {
+        if (ImGui::MenuItem("Add audio files...", "Ctrl+O")) {
+            open_file_dialog(pending, window);
+        }
+        ImGui::MenuItem("Save project (planned for stage 5)", "Ctrl+S", false, false);
+        ImGui::MenuItem("Export audio (planned for stage 4)", nullptr, false, false);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Exit", "Alt+F4")) {
+            ui.quit = true;
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Edit")) {
+        const RegionInfo* region = selected_region(session, ui);
+        ImGui::MenuItem("Undo (planned for stage 5)", "Ctrl+Z", false, false);
+        ImGui::Separator();
+        if (ImGui::MenuItem("Split at the playhead", "S", false, !session.tracks().empty())) {
+            split_at_playhead(session, ui);
+        }
+        if (ImGui::MenuItem("Remove fades", nullptr, false,
+                            region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
+            session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
+        }
+        if (ImGui::MenuItem("Remove the selected region", "Delete", false, region != nullptr)) {
+            remove_selected_region(session, ui);
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Deselect", "Esc", false, ui.selected)) {
+            ui.selected = false;
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("View")) {
+        const float centre_x = ui.view.lane_origin_x + ui.view.lane_width * 0.5f;
+        if (ImGui::MenuItem("Zoom in", "Mouse wheel")) {
+            zoom_view(ui.view, 1.5, centre_x);
+        }
+        if (ImGui::MenuItem("Zoom out", "Mouse wheel")) {
+            zoom_view(ui.view, 1.0 / 1.5, centre_x);
+        }
+        if (ImGui::MenuItem("Show the whole project")) {
+            fit_view(session, ui.view);
+        }
+        ImGui::Separator();
+        ImGui::MenuItem("Follow the playhead", nullptr, &ui.follow);
+        bool snap = session.snap();
+        if (ImGui::MenuItem("Snap to the grid", nullptr, &snap)) {
+            session.set_snap(snap);
+        }
+        if (ImGui::BeginMenu("Grid step")) {
+            static const char* const names[] = {"Bars", "Beats", "1/2 beats", "1/4 beats",
+                                                "None (hide the grid)"};
+            for (int i = 0; i < 5; ++i) {
+                if (ImGui::MenuItem(names[i], nullptr, static_cast<int>(session.grid_step()) == i)) {
+                    session.set_grid_step(static_cast<GridStep>(i));
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Transport")) {
+        if (ImGui::MenuItem(session.is_playing() ? "Pause" : "Play", "Space")) {
+            session.toggle_play();
+        }
+        if (ImGui::MenuItem("Stop")) {
+            session.stop();
+        }
+        if (ImGui::MenuItem("Back to the start", "Home")) {
+            session.seek_frames(0);
+            ui.view.start_seconds = 0.0;
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Reverse", nullptr, session.reverse())) {
+            session.toggle_reverse();
+        }
+        if (ImGui::MenuItem("Loop", nullptr, session.loop())) {
+            session.set_loop(!session.loop());
+        }
+        if (ImGui::MenuItem("Metronome", nullptr, session.metronome().enabled)) {
+            toh::app::MetronomeSettings settings = session.metronome();
+            settings.enabled = !settings.enabled;
+            session.set_metronome(settings);
+        }
+        ImGui::EndMenu();
+    }
+
+    if (ImGui::BeginMenu("Help")) {
+        if (ImGui::MenuItem("Keyboard and mouse...")) {
+            ui.show_help = true;
+        }
+        if (ImGui::MenuItem("About Tone of Hell...")) {
+            ui.show_about = true;
+        }
+        ImGui::EndMenu();
+    }
+
+    ImGui::EndMenuBar();
+}
+
+// The windows opened from the Help menu.
+void draw_dialogs(UiState& ui) {
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse |
+                                   ImGuiWindowFlags_NoSavedSettings;
+    const ImVec2 centre = ImGui::GetMainViewport()->GetCenter();
+
+    if (ui.show_help) {
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (ImGui::Begin("Keyboard and mouse", &ui.show_help, flags)) {
+            static const char* const rows[][2] = {
+                {"Space", "Play or pause"},
+                {"Home", "Back to the start"},
+                {"S", "Cut the selected region at the playhead (or every region under it)"},
+                {"Delete", "Remove the selected region"},
+                {"Esc", "Deselect"},
+                {"Ctrl+O", "Add audio files"},
+                {"Mouse wheel", "Zoom the timeline (when no region is selected)"},
+                {"Ctrl + wheel", "Zoom the timeline (always)"},
+                {"Shift + wheel", "Scroll the timeline sideways"},
+                {"Wheel, region selected", "Scroll the track list up and down"},
+                {"Drag a region", "Move it; drag an edge to trim it"},
+                {"Drag a top corner square", "Fade in or fade out"},
+                {"Alt while dragging", "Ignore the grid"},
+                {"Right-click a region", "Menu: split, remove fades, remove"},
+                {"Click the ruler or an empty lane", "Move the playhead"},
+            };
+            if (ImGui::BeginTable("shortcuts", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
+                for (const auto& row : rows) {
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(row[0]);
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(row[1]);
+                }
+                ImGui::EndTable();
+            }
+        }
+        ImGui::End();
+    }
+
+    if (ui.show_about) {
+        ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (ImGui::Begin("About Tone of Hell", &ui.show_about, flags)) {
+            const toh::app::BuildInfo& build = toh::app::build_info();
+            ImGui::TextUnformatted("Tone of Hell");
+            ImGui::TextUnformatted("An open source digital audio workstation.");
+            ImGui::Spacing();
+            ImGui::Text("Version %s, commit %s, built %s", build.version, build.commit, build.date);
+            ImGui::TextUnformatted("Copyright (c) 2026 AmmaArk. MIT license.");
+            ImGui::TextUnformatted("https://github.com/AmmaArkf/Tone-of-Hell");
+            ImGui::Spacing();
+            ImGui::TextDisabled("Uses Dear ImGui (MIT), SDL (zlib) and miniaudio (public domain or MIT-0).");
+        }
+        ImGui::End();
+    }
+}
+
 // ---- Toolbar -----------------------------------------------------------------------------
 
 // The metronome button, the tempo field and the settings popup.
@@ -397,9 +576,7 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
 
     // Row 2: files, grid, zoom.
     if (ImGui::Button("Add files...")) {
-        static const SDL_DialogFileFilter filters[] = {{"Audio files", "wav;flac;mp3"},
-                                                       {"All files", "*"}};
-        SDL_ShowOpenFileDialog(&file_dialog_callback, &pending, window, filters, 2, nullptr, true);
+        open_file_dialog(pending, window);
     }
     tooltip("Every file becomes a new track. You can also drop files onto the window.");
 
@@ -410,11 +587,12 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     }
     tooltip("Moved and trimmed regions jump to the grid. Hold Alt while dragging to switch it off.");
     ImGui::SameLine();
-    static const char* const step_names[] = {"bars", "beats", "1/2 beats", "1/4 beats"};
+    static const char* const step_names[] = {"bars", "beats", "1/2 beats", "1/4 beats",
+                                             "none (no grid)"};
     const int current_step = static_cast<int>(session.grid_step());
-    ImGui::SetNextItemWidth(6.5f * font);
+    ImGui::SetNextItemWidth(8.5f * font);
     if (ImGui::BeginCombo("##grid", step_names[current_step])) {
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
             if (ImGui::Selectable(step_names[i], i == current_step)) {
                 session.set_grid_step(static_cast<GridStep>(i));
             }
@@ -469,6 +647,9 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
 // Vertical lines at bars and beats. With `labels`, bar numbers are written next to the lines.
 void draw_grid(const Session& session, const View& view, ImDrawList* draw_list, float top,
                float bottom, bool labels) {
+    if (session.grid_step() == GridStep::None) {
+        return;  // the grid is switched off
+    }
     const double rate = static_cast<double>(session.sample_rate());
     const double bar_seconds = session.bar_frames() / rate;
     const double beat_seconds = session.beat_frames() / rate;
@@ -535,7 +716,10 @@ void draw_playhead(const Session& session, const View& view, ImDrawList* draw_li
 void draw_ruler(Session& session, UiState& ui, float header_width) {
     View& view = ui.view;
     const float font = ImGui::GetFontSize();
-    const float height = 2.5f * font;
+    // Without a grid there is no row of bar numbers, so the ruler is lower and the tracks
+    // move up.
+    const bool grid = session.grid_step() != GridStep::None;
+    const float height = (grid ? 2.5f : 1.35f) * font;
     ImGui::Dummy(ImVec2(header_width, height));
     ImGui::SameLine();
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -551,6 +735,7 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     const float bottom = origin.y + height;
+    const float time_top = grid ? origin.y + height * 0.5f : origin.y;  // top of the time row
     draw_list->AddRectFilled(origin, ImVec2(origin.x + width, bottom), IM_COL32(40, 42, 48, 255));
     draw_list->PushClipRect(origin, ImVec2(origin.x + width, bottom), true);
     draw_grid(session, view, draw_list, origin.y, origin.y + height * 0.5f, true);
@@ -573,7 +758,7 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
             break;
         }
         const float x = origin.x + static_cast<float>((t - view.start_seconds) * view.pixels_per_second);
-        draw_list->AddLine(ImVec2(x, origin.y + height * 0.75f), ImVec2(x, bottom),
+        draw_list->AddLine(ImVec2(x, (time_top + bottom) * 0.5f), ImVec2(x, bottom),
                            IM_COL32(150, 150, 160, 255));
         char label[32];
         const int minutes = static_cast<int>(t / 60.0);
@@ -585,7 +770,7 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
         } else {
             std::snprintf(label, sizeof(label), "%d:%02d", minutes, static_cast<int>(rest + 0.5));
         }
-        draw_list->AddText(ImVec2(x + 3.0f, origin.y + height * 0.5f - 1.0f),
+        draw_list->AddText(ImVec2(x + 3.0f, time_top - 1.0f),
                            IM_COL32(170, 170, 180, 255), label);
     }
     draw_playhead(session, view, draw_list, origin.y, bottom);
@@ -937,8 +1122,12 @@ void draw_tracks(Session& session, UiState& ui) {
 
     // Mouse wheel over the timeline: Ctrl zooms around the mouse, Shift scrolls sideways.
     if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
-        if (io.KeyCtrl && io.MouseWheel != 0.0f) {
-            zoom_view(view, std::pow(1.25, static_cast<double>(io.MouseWheel)), io.MousePos.x);
+        // With no region selected the plain wheel zooms too; with a selection it scrolls the
+        // track list (the "tracks" child window is created without wheel scrolling otherwise).
+        const bool plain_zoom = !ui.selected && !io.KeyShift;
+        if ((io.KeyCtrl || plain_zoom) && io.MouseWheel != 0.0f) {
+            zoom_view(view, std::pow(1.25, static_cast<double>(io.MouseWheel)),
+                      std::max(io.MousePos.x, view.lane_origin_x));
         } else if (io.KeyShift && io.MouseWheel != 0.0f) {
             view.start_seconds -= static_cast<double>(io.MouseWheel) * 80.0 / view.pixels_per_second;
         }
@@ -975,6 +1164,25 @@ void draw_tracks(Session& session, UiState& ui) {
         }
     }
 
+    // While something is dragged, holding the mouse at or past the left or right edge of the
+    // lanes scrolls the timeline: the further out, the faster.
+    if (ui.drag != DragKind::None) {
+        const float margin = font;
+        const float left = view.lane_origin_x + margin;
+        const float right = view.lane_origin_x + view.lane_width - margin;
+        float push = 0.0f;
+        if (io.MousePos.x > right) {
+            push = io.MousePos.x - right;
+        } else if (io.MousePos.x < left) {
+            push = io.MousePos.x - left;
+        }
+        if (push != 0.0f) {
+            push = std::clamp(push, -300.0f, 300.0f);
+            const double pixels = static_cast<double>(push) * 12.0 * static_cast<double>(io.DeltaTime);
+            view.start_seconds = std::max(0.0, view.start_seconds + pixels / view.pixels_per_second);
+        }
+    }
+
     std::size_t remove_index = session.tracks().size();
     for (std::size_t i = 0; i < session.tracks().size(); ++i) {
         ImGui::PushID(static_cast<int>(i));
@@ -992,10 +1200,113 @@ void draw_tracks(Session& session, UiState& ui) {
         ui.drag = DragKind::None;
     }
 
+    // A click on empty space anywhere in the track area (below the tracks, or on the free part
+    // of a track header) clears the selection. Clicks on controls and regions do not.
+    if (ui.selected && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
+        !ImGui::IsAnyItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ui.selected = false;
+    }
+
     if (session.tracks().empty()) {
         ImGui::Spacing();
         ImGui::TextDisabled("Drop audio files here (WAV, FLAC, MP3) or press \"Add files...\".");
     }
+}
+
+// A scrollbar for the timeline, under the lanes: the thumb shows which part is visible.
+void draw_timeline_scrollbar(const Session& session, UiState& ui) {
+    View& view = ui.view;
+    const ImGuiIO& io = ImGui::GetIO();
+    const float font = ImGui::GetFontSize();
+    const float height = 0.8f * font;
+    const float width = std::max(view.lane_width, 1.0f);
+
+    ImGui::SetCursorScreenPos(ImVec2(view.lane_origin_x, ImGui::GetCursorScreenPos().y));
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("timeline scrollbar", ImVec2(width, height));
+
+    const double visible = static_cast<double>(width) / view.pixels_per_second;
+    const double length = static_cast<double>(session.length_frames()) /
+                          static_cast<double>(session.sample_rate());
+    // The scrollable range: the project with a little room after it, or more when the view
+    // has already been moved further.
+    const double total = std::max({length * 1.05, view.start_seconds + visible, 1.0});
+    const double max_start = std::max(total - visible, 0.0);
+    const float thumb_width =
+        std::clamp(width * static_cast<float>(visible / total), std::min(2.0f * font, width), width);
+    const float travel = width - thumb_width;
+    float thumb_x = origin.x;
+    if (max_start > 0.0) {
+        thumb_x += travel * static_cast<float>(std::min(view.start_seconds / max_start, 1.0));
+    }
+
+    if (ImGui::IsItemActivated()) {
+        const bool on_thumb = io.MousePos.x >= thumb_x && io.MousePos.x <= thumb_x + thumb_width;
+        ui.scroll_grab = on_thumb ? io.MousePos.x - thumb_x : thumb_width * 0.5f;  // else: jump there
+    }
+    if (ImGui::IsItemActive() && travel > 0.0f && max_start > 0.0) {
+        const float wanted = io.MousePos.x - ui.scroll_grab - origin.x;
+        view.start_seconds =
+            static_cast<double>(std::clamp(wanted / travel, 0.0f, 1.0f)) * max_start;
+        thumb_x = origin.x + std::clamp(wanted, 0.0f, travel);
+    }
+
+    ImDrawList* draw_list = ImGui::GetWindowDrawList();
+    draw_list->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height),
+                             IM_COL32(18, 19, 22, 255), height * 0.5f);
+    const ImU32 colour = ImGui::IsItemActive()    ? IM_COL32(150, 165, 190, 255)
+                         : ImGui::IsItemHovered() ? IM_COL32(120, 132, 155, 255)
+                                                  : IM_COL32(92, 100, 118, 255);
+    draw_list->AddRectFilled(ImVec2(thumb_x, origin.y + 1.0f),
+                             ImVec2(thumb_x + thumb_width, origin.y + height - 1.0f), colour,
+                             height * 0.5f);
+    tooltip("Drag to move along the timeline");
+}
+
+// The line at the bottom of the window: figures about the project, the audio and the build.
+void draw_status_bar(const Session& session, const UiState& ui) {
+    ImGui::Separator();
+
+    std::size_t regions = 0;
+    for (const TrackInfo& track : session.tracks()) {
+        regions += track.regions.size();
+    }
+    const toh::audio::DeviceConfig& config = session.config();
+    const double buffer_ms =
+        1000.0 * static_cast<double>(config.buffer_frames) / static_cast<double>(config.sample_rate);
+
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text("Tracks: %d   Regions: %d   Length: %s", static_cast<int>(session.tracks().size()),
+                static_cast<int>(regions),
+                format_time(session.length_frames(), session.sample_rate()).c_str());
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    ImGui::Text("Audio: %s, %u Hz, buffer %u (%.1f ms)", session.audio_running() ? "on" : "off",
+                config.sample_rate, config.buffer_frames, buffer_ms);
+    ImGui::SameLine();
+    ImGui::TextDisabled("|");
+    ImGui::SameLine();
+    ImGui::Text("Zoom: %.0f px/s   %.0f fps", ui.view.pixels_per_second,
+                static_cast<double>(ImGui::GetIO().Framerate));
+
+    if (const RegionInfo* region = selected_region(session, ui)) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+        ImGui::Text("Selected: track %d, %s - %s", static_cast<int>(ui.selected_track + 1),
+                    format_time(region->start, session.sample_rate()).c_str(),
+                    format_time(region->end(), session.sample_rate()).c_str());
+    }
+
+    // The build, at the right edge.
+    const toh::app::BuildInfo& build = toh::app::build_info();
+    char text[96];
+    std::snprintf(text, sizeof(text), "Build %s (%s, %s)", build.version, build.commit, build.date);
+    const float x = ImGui::GetWindowWidth() - ImGui::CalcTextSize(text).x -
+                    ImGui::GetStyle().WindowPadding.x;
+    ImGui::SameLine(std::max(x, ImGui::GetCursorPosX()));
+    ImGui::TextDisabled("%s", text);
 }
 
 void load_font(float scale) {
@@ -1070,7 +1381,8 @@ int main(int argc, char* argv[]) {
         bool running = true;
         while (running) {
             // Sleep while nothing moves on screen; redraw continuously while sound plays.
-            const bool animating = session.is_playing() || session.master_peak() > 0.0005f;
+            const bool animating = session.is_playing() || session.master_peak() > 0.0005f ||
+                                   ui.drag != DragKind::None;
             SDL_Event event;
             bool have_event = animating ? SDL_PollEvent(&event) : SDL_WaitEventTimeout(&event, 250);
             while (have_event) {
@@ -1112,6 +1424,12 @@ int main(int argc, char* argv[]) {
                 if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
                     remove_selected_region(session, ui);
                 }
+                if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+                    ui.selected = false;
+                }
+                if (ImGui::IsKeyPressed(ImGuiKey_O, false) && io.KeyCtrl) {
+                    open_file_dialog(pending, window);
+                }
             }
 
             const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -1120,12 +1438,25 @@ int main(int argc, char* argv[]) {
             ImGui::Begin("main", nullptr,
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoSavedSettings |
-                             ImGuiWindowFlags_NoBringToFrontOnFocus);
+                             ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
+            draw_menu_bar(session, pending, window, ui);
             draw_toolbar(session, pending, window, ui);
             ImGui::Separator();
-            ImGui::BeginChild("tracks");
+            // The track area leaves room below for the timeline scrollbar and the status bar.
+            const ImGuiStyle& style = ImGui::GetStyle();
+            const float below = 0.8f * ImGui::GetFontSize() + ImGui::GetFrameHeight() +
+                                3.0f * style.ItemSpacing.y + 2.0f;
+            ImGui::BeginChild("tracks", ImVec2(0.0f, -below), ImGuiChildFlags_None,
+                              ui.selected ? ImGuiWindowFlags_None
+                                          : ImGuiWindowFlags_NoScrollWithMouse);
             draw_tracks(session, ui);
             ImGui::EndChild();
+            draw_timeline_scrollbar(session, ui);
+            draw_status_bar(session, ui);
+            draw_dialogs(ui);
+            if (ui.quit) {
+                running = false;
+            }
             ImGui::End();
 
             ImGui::Render();

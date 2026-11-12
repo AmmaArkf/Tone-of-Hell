@@ -381,7 +381,7 @@ double Session::bar_frames() const noexcept {
 }
 
 std::int64_t Session::snap_frame(std::int64_t frame) const noexcept {
-    if (!snap_) {
+    if (!snap_ || grid_step_ == GridStep::None) {
         return frame;
     }
     double step = beat_frames();
@@ -396,6 +396,8 @@ std::int64_t Session::snap_frame(std::int64_t frame) const noexcept {
             break;
         case GridStep::QuarterBeat:
             step *= 0.25;
+            break;
+        case GridStep::None:
             break;
     }
     if (!(step >= 1.0)) {
