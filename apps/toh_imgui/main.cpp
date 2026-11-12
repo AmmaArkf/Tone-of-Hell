@@ -69,6 +69,27 @@ void SDLCALL file_dialog_callback(void* user_data, const char* const* file_list,
 
 // ---- State that belongs to this window only ----------------------------------------------
 
+// A file name chosen in the "export" dialog, waiting to be written by the main loop.
+struct PendingExport {
+    std::mutex mutex;
+    bool ready = false;
+    std::string path;  // UTF-8
+    toh::audio::SampleFormat format = toh::audio::SampleFormat::Int24;
+};
+
+void SDLCALL export_dialog_callback(void* user_data, const char* const* file_list, int /*filter*/) {
+    auto* request = static_cast<PendingExport*>(user_data);
+    if (file_list == nullptr || file_list[0] == nullptr) {
+        return;  // the dialog failed or was cancelled
+    }
+    {
+        const std::lock_guard<std::mutex> lock(request->mutex);
+        request->path = file_list[0];
+        request->ready = true;
+    }
+    wake_main_loop();
+}
+
 // Which part of the timeline is visible.
 struct View {
     double pixels_per_second = 100.0;
@@ -99,6 +120,9 @@ struct UiState {
     float scroll_grab = 0.0f;      // where the timeline scrollbar thumb was grabbed
 
     bool quit = false;             // "Exit" was chosen in the menu
+    std::string notice;            // a short message after something succeeded
+    bool armed = false;            // a track is chosen to record onto
+    std::size_t armed_track = 0;
     bool show_help = false;
     bool show_about = false;
 };
@@ -259,13 +283,78 @@ void remove_selected_region(Session& session, UiState& ui) {
 
 // ---- Menu bar ----------------------------------------------------------------------------
 
+void open_export_dialog(PendingExport& exports, SDL_Window* window, toh::audio::SampleFormat format) {
+    {
+        const std::lock_guard<std::mutex> lock(exports.mutex);
+        exports.format = format;
+        exports.ready = false;
+    }
+    static const SDL_DialogFileFilter filters[] = {{"WAV audio", "wav"}};
+    SDL_ShowSaveFileDialog(&export_dialog_callback, &exports, window, filters, 1, nullptr);
+}
+
+// The record button: stops a running recording, otherwise opens the input if needed and starts
+// one on the armed track (or on a new track).
+void toggle_recording(Session& session, UiState& ui) {
+    if (session.is_recording()) {
+        session.stop_recording();
+        return;
+    }
+    if (!session.input_enabled()) {
+        std::string error;
+        if (!session.set_input_enabled(true, &error)) {
+            ui.error = "Recording: " + error;
+            return;
+        }
+    }
+    const std::size_t track = ui.armed && ui.armed_track < session.tracks().size()
+                                  ? ui.armed_track
+                                  : Session::kNewTrack;
+    if (!session.start_recording(track)) {
+        ui.error = "Recording could not be started.";
+    }
+}
+
+void draw_record_settings(Session& session, UiState& ui) {
+    const float font = ImGui::GetFontSize();
+    ImGui::TextUnformatted("Recording");
+    ImGui::Separator();
+
+    bool input = session.input_enabled();
+    if (ImGui::Checkbox("Input device open", &input)) {
+        std::string error;
+        if (!session.set_input_enabled(input, &error) && input) {
+            ui.error = "Input: " + error;
+        }
+    }
+    ImGui::TextDisabled("It is opened automatically when you press Record.");
+
+    bool monitor = session.monitoring();
+    if (ImGui::Checkbox("Monitor: hear the input", &monitor)) {
+        session.set_monitoring(monitor);
+    }
+    ImGui::TextDisabled("Use headphones: with loudspeakers the microphone hears itself.");
+
+    const double rate = static_cast<double>(session.sample_rate());
+    auto milliseconds =
+        static_cast<float>(static_cast<double>(session.record_offset_frames()) * 1000.0 / rate);
+    ImGui::SetNextItemWidth(8.0f * font);
+    if (ImGui::InputFloat("Latency correction, ms", &milliseconds, 1.0f, 10.0f, "%.1f")) {
+        session.set_record_offset_frames(
+            std::llround(static_cast<double>(milliseconds) * rate / 1000.0));
+    }
+    ImGui::TextDisabled("A take is placed this much earlier, to make up for the delay of the\n"
+                        "sound card. Raise it if recordings sound late, lower it if early.");
+}
+
 void open_file_dialog(PendingFiles& pending, SDL_Window* window) {
     static const SDL_DialogFileFilter filters[] = {{"Audio files", "wav;flac;mp3"},
                                                    {"All files", "*"}};
     SDL_ShowOpenFileDialog(&file_dialog_callback, &pending, window, filters, 2, nullptr, true);
 }
 
-void draw_menu_bar(Session& session, PendingFiles& pending, SDL_Window* window, UiState& ui) {
+void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& exports,
+                   SDL_Window* window, UiState& ui) {
     if (!ImGui::BeginMenuBar()) {
         return;
     }
@@ -275,7 +364,18 @@ void draw_menu_bar(Session& session, PendingFiles& pending, SDL_Window* window, 
             open_file_dialog(pending, window);
         }
         ImGui::MenuItem("Save project (planned for stage 5)", "Ctrl+S", false, false);
-        ImGui::MenuItem("Export audio (planned for stage 4)", nullptr, false, false);
+        if (ImGui::BeginMenu("Export audio", session.length_frames() > 0)) {
+            if (ImGui::MenuItem("WAV, 16-bit...")) {
+                open_export_dialog(exports, window, toh::audio::SampleFormat::Int16);
+            }
+            if (ImGui::MenuItem("WAV, 24-bit (recommended)...")) {
+                open_export_dialog(exports, window, toh::audio::SampleFormat::Int24);
+            }
+            if (ImGui::MenuItem("WAV, 32-bit float...")) {
+                open_export_dialog(exports, window, toh::audio::SampleFormat::Float32);
+            }
+            ImGui::EndMenu();
+        }
         ImGui::Separator();
         if (ImGui::MenuItem("Exit", "Alt+F4")) {
             ui.quit = true;
@@ -339,7 +439,11 @@ void draw_menu_bar(Session& session, PendingFiles& pending, SDL_Window* window, 
             session.toggle_play();
         }
         if (ImGui::MenuItem("Stop")) {
+            session.stop_recording();
             session.stop();
+        }
+        if (ImGui::MenuItem(session.is_recording() ? "Stop recording" : "Record", "R")) {
+            toggle_recording(session, ui);
         }
         if (ImGui::MenuItem("Back to the start", "Home")) {
             session.seek_frames(0);
@@ -356,6 +460,9 @@ void draw_menu_bar(Session& session, PendingFiles& pending, SDL_Window* window, 
             toh::app::MetronomeSettings settings = session.metronome();
             settings.enabled = !settings.enabled;
             session.set_metronome(settings);
+        }
+        if (ImGui::MenuItem("Monitor the input", nullptr, session.monitoring())) {
+            session.set_monitoring(!session.monitoring());
         }
         ImGui::EndMenu();
     }
@@ -389,6 +496,7 @@ void draw_dialogs(UiState& ui) {
                 {"Delete", "Remove the selected region"},
                 {"Esc", "Deselect"},
                 {"Ctrl+O", "Add audio files"},
+                {"R", "Start or stop recording"},
                 {"Mouse wheel", "Zoom the timeline (when no region is selected)"},
                 {"Ctrl + wheel", "Zoom the timeline (always)"},
                 {"Shift + wheel", "Scroll the timeline sideways"},
@@ -524,6 +632,7 @@ void draw_metronome(Session& session, UiState& ui) {
 
 void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, UiState& ui) {
     const float font = ImGui::GetFontSize();
+    const ImVec4 record_red(0.85f, 0.15f, 0.15f, 1.0f);
 
     // Row 1: transport, metronome, master.
     if (ImGui::Button(session.is_playing() ? "Pause" : "Play")) {
@@ -532,7 +641,24 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     tooltip("Space");
     ImGui::SameLine();
     if (ImGui::Button("Stop")) {
+        session.stop_recording();
         session.stop();
+    }
+    ImGui::SameLine();
+    if (toggle_button(session.is_recording() ? "Recording##record" : "Record##record",
+                      session.is_recording(), record_red, false)) {
+        toggle_recording(session, ui);
+    }
+    tooltip("Record the input onto the armed track (the R button of a track) or, when no track\n"
+            "is armed, onto a new one. Press again, or Stop, to finish. Shortcut: R");
+    ImGui::SameLine();
+    if (ImGui::Button("...##record")) {
+        ImGui::OpenPopup("record settings");
+    }
+    tooltip("Recording settings: input, monitoring, latency correction");
+    if (ImGui::BeginPopup("record settings")) {
+        draw_record_settings(session, ui);
+        ImGui::EndPopup();
     }
     ImGui::SameLine();
     if (toggle_button("Reverse", session.reverse(), ImVec4(0.80f, 0.45f, 0.20f, 1.0f), false)) {
@@ -638,6 +764,13 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
         ImGui::SameLine();
         if (ImGui::SmallButton("Dismiss")) {
             ui.error.clear();
+        }
+    }
+    if (!ui.notice.empty()) {
+        ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.50f, 1.0f), "%s", ui.notice.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton("OK##notice")) {
+            ui.notice.clear();
         }
     }
 }
@@ -1032,12 +1165,21 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         draw_region(session, view, track, track.regions[r], selected, selected || under_mouse,
                     origin.y, row_height);
     }
+    // The take that is being recorded onto this track, growing with the playhead.
+    if (session.is_recording() && session.record_track() == track_index) {
+        const std::int64_t position = session.position_frames();
+        const float x0 = frame_to_x(session, view, position - session.recorded_frames());
+        const float x1 = frame_to_x(session, view, position);
+        draw_list->AddRectFilled(ImVec2(x0, origin.y + 1.0f), ImVec2(std::max(x1, x0 + 1.0f), corner.y - 1.0f),
+                                 IM_COL32(200, 50, 50, 130), 3.0f);
+    }
     draw_playhead(session, view, draw_list, origin.y, corner.y);
     draw_list->PopClipRect();
 }
 
 // The controls on the left of a lane. Returns true when the track should be removed.
-bool draw_track_header(Session& session, std::size_t i, float header_width, float row_height) {
+bool draw_track_header(Session& session, UiState& ui, std::size_t i, float header_width,
+                       float row_height) {
     const TrackInfo& track = session.tracks()[i];
     const float font = ImGui::GetFontSize();
     bool remove = false;
@@ -1053,6 +1195,13 @@ bool draw_track_header(Session& session, std::size_t i, float header_width, floa
         session.set_track_solo(i, !track.solo);
     }
     tooltip("Solo");
+    ImGui::SameLine();
+    const bool armed = ui.armed && ui.armed_track == i;
+    if (toggle_button("R", armed, ImVec4(0.85f, 0.15f, 0.15f, 1.0f))) {
+        ui.armed = !armed;
+        ui.armed_track = i;
+    }
+    tooltip("Arm for recording: the next take goes onto this track");
 
     // The remove button sits in the far corner, away from mute and solo, and asks first.
     // The track name gets the space in between and is shortened when it does not fit.
@@ -1186,7 +1335,7 @@ void draw_tracks(Session& session, UiState& ui) {
     std::size_t remove_index = session.tracks().size();
     for (std::size_t i = 0; i < session.tracks().size(); ++i) {
         ImGui::PushID(static_cast<int>(i));
-        if (draw_track_header(session, i, header_width, row_height)) {
+        if (draw_track_header(session, ui, i, header_width, row_height)) {
             remove_index = i;
         }
         ImGui::SameLine();
@@ -1197,6 +1346,7 @@ void draw_tracks(Session& session, UiState& ui) {
     if (remove_index < session.tracks().size()) {
         session.remove_track(remove_index);
         ui.selected = false;
+        ui.armed = false;
         ui.drag = DragKind::None;
     }
 
@@ -1276,6 +1426,13 @@ void draw_status_bar(const Session& session, const UiState& ui) {
         1000.0 * static_cast<double>(config.buffer_frames) / static_cast<double>(config.sample_rate);
 
     ImGui::AlignTextToFramePadding();
+    if (session.is_recording()) {
+        ImGui::TextColored(ImVec4(0.95f, 0.30f, 0.30f, 1.0f), "REC %s",
+                           format_time(session.recorded_frames(), session.sample_rate()).c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("|");
+        ImGui::SameLine();
+    }
     ImGui::Text("Tracks: %d   Regions: %d   Length: %s", static_cast<int>(session.tracks().size()),
                 static_cast<int>(regions),
                 format_time(session.length_frames(), session.sample_rate()).c_str());
@@ -1369,6 +1526,7 @@ int main(int argc, char* argv[]) {
         Session session;
         UiState ui;
         PendingFiles pending;
+        PendingExport exports;
 
         std::string audio_error;
         if (!session.start_audio(&audio_error)) {
@@ -1382,7 +1540,7 @@ int main(int argc, char* argv[]) {
         while (running) {
             // Sleep while nothing moves on screen; redraw continuously while sound plays.
             const bool animating = session.is_playing() || session.master_peak() > 0.0005f ||
-                                   ui.drag != DragKind::None;
+                                   ui.drag != DragKind::None || session.is_recording();
             SDL_Event event;
             bool have_event = animating ? SDL_PollEvent(&event) : SDL_WaitEventTimeout(&event, 250);
             while (have_event) {
@@ -1402,6 +1560,39 @@ int main(int argc, char* argv[]) {
                 std::string error;
                 if (!session.add_track_from_file(std::filesystem::u8path(path), &error)) {
                     ui.error = path + ": " + error;
+                }
+            }
+            // A file name arrived from the export dialog: write the file.
+            {
+                std::string export_path;
+                toh::audio::SampleFormat export_format = toh::audio::SampleFormat::Int24;
+                {
+                    const std::lock_guard<std::mutex> lock(exports.mutex);
+                    if (exports.ready) {
+                        export_path = exports.path;
+                        export_format = exports.format;
+                        exports.ready = false;
+                    }
+                }
+                if (!export_path.empty()) {
+                    std::string ending = export_path.size() >= 4
+                                             ? export_path.substr(export_path.size() - 4)
+                                             : std::string();
+                    for (char& character : ending) {
+                        if (character >= 'A' && character <= 'Z') {
+                            character = static_cast<char>(character - 'A' + 'a');
+                        }
+                    }
+                    if (ending != ".wav") {
+                        export_path += ".wav";
+                    }
+                    std::string error;
+                    if (session.export_wav(std::filesystem::u8path(export_path), export_format,
+                                           &error)) {
+                        ui.notice = "Exported: " + export_path;
+                    } else {
+                        ui.error = "Export: " + error;
+                    }
                 }
             }
             session.update();
@@ -1424,6 +1615,9 @@ int main(int argc, char* argv[]) {
                 if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
                     remove_selected_region(session, ui);
                 }
+                if (ImGui::IsKeyPressed(ImGuiKey_R, false) && !io.KeyCtrl) {
+                    toggle_recording(session, ui);
+                }
                 if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
                     ui.selected = false;
                 }
@@ -1439,7 +1633,7 @@ int main(int argc, char* argv[]) {
                          ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                              ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
-            draw_menu_bar(session, pending, window, ui);
+            draw_menu_bar(session, pending, exports, window, ui);
             draw_toolbar(session, pending, window, ui);
             ImGui::Separator();
             // The track area leaves room below for the timeline scrollbar and the status bar.

@@ -41,7 +41,8 @@ inline float decayed_meter(float meter, float decay, float peak) noexcept {
 
 Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
     : sample_rate_(std::max<std::uint32_t>(sample_rate, 1)),
-      channels_(std::max<std::uint32_t>(channels, 1)) {
+      channels_(std::max<std::uint32_t>(channels, 1)),
+      recorded_(static_cast<std::size_t>(sample_rate_) * channels_ * 4) {  // about 4 seconds
     const double rate = static_cast<double>(sample_rate_);
     fade_frames_ =
         std::max<std::uint32_t>(1, static_cast<std::uint32_t>(std::lround(kFadeSeconds * rate)));
@@ -226,7 +227,11 @@ bool Engine::set_gain(float linear) {
     return commands_.try_push(command);
 }
 
-bool Engine::play() { return commands_.try_push(Command(CommandType::Play)); }
+bool Engine::play(bool fade_in) {
+    Command command(CommandType::Play);
+    command.flag = !fade_in;
+    return commands_.try_push(command);
+}
 
 bool Engine::pause() { return commands_.try_push(Command(CommandType::Pause)); }
 
@@ -274,6 +279,25 @@ bool Engine::set_metronome(bool enabled, double bpm, std::uint32_t beats_per_bar
     command.a = beats_per_bar;
     command.value = volume;
     return commands_.try_push(command);
+}
+
+bool Engine::set_monitoring(bool enabled, float gain) {
+    if (!valid_gain(gain)) {
+        return false;
+    }
+    Command command(CommandType::SetMonitoring);
+    command.flag = enabled;
+    command.value = gain;
+    return commands_.try_push(command);
+}
+
+bool Engine::start_recording() { return commands_.try_push(Command(CommandType::StartRecording)); }
+
+bool Engine::stop_recording() { return commands_.try_push(Command(CommandType::StopRecording)); }
+
+std::size_t Engine::read_recorded(float* destination, std::size_t max_frames) {
+    // The audio thread writes whole frames, so the amount read is always a whole number of them.
+    return recorded_.read(destination, max_frames * channels_) / channels_;
 }
 
 void Engine::collect_retired() {
@@ -395,16 +419,17 @@ void Engine::apply(const Command& command) noexcept {
             break;
 
         case CommandType::Play:
-            if (project_frames_ <= 0 && !metronome_enabled_) {
+            if (project_frames_ <= 0 && !metronome_enabled_ && !record_armed_) {
                 break;
             }
             if (state_ == State::Stopped) {
-                if (!reverse_ && project_frames_ > 0 && pos_ >= project_frames_) {
+                if (!reverse_ && !record_armed_ && project_frames_ > 0 &&
+                    pos_ >= project_frames_) {
                     pos_ = 0;  // the project had ended: start again
                 } else if (reverse_ && pos_ <= 0) {
                     pos_ = project_frames_;  // at the start: play backwards from the end
                 }
-                fade_ = 0.0f;
+                fade_ = command.flag ? 1.0f : 0.0f;  // flag: start without the fade-in
                 state_ = State::Playing;
                 pending_ = Pending::None;
             } else if (state_ == State::FadingOut && pending_ != Pending::Seek) {
@@ -474,6 +499,24 @@ void Engine::apply(const Command& command) noexcept {
             if (state_ == State::Stopped) {
                 metronome_gain_ = metronome_enabled_ ? metronome_volume_ : 0.0f;
             }
+            break;
+
+        case CommandType::SetMonitoring:
+            monitoring_ = command.flag;
+            monitor_volume_ = command.value;
+            break;
+
+        case CommandType::StartRecording:
+            if (!record_armed_) {
+                record_armed_ = true;
+                record_active_ = false;
+                record_start_.store(-1, std::memory_order_relaxed);
+            }
+            break;
+
+        case CommandType::StopRecording:
+            record_armed_ = false;
+            record_active_ = false;
             break;
     }
 }
@@ -591,7 +634,58 @@ float Engine::metronome_sample(std::int64_t frame) const noexcept {
     return static_cast<float>(std::sin(kTwoPi * frequency * seconds) * envelope);
 }
 
-void Engine::mix_block(float* out, std::uint32_t frames, bool audible) noexcept {
+// Handles the input of one block: monitoring (input added to the output) and recording (input
+// copied to the ring buffer together with its place on the timeline).
+void Engine::process_input(const float* in, float* out, std::uint32_t frames) noexcept {
+    if (in == nullptr) {
+        return;
+    }
+    const std::size_t channels = channels_;
+    std::uint64_t dropped = 0;
+
+    for (std::uint32_t i = 0; i < frames; ++i) {
+        const float* src = in + static_cast<std::size_t>(i) * channels;
+
+        smooth(monitor_gain_, monitoring_ ? monitor_volume_ : 0.0f, gain_coef_);
+        if (monitor_gain_ > 0.0f) {
+            float* dst = out + static_cast<std::size_t>(i) * channels;
+            for (std::size_t c = 0; c < channels; ++c) {
+                dst[c] += src[c] * monitor_gain_;
+            }
+        }
+
+        if (!record_armed_) {
+            continue;
+        }
+        const std::int64_t position = frame_pos_[i];
+        if (!record_active_) {
+            if (position < 0 || reverse_) {
+                continue;  // waiting for playback to run forwards
+            }
+            record_active_ = true;
+            record_next_ = position;
+            record_start_.store(position, std::memory_order_relaxed);
+        }
+        if (position != record_next_) {
+            // Playback stopped, jumped or turned around: the take ends here.
+            record_armed_ = false;
+            record_active_ = false;
+            continue;
+        }
+        if (recorded_.write(src, channels) != channels) {
+            ++dropped;  // the control thread did not fetch the data in time
+        }
+        ++record_next_;
+    }
+
+    if (dropped != 0) {
+        record_dropped_.store(record_dropped_.load(std::memory_order_relaxed) + dropped,
+                              std::memory_order_relaxed);
+    }
+}
+
+void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
+                       bool audible) noexcept {
     const std::size_t channels = channels_;
     const std::size_t samples = static_cast<std::size_t>(frames) * channels;
     const bool stereo = channels == 2;
@@ -612,6 +706,7 @@ void Engine::mix_block(float* out, std::uint32_t frames, bool audible) noexcept 
         }
         master_meter_ = decayed_meter(master_meter_, decay, 0.0f);
         master_peak_.store(master_meter_, std::memory_order_relaxed);
+        process_input(in, out, frames);
         return;
     }
 
@@ -770,9 +865,10 @@ void Engine::mix_block(float* out, std::uint32_t frames, bool audible) noexcept 
         master_clips_.store(master_clips_.load(std::memory_order_relaxed) + clips,
                             std::memory_order_relaxed);
     }
+    process_input(in, out, frames);
 }
 
-void Engine::render(float* out, std::uint32_t frames) noexcept {
+void Engine::render(const float* in, float* out, std::uint32_t frames) noexcept {
     Command command;
     while (commands_.try_pop(command)) {
         apply(command);
@@ -783,8 +879,9 @@ void Engine::render(float* out, std::uint32_t frames) noexcept {
     const bool looping = loop_region(loop_start, loop_end);
     const std::int64_t begin_pos = looping ? loop_start : 0;
     std::int64_t end_pos = looping ? loop_end : project_frames_;
-    if (project_frames_ <= 0 && metronome_enabled_) {
-        end_pos = std::numeric_limits<std::int64_t>::max();  // nothing loaded: run until stopped
+    if (record_armed_ || (project_frames_ <= 0 && metronome_enabled_)) {
+        // Recording, or nothing loaded but the metronome is on: run until stopped.
+        end_pos = std::numeric_limits<std::int64_t>::max();
     }
 
     // Work through the request in blocks that fit the preallocated buffers.
@@ -792,13 +889,15 @@ void Engine::render(float* out, std::uint32_t frames) noexcept {
     while (done < frames) {
         const std::uint32_t count = std::min(frames - done, kBlockFrames);
         const bool audible = run_transport(count, begin_pos, end_pos, looping);
-        mix_block(out + static_cast<std::size_t>(done) * channels_, count, audible);
+        const std::size_t offset = static_cast<std::size_t>(done) * channels_;
+        mix_block(in != nullptr ? in + offset : nullptr, out + offset, count, audible);
         done += count;
     }
 
     published_position_.store(pos_, std::memory_order_relaxed);
     published_length_.store(project_frames_, std::memory_order_relaxed);
     published_playing_.store(state_ != State::Stopped, std::memory_order_relaxed);
+    published_recording_.store(record_armed_, std::memory_order_relaxed);
 }
 
 }  // namespace toh::core

@@ -32,6 +32,11 @@ A short record of technical decisions: what was chosen, why, and who decided. De
 | 26 | Region fades are linear | Predictable; other curves come with the fade editor | Default |
 | 27 | The grid comes from the metronome settings (one tempo and time signature for the whole project); edits snap to bars, beats, half or quarter beats, and Alt switches snapping off while dragging | A tempo map is stage 8 | Default |
 | 28 | Reverse playback is a transport direction, not a region effect; the metronome is generated from the timeline position | Both stay in step through seeks and loops | Default |
+| 29 | The input device is opened only when the user asks for it (Record, or the recording settings), together with the output as one duplex stream | The microphone is not touched before it is needed; one stream keeps input and output in step | Default |
+| 30 | The audio thread copies the input to a lock-free ring buffer (about 4 s); the session collects it on the UI thread and turns the finished take into a clip and a region | No allocation or file access on the audio thread; takes are kept in memory until projects can be saved (stage 5) | Default |
+| 31 | A take is one unbroken forward run: it ends when playback stops, pauses, jumps or turns around. While recording, playback does not stop at the end of the project | Keeps every recorded frame at a known place on the timeline | Default |
+| 32 | A take is placed earlier by a "latency correction" (default: two audio buffers; adjustable). The sound card does not report its true delay, so the default is an estimate | Recordings must line up with what was heard; exact calibration needs a loopback measurement, planned later | Default |
+| 33 | Export renders the project with a second, offline engine: 16-bit, 24-bit or 32-bit float WAV, without the metronome and the monitored input, without dither | Playback is not disturbed and the file equals what the mixer produces; dither comes with mastering features | Default |
 
 ## Open decisions
 

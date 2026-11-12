@@ -71,7 +71,7 @@ std::uint32_t to_number(const Path& argument) {
     return value;
 }
 
-void render_callback(void* user_data, float* out, std::uint32_t frames) {
+void render_callback(void* user_data, const float* /*in*/, float* out, std::uint32_t frames) {
     static_cast<Engine*>(user_data)->render(out, frames);
 }
 

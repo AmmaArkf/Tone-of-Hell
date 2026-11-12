@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "toh/audio/audio_device.h"
+#include "toh/audio/wav_writer.h"
 #include "toh/core/clip.h"
 #include "toh/core/engine.h"
 
@@ -143,6 +144,46 @@ public:
     /// The nearest grid position when snapping is on; otherwise `frame` itself.
     std::int64_t snap_frame(std::int64_t frame) const noexcept;
 
+    // ---- Recording -----------------------------------------------------------------------
+
+    /// Used as the track argument of start_recording() to record onto a new track.
+    static constexpr std::size_t kNewTrack = static_cast<std::size_t>(-1);
+
+    /// Opens or closes the input device (microphone or line input). The sound device is
+    /// restarted, which interrupts playback for a moment. Returns false if no input could be
+    /// opened; `error` (if given) says why.
+    bool set_input_enabled(bool enabled, std::string* error = nullptr);
+    bool input_enabled() const noexcept { return device_.has_input(); }
+
+    /// Lets you hear the input through the output. Beware of feedback with loudspeakers.
+    bool monitoring() const noexcept { return monitoring_; }
+    void set_monitoring(bool enabled);
+
+    /// How much earlier than it arrived a recording is placed on the timeline, in frames. It
+    /// makes up for the time sound needs to pass through the sound card (output plus input).
+    std::int64_t record_offset_frames() const noexcept { return record_offset_; }
+    void set_record_offset_frames(std::int64_t frames) noexcept;
+
+    /// Starts playback and records the input onto `track` (or a new track). The take ends
+    /// with stop_recording(), or when playback stops, pauses or jumps; it then appears as a
+    /// region. Returns false if a recording is already running or no track is available.
+    bool start_recording(std::size_t track = kNewTrack);
+    /// Ends the take and pauses playback. The region appears after the next update().
+    void stop_recording();
+    bool is_recording() const noexcept { return recording_; }
+    /// The track being recorded onto (only meaningful while is_recording()).
+    std::size_t record_track() const noexcept { return record_track_; }
+    /// Length of the running take so far, in frames.
+    std::int64_t recorded_frames() const noexcept;
+
+    // ---- Export --------------------------------------------------------------------------
+
+    /// Writes the whole project to a WAV file as it sounds (faders, pan, mute, solo and the
+    /// master fader included; the metronome and the monitored input are not). Playback is not
+    /// disturbed. This call blocks until the file is written.
+    bool export_wav(const std::filesystem::path& path, audio::SampleFormat format,
+                    std::string* error = nullptr) const;
+
     // ---- Master --------------------------------------------------------------------------
 
     float master_gain() const noexcept { return master_gain_; }
@@ -183,6 +224,8 @@ private:
     void sync_track_regions(std::size_t index);
     void sync_engine_tracks(std::size_t first);
     void update_length();
+    void drain_recording();
+    void finish_take();
 
     audio::DeviceConfig config_;
     core::Engine engine_;
@@ -195,6 +238,16 @@ private:
     GridStep grid_step_ = GridStep::Beat;
     MetronomeSettings metronome_;
     std::int64_t length_frames_ = 0;
+
+    bool monitoring_ = false;
+    bool recording_ = false;
+    bool record_seen_ = false;     // the engine has confirmed that it is recording
+    bool stop_requested_ = false;
+    std::size_t record_track_ = kNewTrack;
+    std::int64_t record_offset_ = 0;
+    std::vector<float> take_;          // the input recorded so far
+    std::vector<float> drain_buffer_;
+    int take_count_ = 0;
 };
 
 }  // namespace toh::app

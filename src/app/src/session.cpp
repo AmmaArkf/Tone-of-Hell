@@ -15,8 +15,25 @@ void set_error(std::string* error, const std::string& message) {
     }
 }
 
-void render_callback(void* user_data, float* out, std::uint32_t frames) {
-    static_cast<core::Engine*>(user_data)->render(out, frames);
+void render_callback(void* user_data, const float* in, float* out, std::uint32_t frames) {
+    static_cast<core::Engine*>(user_data)->render(in, out, frames);
+}
+
+// The regions of a track in the form the engine wants.
+std::vector<core::Region> engine_regions(const TrackInfo& track) {
+    std::vector<core::Region> regions;
+    regions.reserve(track.regions.size());
+    for (const RegionInfo& info : track.regions) {
+        core::Region region;
+        region.clip = info.source->clip;
+        region.start = info.start;
+        region.offset = info.offset;
+        region.length = info.length;
+        region.fade_in = info.fade_in;
+        region.fade_out = info.fade_out;
+        regions.push_back(std::move(region));
+    }
+    return regions;
 }
 
 // Keeps the fades of a region inside its length.
@@ -111,7 +128,10 @@ bool Source::range(std::int64_t first_frame, std::int64_t last_frame, float& low
 // ---- Session -----------------------------------------------------------------------------
 
 Session::Session(const audio::DeviceConfig& config)
-    : config_(config), engine_(config.sample_rate, config.channels) {}
+    : config_(config),
+      engine_(config.sample_rate, config.channels),
+      // A first guess for the way through the sound card: one buffer out and one buffer in.
+      record_offset_(2 * static_cast<std::int64_t>(config.buffer_frames)) {}
 
 Session::~Session() {
     stop_audio();  // the audio callback must not run while the engine is destroyed
@@ -129,6 +149,15 @@ void Session::update() {
         engine_.render(nullptr, 0);
     }
     engine_.collect_retired();
+
+    if (recording_) {
+        drain_recording();
+        if (engine_.is_recording()) {
+            record_seen_ = true;
+        } else if (record_seen_ || stop_requested_) {
+            finish_take();  // the take has ended (stop button, pause, jump ...)
+        }
+    }
 }
 
 // ---- Tracks ------------------------------------------------------------------------------
@@ -181,6 +210,13 @@ bool Session::remove_track(std::size_t index) {
         return false;
     }
     tracks_.erase(tracks_.begin() + static_cast<std::ptrdiff_t>(index));
+    if (recording_ && record_track_ != kNewTrack) {
+        if (index == record_track_) {
+            record_track_ = kNewTrack;  // its track is gone: the take will be dropped
+        } else if (index < record_track_) {
+            --record_track_;
+        }
+    }
     sync_engine_tracks(index);  // every later track moves up one slot
     update_length();
     return true;
@@ -366,6 +402,176 @@ bool Session::remove_region(std::size_t track, std::size_t region) {
     regions.erase(regions.begin() + static_cast<std::ptrdiff_t>(region));
     sync_track_regions(track);
     update_length();
+    return true;
+}
+
+// ---- Grid --------------------------------------------------------------------------------
+
+// ---- Recording ---------------------------------------------------------------------------
+
+bool Session::set_input_enabled(bool enabled, std::string* error) {
+    config_.capture = enabled;
+    if (!device_.running()) {
+        return true;  // takes effect when the audio is started
+    }
+    device_.stop();
+    if (!device_.start(config_, &render_callback, &engine_, error)) {
+        return false;
+    }
+    if (enabled && !device_.has_input()) {
+        config_.capture = false;
+        set_error(error, "no input device could be opened");
+        return false;
+    }
+    return true;
+}
+
+void Session::set_monitoring(bool enabled) {
+    if (engine_.set_monitoring(enabled, 1.0f)) {
+        monitoring_ = enabled;
+    }
+}
+
+void Session::set_record_offset_frames(std::int64_t frames) noexcept {
+    const auto limit = static_cast<std::int64_t>(config_.sample_rate);  // one second either way
+    record_offset_ = std::clamp(frames, -limit, limit);
+}
+
+std::int64_t Session::recorded_frames() const noexcept {
+    return static_cast<std::int64_t>(take_.size() / config_.channels);
+}
+
+bool Session::start_recording(std::size_t track) {
+    if (recording_) {
+        return false;
+    }
+    if (track >= tracks_.size()) {
+        if (tracks_.size() >= core::Engine::kMaxTracks) {
+            return false;
+        }
+        TrackInfo info;
+        info.name = "Recording " + std::to_string(tracks_.size() + 1);
+        tracks_.push_back(std::move(info));
+        sync_engine_tracks(tracks_.size() - 1);
+        track = tracks_.size() - 1;
+    }
+
+    take_.clear();
+    drain_recording();  // throw away input left over from an earlier take
+    take_.clear();
+
+    record_track_ = track;
+    record_seen_ = false;
+    stop_requested_ = false;
+    recording_ = true;
+    engine_.start_recording();
+    engine_.play();
+    return true;
+}
+
+void Session::stop_recording() {
+    if (!recording_) {
+        return;
+    }
+    engine_.stop_recording();
+    engine_.pause();
+    stop_requested_ = true;
+}
+
+// Moves the recorded input from the engine's ring buffer to `take_`.
+void Session::drain_recording() {
+    const std::size_t channels = config_.channels;
+    const std::size_t block = 4096;
+    drain_buffer_.resize(block * channels);
+    for (;;) {
+        const std::size_t frames = engine_.read_recorded(drain_buffer_.data(), block);
+        if (frames == 0) {
+            break;
+        }
+        take_.insert(take_.end(), drain_buffer_.begin(),
+                     drain_buffer_.begin() + static_cast<std::ptrdiff_t>(frames * channels));
+    }
+}
+
+// Turns the finished take into a region on the recorded track.
+void Session::finish_take() {
+    drain_recording();
+    recording_ = false;
+
+    const std::int64_t start = engine_.record_start_frame();
+    const std::size_t channels = config_.channels;
+    if (take_.size() < channels || start < 0 || record_track_ >= tracks_.size()) {
+        take_.clear();
+        return;  // nothing was recorded, or the track was removed meanwhile
+    }
+
+    auto clip = std::make_shared<core::ClipData>();
+    clip->channels = config_.channels;
+    clip->sample_rate = config_.sample_rate;
+    clip->samples = std::move(take_);
+    take_.clear();
+
+    auto source = std::make_shared<Source>();
+    source->name = "Take " + std::to_string(++take_count_);
+    source->overview = make_overview(*clip);
+    source->clip = std::move(clip);
+
+    RegionInfo region;
+    region.length = source->clip->frames();
+    region.source = std::move(source);
+    // Place the take earlier by the time the sound needed to pass through the sound card.
+    region.start = start - record_offset_;
+    if (region.start < 0) {
+        const std::int64_t cut = std::min(-region.start, region.length - 1);
+        region.offset = cut;
+        region.length -= cut;
+        region.start = 0;
+    }
+    tracks_[record_track_].regions.push_back(std::move(region));
+    sync_track_regions(record_track_);
+    update_length();
+}
+
+// ---- Export ------------------------------------------------------------------------------
+
+bool Session::export_wav(const std::filesystem::path& path, audio::SampleFormat format,
+                         std::string* error) const {
+    if (length_frames_ <= 0) {
+        set_error(error, "there is nothing to export");
+        return false;
+    }
+
+    // A second engine renders the same project offline, so playback is not disturbed.
+    const auto offline = std::make_unique<core::Engine>(config_.sample_rate, config_.channels);
+    for (std::size_t i = 0; i < tracks_.size(); ++i) {
+        const TrackInfo& track = tracks_[i];
+        const auto slot = static_cast<std::uint32_t>(i);
+        offline->set_track_regions(slot, engine_regions(track));
+        offline->set_track_gain(slot, track.gain);
+        offline->set_track_pan(slot, track.pan);
+        offline->set_track_mute(slot, track.mute);
+        offline->set_track_solo(slot, track.solo);
+    }
+    offline->set_gain(master_gain_);
+    offline->play(false);  // no fade-in: the file starts exactly like the project
+
+    audio::WavWriter writer;
+    if (!writer.open(path, config_.sample_rate, config_.channels, format, error)) {
+        return false;
+    }
+    const std::uint32_t block = 4096;
+    std::vector<float> buffer(static_cast<std::size_t>(block) * config_.channels);
+    std::int64_t remaining = length_frames_;
+    while (remaining > 0) {
+        const auto frames = static_cast<std::uint32_t>(std::min<std::int64_t>(remaining, block));
+        offline->render(buffer.data(), frames);
+        if (!writer.write(buffer.data(), frames)) {
+            set_error(error, "cannot write the file (is the disk full?)");
+            return false;
+        }
+        remaining -= frames;
+    }
+    writer.close();
     return true;
 }
 

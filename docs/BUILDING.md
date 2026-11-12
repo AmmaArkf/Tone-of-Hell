@@ -55,6 +55,10 @@ Editing on the timeline:
 
 The grid follows the tempo and the time signature of the metronome. "Reverse" plays backwards from the playhead.
 
+Recording: press "Record" (or `R`). The input device is opened the first time. The take goes onto the track whose `R` button is lit, or onto a new track. Press "Record" again, or "Stop", to finish. The "..." button next to it opens the recording settings: monitoring (hear the input; use headphones) and the latency correction, which moves takes earlier to make up for the delay of the sound card.
+
+Export: "File > Export audio" writes the whole project to a WAV file as it sounds, without the metronome.
+
 ### toh_player: the command-line test player
 
 `toh_player` plays a 440 Hz test tone, or the files given as arguments, one per track. Options: `--loop`, `--buffer <frames>` (default 256) and `--rate <hz>` (default 48000).

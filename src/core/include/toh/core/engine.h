@@ -8,6 +8,7 @@
 
 #include "toh/core/clip.h"
 #include "toh/core/spsc_queue.h"
+#include "toh/core/spsc_ring.h"
 
 namespace toh::core {
 
@@ -88,7 +89,9 @@ public:
     // ---- Transport (control thread) ------------------------------------------------------
 
     /// Starts playing, or resumes after a pause. Playing a finished project starts it again.
-    bool play();
+    /// With `fade_in` false the sound starts at full level at once (used for offline export,
+    /// where the short anti-click fade would alter the first milliseconds).
+    bool play(bool fade_in = true);
     /// Fades out and stops, keeping the position.
     bool pause();
     /// Fades out, stops and returns to the start.
@@ -108,6 +111,21 @@ public:
     /// metronome on, playback also runs when no clip is loaded.
     bool set_metronome(bool enabled, double bpm = 120.0, std::uint32_t beats_per_bar = 4,
                        std::uint32_t beat_unit = 4, float volume = 0.5f);
+
+    // ---- Input: monitoring and recording (control thread) -------------------------------
+
+    /// Mixes the input (microphone, instrument) into the output, after the master fader.
+    /// `gain` is linear, 0 to 8. Beware of feedback when loudspeakers are used.
+    bool set_monitoring(bool enabled, float gain = 1.0f);
+    /// Arms recording. A take begins with the next frame that plays forwards and ends when
+    /// playback stops, pauses, jumps or turns around, or with stop_recording(). While armed,
+    /// playback also runs without clips and does not stop at the end of the project.
+    bool start_recording();
+    bool stop_recording();
+    /// Fetches recorded input: up to `max_frames` interleaved frames are copied to
+    /// `destination`. Returns the number of frames copied. Call it regularly while recording
+    /// (the engine buffers about four seconds) and until it returns 0 afterwards.
+    std::size_t read_recorded(float* destination, std::size_t max_frames);
 
     /// Releases clips the audio thread no longer uses. Call it now and then from the control
     /// thread (for example after changing clips).
@@ -136,6 +154,20 @@ public:
         return master_clips_.load(std::memory_order_relaxed);
     }
 
+    /// True from start_recording() until the take has ended.
+    bool is_recording() const noexcept {
+        return published_recording_.load(std::memory_order_relaxed);
+    }
+    /// Timeline frame at which the current (or last) take began, or -1 if nothing was recorded
+    /// since start_recording().
+    std::int64_t record_start_frame() const noexcept {
+        return record_start_.load(std::memory_order_relaxed);
+    }
+    /// Input frames lost because read_recorded() was not called often enough.
+    std::uint64_t record_dropped_frames() const noexcept {
+        return record_dropped_.load(std::memory_order_relaxed);
+    }
+
     std::uint32_t sample_rate() const noexcept { return sample_rate_; }
     std::uint32_t channels() const noexcept { return channels_; }
     /// Length of the fades used to avoid clicks, in frames.
@@ -143,8 +175,10 @@ public:
 
     // ---- Audio thread --------------------------------------------------------------------
 
-    /// Fills `out` with `frames` interleaved frames (`channels()` samples each).
-    void render(float* out, std::uint32_t frames) noexcept;
+    /// Fills `out` with `frames` interleaved frames (`channels()` samples each). `in` holds
+    /// the same number of input frames in the same layout, or is null when there is no input.
+    void render(const float* in, float* out, std::uint32_t frames) noexcept;
+    void render(float* out, std::uint32_t frames) noexcept { render(nullptr, out, frames); }
 
 private:
     static constexpr std::uint32_t kBlockFrames = 512;  // internal processing block
@@ -171,7 +205,10 @@ private:
         Seek,
         SetLoop,
         SetReverse,
-        SetMetronome
+        SetMetronome,
+        SetMonitoring,
+        StartRecording,
+        StopRecording
     };
 
     // Messages from the control thread to the audio thread. Must stay trivially copyable.
@@ -225,7 +262,8 @@ private:
     bool run_transport(std::uint32_t frames, std::int64_t begin_pos, std::int64_t end_pos,
                        bool looping) noexcept;
     float metronome_sample(std::int64_t frame) const noexcept;
-    void mix_block(float* out, std::uint32_t frames, bool audible) noexcept;
+    void mix_block(const float* in, float* out, std::uint32_t frames, bool audible) noexcept;
+    void process_input(const float* in, float* out, std::uint32_t frames) noexcept;
 
     const std::uint32_t sample_rate_;
     const std::uint32_t channels_;
@@ -259,6 +297,13 @@ private:
     std::int64_t metronome_beats_per_bar_ = 4;
     float metronome_volume_ = 0.5f;
     float metronome_gain_ = 0.0f;  // smoothed; 0 while the metronome is off
+    bool monitoring_ = false;
+    float monitor_volume_ = 1.0f;
+    float monitor_gain_ = 0.0f;  // smoothed; 0 while monitoring is off
+    bool record_armed_ = false;   // between start_recording() and the end of the take
+    bool record_active_ = false;  // the take has begun
+    std::int64_t record_next_ = 0;  // timeline frame the next recorded frame must have
+    SpscRing recorded_;  // audio thread -> control thread
 
     // Work buffers, allocated once in the constructor.
     std::vector<std::int64_t> frame_pos_;  // timeline frame for every output frame, -1 = silence
@@ -275,6 +320,9 @@ private:
     std::array<std::atomic<float>, kMaxBuses> bus_peaks_{};
     std::atomic<float> master_peak_{0.0f};
     std::atomic<std::uint64_t> master_clips_{0};
+    std::atomic<bool> published_recording_{false};
+    std::atomic<std::int64_t> record_start_{-1};
+    std::atomic<std::uint64_t> record_dropped_{0};
 };
 
 }  // namespace toh::core
