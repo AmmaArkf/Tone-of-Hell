@@ -426,6 +426,25 @@ bool Session::set_input_enabled(bool enabled, std::string* error) {
     return true;
 }
 
+bool Session::set_devices(const std::string& output, const std::string& input,
+                          std::string* error) {
+    config_.output_name = output;
+    config_.input_name = input;
+    if (!device_.running()) {
+        return true;  // takes effect when the audio is started
+    }
+    device_.stop();
+    return device_.start(config_, &render_callback, &engine_, error);
+}
+
+bool Session::set_input_gain(float linear) {
+    if (!engine_.set_input_gain(linear)) {
+        return false;
+    }
+    input_gain_ = linear;
+    return true;
+}
+
 void Session::set_monitoring(bool enabled) {
     if (engine_.set_monitoring(enabled, 1.0f)) {
         monitoring_ = enabled;

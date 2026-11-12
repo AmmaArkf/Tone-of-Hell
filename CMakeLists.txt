@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 
 project(ToneOfHell
-        VERSION 0.0.4
+        VERSION 0.0.5
         DESCRIPTION "An open source digital audio workstation (DAW) in C++"
         LANGUAGES C CXX)
 
@@ -32,6 +32,10 @@ else()
     if(TOH_WARNINGS_AS_ERRORS)
         target_compile_options(toh_warnings INTERFACE -Werror)
     endif()
+endif()
+
+if(MSVC)
+    add_compile_options(/utf-8)  # the sources contain translated texts in UTF-8
 endif()
 
 find_package(Threads REQUIRED)

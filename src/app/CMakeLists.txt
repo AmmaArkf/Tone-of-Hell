@@ -1,6 +1,8 @@
 add_library(toh_app STATIC
     src/build_info.cpp
-    src/session.cpp)
+    src/i18n.cpp
+    src/session.cpp
+    src/settings.cpp)
 
 target_include_directories(toh_app PUBLIC include)
 target_link_libraries(toh_app

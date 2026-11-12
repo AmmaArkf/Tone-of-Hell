@@ -117,6 +117,9 @@ public:
     /// Mixes the input (microphone, instrument) into the output, after the master fader.
     /// `gain` is linear, 0 to 8. Beware of feedback when loudspeakers are used.
     bool set_monitoring(bool enabled, float gain = 1.0f);
+    /// Input gain ("sensitivity") as a linear factor between 0 and 8. It is applied to the
+    /// input before monitoring, recording and the input meter.
+    bool set_input_gain(float linear);
     /// Arms recording. A take begins with the next frame that plays forwards and ends when
     /// playback stops, pauses, jumps or turns around, or with stop_recording(). While armed,
     /// playback also runs without clips and does not stop at the end of the project.
@@ -153,6 +156,9 @@ public:
     std::uint64_t master_clip_count() const noexcept {
         return master_clips_.load(std::memory_order_relaxed);
     }
+
+    /// Peak level of the input after the input gain, falling back slowly. 1.0 is full scale.
+    float input_peak() const noexcept { return input_peak_.load(std::memory_order_relaxed); }
 
     /// True from start_recording() until the take has ended.
     bool is_recording() const noexcept {
@@ -207,6 +213,7 @@ private:
         SetReverse,
         SetMetronome,
         SetMonitoring,
+        SetInputGain,
         StartRecording,
         StopRecording
     };
@@ -300,6 +307,10 @@ private:
     bool monitoring_ = false;
     float monitor_volume_ = 1.0f;
     float monitor_gain_ = 0.0f;  // smoothed; 0 while monitoring is off
+    float input_gain_target_ = 1.0f;
+    float input_gain_ = 1.0f;  // smoothed
+    float input_meter_ = 0.0f;
+    std::vector<float> input_frame_;  // one input frame after the input gain
     bool record_armed_ = false;   // between start_recording() and the end of the take
     bool record_active_ = false;  // the take has begun
     std::int64_t record_next_ = 0;  // timeline frame the next recorded frame must have
@@ -321,6 +332,7 @@ private:
     std::atomic<float> master_peak_{0.0f};
     std::atomic<std::uint64_t> master_clips_{0};
     std::atomic<bool> published_recording_{false};
+    std::atomic<float> input_peak_{0.0f};
     std::atomic<std::int64_t> record_start_{-1};
     std::atomic<std::uint64_t> record_dropped_{0};
 };

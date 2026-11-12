@@ -38,6 +38,11 @@ A short record of technical decisions: what was chosen, why, and who decided. De
 | 32 | A take is placed earlier by a "latency correction" (default: two audio buffers; adjustable). The sound card does not report its true delay, so the default is an estimate | Recordings must line up with what was heard; exact calibration needs a loopback measurement, planned later | Default |
 | 33 | Export renders the project with a second, offline engine: 16-bit, 24-bit or 32-bit float WAV, without the metronome and the monitored input, without dither | Playback is not disturbed and the file equals what the mixer produces; dither comes with mastering features | Default |
 | 34 | Version numbers are `release.prerelease.change`: the third number goes up with every committed change, the second with every pre-release, the first with every full release (see `docs/VERSIONING.md`) | Owner's rule; every build can be told apart | Owner |
+| 35 | Translations are a table in `toh_app` keyed by the English text; texts without a translation stay English. The interface language can be English or Russian | Shared by every user interface; a missing translation never breaks the interface | Default |
+| 36 | Settings are a plain text file (`key=value`) in the per-user application data folder; unknown lines are ignored | Readable and editable by hand; old and new versions can read each other's files | Default |
+| 37 | Keyboard shortcuts are configurable actions; one key belongs to at most one action. Keyboard navigation of widgets is off so that keys always reach the shortcuts | Owner's request | Owner |
+| 38 | Input sensitivity is a gain on the input before monitoring, recording and the input meter. It does not change the sound card's own input level | The program cannot reliably control every sound card's hardware gain | Default |
+| 39 | GPU acceleration of effects is shown as planned but not offered until effects exist (stage 9) | A switch that does nothing would mislead | Default |
 
 ## Open decisions
 

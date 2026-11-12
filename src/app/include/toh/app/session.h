@@ -155,6 +155,20 @@ public:
     bool set_input_enabled(bool enabled, std::string* error = nullptr);
     bool input_enabled() const noexcept { return device_.has_input(); }
 
+    /// The devices in use, by name; an empty name means the system default.
+    const std::string& output_device() const noexcept { return config_.output_name; }
+    const std::string& input_device() const noexcept { return config_.input_name; }
+    /// Chooses the devices (names from audio::list_devices(); empty for the system default).
+    /// If the audio is running it is restarted, which interrupts playback for a moment.
+    bool set_devices(const std::string& output, const std::string& input,
+                     std::string* error = nullptr);
+
+    /// Input gain ("sensitivity"), linear, 0 to 8. Applied before monitoring and recording.
+    float input_gain() const noexcept { return input_gain_; }
+    bool set_input_gain(float linear);
+    /// Peak level of the input after the input gain (0 when no input is open).
+    float input_peak() const noexcept { return device_.has_input() ? engine_.input_peak() : 0.0f; }
+
     /// Lets you hear the input through the output. Beware of feedback with loudspeakers.
     bool monitoring() const noexcept { return monitoring_; }
     void set_monitoring(bool enabled);
@@ -240,6 +254,7 @@ private:
     std::int64_t length_frames_ = 0;
 
     bool monitoring_ = false;
+    float input_gain_ = 1.0f;
     bool recording_ = false;
     bool record_seen_ = false;     // the engine has confirmed that it is recording
     bool stop_requested_ = false;

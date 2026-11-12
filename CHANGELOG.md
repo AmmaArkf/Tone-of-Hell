@@ -2,6 +2,15 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.5
+
+- A settings window (Edit > Settings) with three tabs:
+  - General: the interface language, English or Russian.
+  - Audio: choice of the output and input devices, output volume, input sensitivity and an input level meter.
+  - Shortcuts: every keyboard shortcut can be changed or removed, and all can be reset to the defaults. Menus show the current shortcuts.
+- Settings are remembered between runs in a settings file in the user's application data folder.
+- New default shortcuts: L for loop, K for the metronome, F to show the whole project.
+
 ## 0.0.4
 
 - The version number now changes with every change, and this changelog records what each version brought.

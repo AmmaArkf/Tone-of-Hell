@@ -57,6 +57,8 @@ The grid follows the tempo and the time signature of the metronome. "Reverse" pl
 
 Recording: press "Record" (or `R`). The input device is opened the first time. The take goes onto the track whose `R` button is lit, or onto a new track. Press "Record" again, or "Stop", to finish. The "..." button next to it opens the recording settings: monitoring (hear the input; use headphones) and the latency correction, which moves takes earlier to make up for the delay of the sound card.
 
+Settings: "Edit > Settings" chooses the language, the sound devices, the output volume and the input sensitivity, and lets you change every keyboard shortcut. "Help > Keyboard and mouse" lists the shortcuts as they are set.
+
 Export: "File > Export audio" writes the whole project to a WAV file as it sounds, without the metronome.
 
 ### toh_player: the command-line test player

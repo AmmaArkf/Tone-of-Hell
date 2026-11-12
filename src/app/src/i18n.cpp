@@ -1,0 +1,263 @@
+#include "toh/app/i18n.h"
+
+#include <string_view>
+#include <unordered_map>
+
+namespace toh::app {
+namespace {
+
+Language current_language = Language::English;
+
+struct Entry {
+    const char* english;
+    const char* russian;
+};
+
+// Russian translations. Keep format specifiers (%d, %s, %.0f%% ...) and "##id" suffixes exactly
+// as in the English text.
+const Entry kRussian[] = {
+    // Menus
+    {"File", "Файл"},
+    {"Add audio files...", "Добавить аудиофайлы..."},
+    {"Save project (planned for stage 5)", "Сохранить проект (планируется на этапе 5)"},
+    {"Export audio", "Экспорт аудио"},
+    {"WAV, 16-bit...", "WAV, 16 бит..."},
+    {"WAV, 24-bit (recommended)...", "WAV, 24 бита (рекомендуется)..."},
+    {"WAV, 32-bit float...", "WAV, 32 бита с плавающей точкой..."},
+    {"Exit", "Выход"},
+    {"Edit", "Правка"},
+    {"Undo (planned for stage 5)", "Отменить (планируется на этапе 5)"},
+    {"Split at the playhead", "Разрезать по линии воспроизведения"},
+    {"Remove fades", "Убрать фейды"},
+    {"Remove the selected region", "Удалить выбранный регион"},
+    {"Remove the region", "Удалить регион"},
+    {"Deselect", "Снять выделение"},
+    {"Settings...", "Настройки..."},
+    {"View", "Вид"},
+    {"Zoom in", "Приблизить"},
+    {"Zoom out", "Отдалить"},
+    {"Show the whole project", "Показать весь проект"},
+    {"Follow the playhead", "Следовать за линией воспроизведения"},
+    {"Snap to the grid", "Привязка к сетке"},
+    {"Grid step", "Шаг сетки"},
+    {"Bars", "Такты"},
+    {"Beats", "Доли"},
+    {"1/2 beats", "1/2 доли"},
+    {"1/4 beats", "1/4 доли"},
+    {"None (hide the grid)", "Нет (скрыть сетку)"},
+    {"Transport", "Транспорт"},
+    {"Play", "Играть"},
+    {"Pause", "Пауза"},
+    {"Stop", "Стоп"},
+    {"Record", "Запись"},
+    {"Stop recording", "Остановить запись"},
+    {"Back to the start", "В начало"},
+    {"Reverse", "Реверс"},
+    {"Loop", "Цикл"},
+    {"Metronome", "Метроном"},
+    {"Monitor the input", "Слушать вход"},
+    {"Help", "Справка"},
+    {"Keyboard and mouse...", "Клавиши и мышь..."},
+    {"About Tone of Hell...", "О программе Tone of Hell..."},
+    {"Mouse wheel", "Колесо мыши"},
+
+    // Toolbar
+    {"Record##record", "Запись##record"},
+    {"Recording##record", "Идёт запись##record"},
+    {"Add files...", "Добавить файлы..."},
+    {"Snap to", "Привязка к"},
+    {"bars", "тактам"},
+    {"beats", "долям"},
+    {"1/2 beats", "1/2 доли"},
+    {"1/4 beats", "1/4 доли"},
+    {"none (no grid)", "нет (без сетки)"},
+    {"Fit", "Весь"},
+    {"Follow", "Следовать"},
+    {"CLIP", "ПЕРЕГРУЗ"},
+    {"Dismiss", "Скрыть"},
+    {"OK##notice", "ОК##notice"},
+    {"Master: %.0f%%", "Мастер: %.0f%%"},
+    {"Volume: %.0f%%", "Громкость: %.0f%%"},
+    {"Pan: centre", "Панорама: центр"},
+    {"Pan: %d%%%% %s", "Панорама: %d%%%% %s"},
+    {"left", "влево"},
+    {"right", "вправо"},
+    {"No audio device: playback is silent.", "Нет звукового устройства: воспроизведение беззвучно."},
+    {"Play backwards from the playhead. Press again to play forwards.",
+     "Играть назад от линии воспроизведения. Нажмите ещё раз, чтобы играть вперёд."},
+    {"Click on every beat while playing. Also plays when no file is loaded.",
+     "Щелчок на каждую долю во время игры. Работает и без загруженных файлов."},
+    {"Tempo of the metronome and the grid. Drag, or double-click to type a value.",
+     "Темп метронома и сетки. Тяните мышью или дважды кликните, чтобы ввести число."},
+    {"Metronome and time signature settings", "Настройки метронома и размера"},
+    {"Master volume. 100% leaves the mix unchanged. Ctrl+click to type a value.",
+     "Громкость мастера. 100% не меняет микс. Ctrl+клик, чтобы ввести число."},
+    {"The mix went above full scale. Lower the faders. Click to reset.",
+     "Микс превысил полную шкалу. Убавьте громкость. Клик сбрасывает индикатор."},
+    {"Every file becomes a new track. You can also drop files onto the window.",
+     "Каждый файл становится новой дорожкой. Файлы можно и перетащить в окно."},
+    {"Moved and trimmed regions jump to the grid. Hold Alt while dragging to switch it off.",
+     "Регионы при перемещении и обрезке прилипают к сетке. Alt при перетаскивании отключает это."},
+    {"Zoom out (Ctrl + mouse wheel)", "Отдалить (Ctrl + колесо мыши)"},
+    {"Zoom in (Ctrl + mouse wheel)", "Приблизить (Ctrl + колесо мыши)"},
+    {"Keep the playhead in view while playing", "Держать линию воспроизведения в кадре во время игры"},
+    {"Recording settings: input, monitoring, latency correction",
+     "Настройки записи: вход, мониторинг, поправка на задержку"},
+    {"Record the input onto the armed track (the R button of a track) or, when no track\n"
+     "is armed, onto a new one. Press again, or Stop, to finish.",
+     "Записать вход на дорожку с включённой кнопкой R или, если такой нет,\n"
+     "на новую дорожку. Нажмите ещё раз или Стоп, чтобы закончить."},
+    {"Drag a region to move it and its left or right edge to trim it.\n"
+     "Drag the small squares in its top corners to make fades.\n"
+     "Right-click a region for a menu. Ctrl + wheel zooms, Shift + wheel scrolls.\n"
+     "All keyboard shortcuts are listed in Help and can be changed in Edit > Settings.",
+     "Тяните регион, чтобы переместить его, а левый или правый край, чтобы обрезать.\n"
+     "Тяните квадратики в верхних углах, чтобы сделать фейды.\n"
+     "Правый клик по региону открывает меню. Ctrl + колесо: масштаб, Shift + колесо: прокрутка.\n"
+     "Все горячие клавиши перечислены в Справке и меняются в Правка > Настройки."},
+
+    // Metronome popup
+    {"Metronome and grid", "Метроном и сетка"},
+    {"Beats per bar", "Долей в такте"},
+    {"Beat unit", "Длительность доли"},
+    {"Time signature: %d/%d. The first beat of a bar sounds higher.",
+     "Размер: %d/%d. Первая доля такта звучит выше."},
+    {"Click volume: %.0f%%", "Громкость щелчка: %.0f%%"},
+    {"Tap tempo", "Настучать темп"},
+    {"Click in time with the music", "Нажимайте в ритм музыки"},
+
+    // Recording settings
+    {"Recording", "Запись"},
+    {"Input device open", "Устройство ввода открыто"},
+    {"It is opened automatically when you press Record.",
+     "Оно открывается автоматически при нажатии «Запись»."},
+    {"Monitor: hear the input", "Мониторинг: слышать вход"},
+    {"Use headphones: with loudspeakers the microphone hears itself.",
+     "Используйте наушники: с колонками микрофон слышит сам себя."},
+    {"Latency correction, ms", "Поправка на задержку, мс"},
+    {"A take is placed this much earlier, to make up for the delay of the\n"
+     "sound card. Raise it if recordings sound late, lower it if early.",
+     "Дубль ставится на столько раньше, чтобы скомпенсировать задержку\n"
+     "звуковой карты. Увеличьте, если записи опаздывают; уменьшите, если спешат."},
+
+    // Tracks and regions
+    {"Mute", "Заглушить"},
+    {"Solo", "Соло"},
+    {"Arm for recording: the next take goes onto this track",
+     "Готовность к записи: следующий дубль ляжет на эту дорожку"},
+    {"Remove the track", "Удалить дорожку"},
+    {"Remove track %d?", "Удалить дорожку %d?"},
+    {"Remove", "Удалить"},
+    {"Cancel", "Отмена"},
+    {"Drop audio files here (WAV, FLAC, MP3) or press \"Add files...\".",
+     "Перетащите сюда аудиофайлы (WAV, FLAC, MP3) или нажмите «Добавить файлы...»."},
+    {"Drag to move along the timeline", "Тяните, чтобы двигаться по таймлайну"},
+    {"Level meter: %.1f dB", "Индикатор уровня: %.1f дБ"},
+    {"Level meter (silent). The marks are at -48, -36, -24, -12 and -6 dB.",
+     "Индикатор уровня (тишина). Деления: -48, -36, -24, -12 и -6 дБ."},
+
+    // Status bar
+    {"REC %s", "ЗАПИСЬ %s"},
+    {"Tracks: %d   Regions: %d   Length: %s", "Дорожек: %d   Регионов: %d   Длина: %s"},
+    {"Audio: %s, %u Hz, buffer %u (%.1f ms)", "Звук: %s, %u Гц, буфер %u (%.1f мс)"},
+    {"on", "вкл"},
+    {"off", "выкл"},
+    {"Zoom: %.0f px/s   %.0f fps", "Масштаб: %.0f пикс/с   %.0f кадр/с"},
+    {"Selected: track %d, %s - %s", "Выбрано: дорожка %d, %s - %s"},
+    {"Build %s (%s, %s)", "Сборка %s (%s, %s)"},
+
+    // Help and About
+    {"Keyboard and mouse", "Клавиши и мышь"},
+    {"About Tone of Hell", "О программе Tone of Hell"},
+    {"Zoom the timeline (when no region is selected)", "Масштаб таймлайна (когда регион не выбран)"},
+    {"Zoom the timeline (always)", "Масштаб таймлайна (всегда)"},
+    {"Scroll the timeline sideways", "Прокрутка таймлайна вбок"},
+    {"Scroll the track list up and down", "Прокрутка списка дорожек"},
+    {"Move it; drag an edge to trim it", "Переместить; тяните край, чтобы обрезать"},
+    {"Fade in or fade out", "Нарастание или затухание"},
+    {"Ignore the grid", "Не привязывать к сетке"},
+    {"Menu: split, remove fades, remove", "Меню: разрезать, убрать фейды, удалить"},
+    {"Move the playhead", "Переместить линию воспроизведения"},
+    {"Ctrl + wheel", "Ctrl + колесо"},
+    {"Shift + wheel", "Shift + колесо"},
+    {"Wheel, region selected", "Колесо, регион выбран"},
+    {"Drag a region", "Тянуть регион"},
+    {"Drag a top corner square", "Тянуть квадратик в верхнем углу"},
+    {"Alt while dragging", "Alt при перетаскивании"},
+    {"Right-click a region", "Правый клик по региону"},
+    {"Click the ruler or an empty lane", "Клик по линейке или пустой дорожке"},
+    {"An open source digital audio workstation.", "Цифровая звуковая рабочая станция с открытым кодом."},
+    {"Version %s, commit %s, built %s", "Версия %s, коммит %s, сборка от %s"},
+    {"Copyright (c) 2026 AmmaArk. MIT license.", "Copyright (c) 2026 AmmaArk. Лицензия MIT."},
+    {"Uses Dear ImGui (MIT), SDL (zlib) and miniaudio (public domain or MIT-0).",
+     "Использует Dear ImGui (MIT), SDL (zlib) и miniaudio (общественное достояние или MIT-0)."},
+
+    // Action names (shortcuts)
+    {"Play or pause", "Играть или пауза"},
+    {"Start or stop recording", "Начать или остановить запись"},
+    {"Play backwards or forwards", "Играть назад или вперёд"},
+    {"Loop on or off", "Включить или выключить цикл"},
+    {"Metronome on or off", "Включить или выключить метроном"},
+    {"Add audio files", "Добавить аудиофайлы"},
+
+    // Settings window
+    {"Settings", "Настройки"},
+    {"General", "Общие"},
+    {"Language", "Язык"},
+    {"Audio", "Звук"},
+    {"Output device", "Устройство вывода"},
+    {"Input device", "Устройство ввода"},
+    {"System default", "По умолчанию в системе"},
+    {"Output volume: %.0f%%", "Громкость вывода: %.0f%%"},
+    {"The same as the Master slider in the toolbar.", "То же, что ползунок «Мастер» на панели."},
+    {"Input sensitivity: %.0f%%", "Чувствительность входа: %.0f%%"},
+    {"Applied to the input before monitoring and recording.",
+     "Применяется ко входу до мониторинга и записи."},
+    {"Input level", "Уровень входа"},
+    {"Open the input to see its level", "Откройте вход, чтобы видеть уровень"},
+    {"Refresh the device list", "Обновить список устройств"},
+    {"Shortcuts", "Горячие клавиши"},
+    {"Action", "Действие"},
+    {"Shortcut", "Клавиша"},
+    {"Change", "Изменить"},
+    {"Clear", "Убрать"},
+    {"Press a key...", "Нажмите клавишу..."},
+    {"none", "нет"},
+    {"Reset all shortcuts", "Сбросить все клавиши"},
+    {"Click \"Change\", then press the new key, with Ctrl, Shift or Alt if you like.",
+     "Нажмите «Изменить», затем новую клавишу, при желании с Ctrl, Shift или Alt."},
+    {"Performance", "Производительность"},
+    {"GPU acceleration for effects (planned together with effects)",
+     "Ускорение эффектов видеокартой (планируется вместе с эффектами)"},
+    {"The interface itself is already drawn by the graphics card.",
+     "Сам интерфейс уже рисуется видеокартой."},
+    {"Close", "Закрыть"},
+};
+
+const std::unordered_map<std::string_view, const char*>& russian_table() {
+    static const std::unordered_map<std::string_view, const char*> table = [] {
+        std::unordered_map<std::string_view, const char*> map;
+        for (const Entry& entry : kRussian) {
+            map.emplace(entry.english, entry.russian);
+        }
+        return map;
+    }();
+    return table;
+}
+
+}  // namespace
+
+void set_language(Language language) noexcept { current_language = language; }
+
+Language language() noexcept { return current_language; }
+
+const char* tr(const char* english) noexcept {
+    if (english == nullptr || current_language == Language::English) {
+        return english;
+    }
+    const auto& table = russian_table();
+    const auto found = table.find(std::string_view(english));
+    return found != table.end() ? found->second : english;
+}
+
+}  // namespace toh::app

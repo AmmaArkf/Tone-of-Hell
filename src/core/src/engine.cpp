@@ -54,6 +54,7 @@ Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
     frame_fade_.assign(kBlockFrames, 0.0f);
     master_mix_.assign(block_samples, 0.0f);
     track_mix_.assign(block_samples, 0.0f);
+    input_frame_.assign(channels_, 0.0f);
     bus_mix_.assign(block_samples * kMaxBuses, 0.0f);
 
     for (auto& peak : track_peaks_) {
@@ -291,6 +292,15 @@ bool Engine::set_monitoring(bool enabled, float gain) {
     return commands_.try_push(command);
 }
 
+bool Engine::set_input_gain(float linear) {
+    if (!valid_gain(linear)) {
+        return false;
+    }
+    Command command(CommandType::SetInputGain);
+    command.value = linear;
+    return commands_.try_push(command);
+}
+
 bool Engine::start_recording() { return commands_.try_push(Command(CommandType::StartRecording)); }
 
 bool Engine::stop_recording() { return commands_.try_push(Command(CommandType::StopRecording)); }
@@ -506,6 +516,10 @@ void Engine::apply(const Command& command) noexcept {
             monitor_volume_ = command.value;
             break;
 
+        case CommandType::SetInputGain:
+            input_gain_target_ = command.value;
+            break;
+
         case CommandType::StartRecording:
             if (!record_armed_) {
                 record_armed_ = true;
@@ -642,9 +656,17 @@ void Engine::process_input(const float* in, float* out, std::uint32_t frames) no
     }
     const std::size_t channels = channels_;
     std::uint64_t dropped = 0;
+    float peak = 0.0f;
 
     for (std::uint32_t i = 0; i < frames; ++i) {
-        const float* src = in + static_cast<std::size_t>(i) * channels;
+        // The input gain comes first: it affects monitoring, recording and the meter alike.
+        const float* raw = in + static_cast<std::size_t>(i) * channels;
+        smooth(input_gain_, input_gain_target_, gain_coef_);
+        float* src = input_frame_.data();
+        for (std::size_t c = 0; c < channels; ++c) {
+            src[c] = raw[c] * input_gain_;
+            peak = std::max(peak, std::fabs(src[c]));
+        }
 
         smooth(monitor_gain_, monitoring_ ? monitor_volume_ : 0.0f, gain_coef_);
         if (monitor_gain_ > 0.0f) {
@@ -677,6 +699,11 @@ void Engine::process_input(const float* in, float* out, std::uint32_t frames) no
         }
         ++record_next_;
     }
+
+    const float decay = static_cast<float>(std::exp(
+        -static_cast<double>(frames) / (kMeterReleaseSeconds * static_cast<double>(sample_rate_))));
+    input_meter_ = decayed_meter(input_meter_, decay, peak);
+    input_peak_.store(input_meter_, std::memory_order_relaxed);
 
     if (dropped != 0) {
         record_dropped_.store(record_dropped_.load(std::memory_order_relaxed) + dropped,

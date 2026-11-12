@@ -20,6 +20,8 @@
 #include "imgui_impl_sdlrenderer3.h"
 
 #include "toh/app/build_info.h"
+#include "toh/app/i18n.h"
+#include "toh/app/settings.h"
 #include "toh/app/session.h"
 #include "toh/core/clip.h"
 
@@ -29,6 +31,11 @@ using toh::app::GridStep;
 using toh::app::RegionInfo;
 using toh::app::Session;
 using toh::app::TrackInfo;
+using toh::app::Action;
+using toh::app::Settings;
+
+// Translates a text of the user interface into the chosen language.
+inline const char* T_(const char* english) { return toh::app::tr(english); }
 
 // ---- Files waiting to be loaded ----------------------------------------------------------
 
@@ -121,6 +128,14 @@ struct UiState {
 
     bool quit = false;             // "Exit" was chosen in the menu
     std::string notice;            // a short message after something succeeded
+
+    Settings settings;             // what is remembered between runs
+    std::filesystem::path settings_path;
+    bool settings_changed = false; // write the settings file soon
+    bool show_settings = false;
+    int capturing = -1;            // the action whose shortcut is being changed, or -1
+    toh::audio::DeviceList devices;
+    bool devices_listed = false;
     bool armed = false;            // a track is chosen to record onto
     std::size_t armed_track = 0;
     bool show_help = false;
@@ -199,9 +214,9 @@ void draw_meter(float peak, float width, float row_height) {
 
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
         if (peak > 0.001f) {
-            ImGui::SetTooltip("Level meter: %.1f dB", static_cast<double>(20.0f * std::log10(peak)));
+            ImGui::SetTooltip(T_("Level meter: %.1f dB"), static_cast<double>(20.0f * std::log10(peak)));
         } else {
-            ImGui::SetTooltip("Level meter (silent). The marks are at -48, -36, -24, -12 and -6 dB.");
+            ImGui::SetTooltip("%s", T_("Level meter (silent). The marks are at -48, -36, -24, -12 and -6 dB."));
         }
     }
 }
@@ -317,34 +332,35 @@ void toggle_recording(Session& session, UiState& ui) {
 
 void draw_record_settings(Session& session, UiState& ui) {
     const float font = ImGui::GetFontSize();
-    ImGui::TextUnformatted("Recording");
+    ImGui::TextUnformatted(T_("Recording"));
     ImGui::Separator();
 
     bool input = session.input_enabled();
-    if (ImGui::Checkbox("Input device open", &input)) {
+    if (ImGui::Checkbox(T_("Input device open"), &input)) {
         std::string error;
         if (!session.set_input_enabled(input, &error) && input) {
             ui.error = "Input: " + error;
         }
     }
-    ImGui::TextDisabled("It is opened automatically when you press Record.");
+    ImGui::TextDisabled("%s", T_("It is opened automatically when you press Record."));
 
     bool monitor = session.monitoring();
-    if (ImGui::Checkbox("Monitor: hear the input", &monitor)) {
+    if (ImGui::Checkbox(T_("Monitor: hear the input"), &monitor)) {
         session.set_monitoring(monitor);
     }
-    ImGui::TextDisabled("Use headphones: with loudspeakers the microphone hears itself.");
+    ImGui::TextDisabled("%s", T_("Use headphones: with loudspeakers the microphone hears itself."));
 
     const double rate = static_cast<double>(session.sample_rate());
     auto milliseconds =
         static_cast<float>(static_cast<double>(session.record_offset_frames()) * 1000.0 / rate);
     ImGui::SetNextItemWidth(8.0f * font);
-    if (ImGui::InputFloat("Latency correction, ms", &milliseconds, 1.0f, 10.0f, "%.1f")) {
+    if (ImGui::InputFloat(T_("Latency correction, ms"), &milliseconds, 1.0f, 10.0f, "%.1f")) {
         session.set_record_offset_frames(
             std::llround(static_cast<double>(milliseconds) * rate / 1000.0));
     }
-    ImGui::TextDisabled("A take is placed this much earlier, to make up for the delay of the\n"
-                        "sound card. Raise it if recordings sound late, lower it if early.");
+    ImGui::TextDisabled("%s",
+                        T_("A take is placed this much earlier, to make up for the delay of the\n"
+                           "sound card. Raise it if recordings sound late, lower it if early."));
 }
 
 void open_file_dialog(PendingFiles& pending, SDL_Window* window) {
@@ -353,79 +369,453 @@ void open_file_dialog(PendingFiles& pending, SDL_Window* window) {
     SDL_ShowOpenFileDialog(&file_dialog_callback, &pending, window, filters, 2, nullptr, true);
 }
 
+// ---- Shortcuts ---------------------------------------------------------------------------
+
+// A key with its modifiers. Shortcuts are stored as text such as "Ctrl+O" (see Settings).
+struct Chord {
+    ImGuiKey key = ImGuiKey_None;
+    bool ctrl = false;
+    bool shift = false;
+    bool alt = false;
+};
+
+Chord parse_chord(const std::string& text) {
+    Chord chord;
+    std::string rest = text;
+    for (;;) {
+        if (rest.rfind("Ctrl+", 0) == 0) {
+            chord.ctrl = true;
+            rest.erase(0, 5);
+        } else if (rest.rfind("Shift+", 0) == 0) {
+            chord.shift = true;
+            rest.erase(0, 6);
+        } else if (rest.rfind("Alt+", 0) == 0) {
+            chord.alt = true;
+            rest.erase(0, 4);
+        } else {
+            break;
+        }
+    }
+    if (rest.empty()) {
+        return Chord();
+    }
+    for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; ++k) {
+        const auto key = static_cast<ImGuiKey>(k);
+        if (rest == ImGui::GetKeyName(key)) {
+            chord.key = key;
+            return chord;
+        }
+    }
+    return Chord();  // an unknown key name: no shortcut
+}
+
+std::string chord_text(const Chord& chord) {
+    if (chord.key == ImGuiKey_None) {
+        return std::string();
+    }
+    std::string text;
+    if (chord.ctrl) {
+        text += "Ctrl+";
+    }
+    if (chord.shift) {
+        text += "Shift+";
+    }
+    if (chord.alt) {
+        text += "Alt+";
+    }
+    return text + ImGui::GetKeyName(chord.key);
+}
+
+bool chord_pressed(const Chord& chord) {
+    if (chord.key == ImGuiKey_None) {
+        return false;
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    return io.KeyCtrl == chord.ctrl && io.KeyShift == chord.shift && io.KeyAlt == chord.alt &&
+           ImGui::IsKeyPressed(chord.key, false);
+}
+
+// The shortcut of an action as text for menus, or null when it has none.
+const char* key_label(const UiState& ui, Action action) {
+    const std::string& text = ui.settings.shortcut(action);
+    return text.empty() ? nullptr : text.c_str();
+}
+
+// Waits for a key to be pressed (for the settings window). Modifier keys alone, mouse buttons
+// and game controllers do not count.
+bool capture_chord(Chord& chord) {
+    const ImGuiIO& io = ImGui::GetIO();
+    for (int k = ImGuiKey_NamedKey_BEGIN; k < ImGuiKey_NamedKey_END; ++k) {
+        const auto key = static_cast<ImGuiKey>(k);
+        const std::string name = ImGui::GetKeyName(key);
+        if (name.rfind("Mouse", 0) == 0 || name.rfind("Gamepad", 0) == 0 ||
+            name.find("Ctrl") != std::string::npos || name.find("Shift") != std::string::npos ||
+            name.find("Alt") != std::string::npos || name.find("Super") != std::string::npos ||
+            name.find("Mod") != std::string::npos) {
+            continue;
+        }
+        if (ImGui::IsKeyPressed(key, false)) {
+            chord.key = key;
+            chord.ctrl = io.KeyCtrl;
+            chord.shift = io.KeyShift;
+            chord.alt = io.KeyAlt;
+            return true;
+        }
+    }
+    return false;
+}
+
+void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Window* window,
+                    Action action) {
+    const float centre_x = ui.view.lane_origin_x + ui.view.lane_width * 0.5f;
+    switch (action) {
+        case Action::PlayPause:
+            session.toggle_play();
+            break;
+        case Action::Stop:
+            session.stop_recording();
+            session.stop();
+            break;
+        case Action::BackToStart:
+            session.seek_frames(0);
+            ui.view.start_seconds = 0.0;
+            break;
+        case Action::Record:
+            toggle_recording(session, ui);
+            break;
+        case Action::Reverse:
+            session.toggle_reverse();
+            break;
+        case Action::Loop:
+            session.set_loop(!session.loop());
+            break;
+        case Action::Metronome: {
+            toh::app::MetronomeSettings settings = session.metronome();
+            settings.enabled = !settings.enabled;
+            session.set_metronome(settings);
+            break;
+        }
+        case Action::Split:
+            split_at_playhead(session, ui);
+            break;
+        case Action::RemoveRegion:
+            remove_selected_region(session, ui);
+            break;
+        case Action::Deselect:
+            ui.selected = false;
+            break;
+        case Action::AddFiles:
+            open_file_dialog(pending, window);
+            break;
+        case Action::ZoomIn:
+            zoom_view(ui.view, 1.5, centre_x);
+            break;
+        case Action::ZoomOut:
+            zoom_view(ui.view, 1.0 / 1.5, centre_x);
+            break;
+        case Action::ZoomFit:
+            fit_view(session, ui.view);
+            break;
+        case Action::Count:
+            break;
+    }
+}
+
+// Runs the actions whose shortcuts were pressed. Does nothing while a text field has the
+// keyboard or while a new shortcut is being chosen.
+void handle_shortcuts(Session& session, UiState& ui, PendingFiles& pending, SDL_Window* window) {
+    if (ImGui::GetIO().WantTextInput || ui.capturing >= 0) {
+        return;
+    }
+    for (std::size_t i = 0; i < toh::app::kActionCount; ++i) {
+        const auto action = static_cast<Action>(i);
+        if (chord_pressed(parse_chord(ui.settings.shortcut(action)))) {
+            perform_action(session, ui, pending, window, action);
+        }
+    }
+}
+
+// ---- Settings ----------------------------------------------------------------------------
+
+void save_settings(const Session& session, UiState& ui) {
+    ui.settings.master_gain = session.master_gain();
+    ui.settings.input_gain = session.input_gain();
+    ui.settings.record_offset_frames = session.record_offset_frames();
+    ui.settings.output_device = session.output_device();
+    ui.settings.input_device = session.input_device();
+    if (!ui.settings_path.empty()) {
+        ui.settings.save(ui.settings_path);
+    }
+    ui.settings_changed = false;
+}
+
+// A text with a fixed identity for Dear ImGui, so that translating it does not reset widgets.
+std::string with_id(const char* text, const char* id) { return std::string(text) + "###" + id; }
+
+// A list to choose a device from. Returns true when the choice changed.
+bool device_combo(const char* label, const char* id, const std::vector<std::string>& names,
+                  std::string& chosen) {
+    bool changed = false;
+    const char* preview = chosen.empty() ? T_("System default") : chosen.c_str();
+    if (ImGui::BeginCombo(with_id(label, id).c_str(), preview)) {
+        if (ImGui::Selectable(T_("System default"), chosen.empty()) && !chosen.empty()) {
+            chosen.clear();
+            changed = true;
+        }
+        for (const std::string& name : names) {
+            if (ImGui::Selectable(name.c_str(), name == chosen) && name != chosen) {
+                chosen = name;
+                changed = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
+}
+
+void draw_settings_window(Session& session, UiState& ui) {
+    if (!ui.show_settings) {
+        ui.capturing = -1;
+        return;
+    }
+    const float font = ImGui::GetFontSize();
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(40.0f * font, 0.0f), ImGuiCond_Appearing);
+    if (ImGui::Begin(with_id(T_("Settings"), "settings").c_str(), &ui.show_settings,
+                     ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings) &&
+        ImGui::BeginTabBar("settings tabs")) {
+        // ---- General ----
+        if (ImGui::BeginTabItem(with_id(T_("General"), "general").c_str())) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(T_("Language"));
+            ImGui::SameLine();
+            int language = ui.settings.language == toh::app::Language::Russian ? 1 : 0;
+            bool language_changed = ImGui::RadioButton("English", &language, 0);
+            ImGui::SameLine();
+            language_changed = ImGui::RadioButton("\xD0\xA0\xD1\x83\xD1\x81\xD1\x81\xD0\xBA\xD0\xB8\xD0\xB9", &language, 1) || language_changed;
+            if (language_changed) {
+                ui.settings.language =
+                    language == 1 ? toh::app::Language::Russian : toh::app::Language::English;
+                toh::app::set_language(ui.settings.language);
+                ui.settings_changed = true;
+            }
+
+            ImGui::SeparatorText(T_("Performance"));
+            ImGui::BeginDisabled();
+            bool gpu = false;
+            ImGui::Checkbox(T_("GPU acceleration for effects (planned together with effects)"), &gpu);
+            ImGui::EndDisabled();
+            ImGui::TextDisabled("%s", T_("The interface itself is already drawn by the graphics card."));
+            ImGui::EndTabItem();
+        }
+
+        // ---- Audio ----
+        if (ImGui::BeginTabItem(with_id(T_("Audio"), "audio").c_str())) {
+            if (!ui.devices_listed) {
+                ui.devices = toh::audio::list_devices();
+                ui.devices_listed = true;
+            }
+            std::string output = session.output_device();
+            std::string input = session.input_device();
+            ImGui::SetNextItemWidth(24.0f * font);
+            bool devices_changed = device_combo(T_("Output device"), "output", ui.devices.outputs, output);
+            ImGui::SetNextItemWidth(24.0f * font);
+            devices_changed = device_combo(T_("Input device"), "input", ui.devices.inputs, input) || devices_changed;
+            if (devices_changed) {
+                std::string error;
+                if (!session.set_devices(output, input, &error)) {
+                    ui.error = error;
+                }
+                ui.settings_changed = true;
+            }
+            if (ImGui::Button(T_("Refresh the device list"))) {
+                ui.devices = toh::audio::list_devices();
+            }
+
+            ImGui::Spacing();
+            float volume = session.master_gain() * 100.0f;
+            ImGui::SetNextItemWidth(24.0f * font);
+            if (ImGui::SliderFloat("##output volume", &volume, 0.0f, 200.0f, T_("Output volume: %.0f%%"),
+                                   ImGuiSliderFlags_AlwaysClamp)) {
+                session.set_master_gain(volume / 100.0f);
+                ui.settings_changed = true;
+            }
+            ImGui::TextDisabled("%s", T_("The same as the Master slider in the toolbar."));
+
+            ImGui::Spacing();
+            float sensitivity = session.input_gain() * 100.0f;
+            ImGui::SetNextItemWidth(24.0f * font);
+            if (ImGui::SliderFloat("##input gain", &sensitivity, 0.0f, 400.0f,
+                                   T_("Input sensitivity: %.0f%%"), ImGuiSliderFlags_AlwaysClamp)) {
+                session.set_input_gain(sensitivity / 100.0f);
+                ui.settings_changed = true;
+            }
+            ImGui::TextDisabled("%s", T_("Applied to the input before monitoring and recording."));
+
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(T_("Input level"));
+            ImGui::SameLine();
+            draw_meter(session.input_peak(), 16.0f * font, ImGui::GetFrameHeight());
+            bool input_open = session.input_enabled();
+            if (ImGui::Checkbox(T_("Input device open"), &input_open)) {
+                std::string error;
+                if (!session.set_input_enabled(input_open, &error) && input_open) {
+                    ui.error = error;
+                }
+            }
+            if (!session.input_enabled()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", T_("Open the input to see its level"));
+            }
+            ImGui::EndTabItem();
+        }
+
+        // ---- Shortcuts ----
+        if (ImGui::BeginTabItem(with_id(T_("Shortcuts"), "shortcuts").c_str())) {
+            ImGui::TextDisabled("%s", T_("Click \"Change\", then press the new key, with Ctrl, Shift or Alt if you like."));
+            if (ImGui::BeginTable("shortcut table", 4,
+                                  ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
+                                      ImGuiTableFlags_SizingStretchProp)) {
+                ImGui::TableSetupColumn(T_("Action"), ImGuiTableColumnFlags_WidthStretch, 3.0f);
+                ImGui::TableSetupColumn(T_("Shortcut"), ImGuiTableColumnFlags_WidthStretch, 1.5f);
+                ImGui::TableSetupColumn("##change", ImGuiTableColumnFlags_WidthFixed);
+                ImGui::TableSetupColumn("##clear", ImGuiTableColumnFlags_WidthFixed);
+                ImGui::TableHeadersRow();
+                for (std::size_t i = 0; i < toh::app::kActionCount; ++i) {
+                    const auto action = static_cast<Action>(i);
+                    std::string& shortcut = ui.settings.shortcuts[i];
+                    ImGui::PushID(static_cast<int>(i));
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted(T_(toh::app::action_info(action).name));
+                    ImGui::TableNextColumn();
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextUnformatted(shortcut.empty() ? T_("none") : shortcut.c_str());
+
+                    ImGui::TableNextColumn();
+                    if (ui.capturing == static_cast<int>(i)) {
+                        Chord chord;
+                        if (capture_chord(chord)) {
+                            const std::string text = chord_text(chord);
+                            for (std::string& other : ui.settings.shortcuts) {
+                                if (other == text) {
+                                    other.clear();  // one key, one action
+                                }
+                            }
+                            shortcut = text;
+                            ui.capturing = -1;
+                            ui.settings_changed = true;
+                        }
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.75f, 0.45f, 0.15f, 1.0f));
+                        if (ImGui::Button(with_id(T_("Press a key..."), "change").c_str())) {
+                            ui.capturing = -1;  // clicking again cancels
+                        }
+                        ImGui::PopStyleColor();
+                    } else if (ImGui::Button(with_id(T_("Change"), "change").c_str())) {
+                        ui.capturing = static_cast<int>(i);
+                    }
+                    ImGui::TableNextColumn();
+                    if (ImGui::Button(with_id(T_("Clear"), "clear").c_str()) && !shortcut.empty()) {
+                        shortcut.clear();
+                        ui.settings_changed = true;
+                    }
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+            if (ImGui::Button(T_("Reset all shortcuts"))) {
+                ui.settings.reset_shortcuts();
+                ui.capturing = -1;
+                ui.settings_changed = true;
+            }
+            ImGui::EndTabItem();
+        } else {
+            ui.capturing = -1;
+        }
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
+}
+
 void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& exports,
                    SDL_Window* window, UiState& ui) {
     if (!ImGui::BeginMenuBar()) {
         return;
     }
 
-    if (ImGui::BeginMenu("File")) {
-        if (ImGui::MenuItem("Add audio files...", "Ctrl+O")) {
+    if (ImGui::BeginMenu(T_("File"))) {
+        if (ImGui::MenuItem(T_("Add audio files..."), key_label(ui, Action::AddFiles))) {
             open_file_dialog(pending, window);
         }
-        ImGui::MenuItem("Save project (planned for stage 5)", "Ctrl+S", false, false);
-        if (ImGui::BeginMenu("Export audio", session.length_frames() > 0)) {
-            if (ImGui::MenuItem("WAV, 16-bit...")) {
+        ImGui::MenuItem(T_("Save project (planned for stage 5)"), "Ctrl+S", false, false);
+        if (ImGui::BeginMenu(T_("Export audio"), session.length_frames() > 0)) {
+            if (ImGui::MenuItem(T_("WAV, 16-bit..."))) {
                 open_export_dialog(exports, window, toh::audio::SampleFormat::Int16);
             }
-            if (ImGui::MenuItem("WAV, 24-bit (recommended)...")) {
+            if (ImGui::MenuItem(T_("WAV, 24-bit (recommended)..."))) {
                 open_export_dialog(exports, window, toh::audio::SampleFormat::Int24);
             }
-            if (ImGui::MenuItem("WAV, 32-bit float...")) {
+            if (ImGui::MenuItem(T_("WAV, 32-bit float..."))) {
                 open_export_dialog(exports, window, toh::audio::SampleFormat::Float32);
             }
             ImGui::EndMenu();
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Exit", "Alt+F4")) {
+        if (ImGui::MenuItem(T_("Exit"), "Alt+F4")) {
             ui.quit = true;
         }
         ImGui::EndMenu();
     }
 
-    if (ImGui::BeginMenu("Edit")) {
+    if (ImGui::BeginMenu(T_("Edit"))) {
         const RegionInfo* region = selected_region(session, ui);
-        ImGui::MenuItem("Undo (planned for stage 5)", "Ctrl+Z", false, false);
+        ImGui::MenuItem(T_("Undo (planned for stage 5)"), "Ctrl+Z", false, false);
         ImGui::Separator();
-        if (ImGui::MenuItem("Split at the playhead", "S", false, !session.tracks().empty())) {
+        if (ImGui::MenuItem(T_("Split at the playhead"), key_label(ui, Action::Split), false, !session.tracks().empty())) {
             split_at_playhead(session, ui);
         }
-        if (ImGui::MenuItem("Remove fades", nullptr, false,
+        if (ImGui::MenuItem(T_("Remove fades"), nullptr, false,
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
         }
-        if (ImGui::MenuItem("Remove the selected region", "Delete", false, region != nullptr)) {
+        if (ImGui::MenuItem(T_("Remove the selected region"), key_label(ui, Action::RemoveRegion), false, region != nullptr)) {
             remove_selected_region(session, ui);
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Deselect", "Esc", false, ui.selected)) {
+        if (ImGui::MenuItem(T_("Deselect"), key_label(ui, Action::Deselect), false, ui.selected)) {
             ui.selected = false;
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem(T_("Settings..."))) {
+            ui.show_settings = true;
         }
         ImGui::EndMenu();
     }
 
-    if (ImGui::BeginMenu("View")) {
+    if (ImGui::BeginMenu(T_("View"))) {
         const float centre_x = ui.view.lane_origin_x + ui.view.lane_width * 0.5f;
-        if (ImGui::MenuItem("Zoom in", "Mouse wheel")) {
+        if (ImGui::MenuItem(T_("Zoom in"), key_label(ui, Action::ZoomIn))) {
             zoom_view(ui.view, 1.5, centre_x);
         }
-        if (ImGui::MenuItem("Zoom out", "Mouse wheel")) {
+        if (ImGui::MenuItem(T_("Zoom out"), key_label(ui, Action::ZoomOut))) {
             zoom_view(ui.view, 1.0 / 1.5, centre_x);
         }
-        if (ImGui::MenuItem("Show the whole project")) {
+        if (ImGui::MenuItem(T_("Show the whole project"), key_label(ui, Action::ZoomFit))) {
             fit_view(session, ui.view);
         }
         ImGui::Separator();
-        ImGui::MenuItem("Follow the playhead", nullptr, &ui.follow);
+        ImGui::MenuItem(T_("Follow the playhead"), nullptr, &ui.follow);
         bool snap = session.snap();
-        if (ImGui::MenuItem("Snap to the grid", nullptr, &snap)) {
+        if (ImGui::MenuItem(T_("Snap to the grid"), nullptr, &snap)) {
             session.set_snap(snap);
         }
-        if (ImGui::BeginMenu("Grid step")) {
+        if (ImGui::BeginMenu(T_("Grid step"))) {
             static const char* const names[] = {"Bars", "Beats", "1/2 beats", "1/4 beats",
                                                 "None (hide the grid)"};
             for (int i = 0; i < 5; ++i) {
-                if (ImGui::MenuItem(names[i], nullptr, static_cast<int>(session.grid_step()) == i)) {
+                if (ImGui::MenuItem(T_(names[i]), nullptr, static_cast<int>(session.grid_step()) == i)) {
                     session.set_grid_step(static_cast<GridStep>(i));
                 }
             }
@@ -434,44 +824,46 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         ImGui::EndMenu();
     }
 
-    if (ImGui::BeginMenu("Transport")) {
-        if (ImGui::MenuItem(session.is_playing() ? "Pause" : "Play", "Space")) {
+    if (ImGui::BeginMenu(T_("Transport"))) {
+        if (ImGui::MenuItem(T_(session.is_playing() ? "Pause" : "Play"),
+                            key_label(ui, Action::PlayPause))) {
             session.toggle_play();
         }
-        if (ImGui::MenuItem("Stop")) {
+        if (ImGui::MenuItem(T_("Stop"), key_label(ui, Action::Stop))) {
             session.stop_recording();
             session.stop();
         }
-        if (ImGui::MenuItem(session.is_recording() ? "Stop recording" : "Record", "R")) {
+        if (ImGui::MenuItem(T_(session.is_recording() ? "Stop recording" : "Record"),
+                            key_label(ui, Action::Record))) {
             toggle_recording(session, ui);
         }
-        if (ImGui::MenuItem("Back to the start", "Home")) {
+        if (ImGui::MenuItem(T_("Back to the start"), key_label(ui, Action::BackToStart))) {
             session.seek_frames(0);
             ui.view.start_seconds = 0.0;
         }
         ImGui::Separator();
-        if (ImGui::MenuItem("Reverse", nullptr, session.reverse())) {
+        if (ImGui::MenuItem(T_("Reverse"), key_label(ui, Action::Reverse), session.reverse())) {
             session.toggle_reverse();
         }
-        if (ImGui::MenuItem("Loop", nullptr, session.loop())) {
+        if (ImGui::MenuItem(T_("Loop"), key_label(ui, Action::Loop), session.loop())) {
             session.set_loop(!session.loop());
         }
-        if (ImGui::MenuItem("Metronome", nullptr, session.metronome().enabled)) {
+        if (ImGui::MenuItem(T_("Metronome"), key_label(ui, Action::Metronome), session.metronome().enabled)) {
             toh::app::MetronomeSettings settings = session.metronome();
             settings.enabled = !settings.enabled;
             session.set_metronome(settings);
         }
-        if (ImGui::MenuItem("Monitor the input", nullptr, session.monitoring())) {
+        if (ImGui::MenuItem(T_("Monitor the input"), nullptr, session.monitoring())) {
             session.set_monitoring(!session.monitoring());
         }
         ImGui::EndMenu();
     }
 
-    if (ImGui::BeginMenu("Help")) {
-        if (ImGui::MenuItem("Keyboard and mouse...")) {
+    if (ImGui::BeginMenu(T_("Help"))) {
+        if (ImGui::MenuItem(T_("Keyboard and mouse..."))) {
             ui.show_help = true;
         }
-        if (ImGui::MenuItem("About Tone of Hell...")) {
+        if (ImGui::MenuItem(T_("About Tone of Hell..."))) {
             ui.show_about = true;
         }
         ImGui::EndMenu();
@@ -488,15 +880,9 @@ void draw_dialogs(UiState& ui) {
 
     if (ui.show_help) {
         ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-        if (ImGui::Begin("Keyboard and mouse", &ui.show_help, flags)) {
+        if (ImGui::Begin((std::string(T_("Keyboard and mouse")) + "###help").c_str(), &ui.show_help,
+                         flags)) {
             static const char* const rows[][2] = {
-                {"Space", "Play or pause"},
-                {"Home", "Back to the start"},
-                {"S", "Cut the selected region at the playhead (or every region under it)"},
-                {"Delete", "Remove the selected region"},
-                {"Esc", "Deselect"},
-                {"Ctrl+O", "Add audio files"},
-                {"R", "Start or stop recording"},
                 {"Mouse wheel", "Zoom the timeline (when no region is selected)"},
                 {"Ctrl + wheel", "Zoom the timeline (always)"},
                 {"Shift + wheel", "Scroll the timeline sideways"},
@@ -508,12 +894,25 @@ void draw_dialogs(UiState& ui) {
                 {"Click the ruler or an empty lane", "Move the playhead"},
             };
             if (ImGui::BeginTable("shortcuts", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
+                // The keyboard shortcuts as they are set right now, then the fixed mouse actions.
+                for (std::size_t i = 0; i < toh::app::kActionCount; ++i) {
+                    const auto action = static_cast<Action>(i);
+                    const std::string& shortcut = ui.settings.shortcut(action);
+                    if (shortcut.empty()) {
+                        continue;
+                    }
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(shortcut.c_str());
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(T_(toh::app::action_info(action).name));
+                }
                 for (const auto& row : rows) {
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(row[0]);
+                    ImGui::TextUnformatted(T_(row[0]));
                     ImGui::TableNextColumn();
-                    ImGui::TextUnformatted(row[1]);
+                    ImGui::TextUnformatted(T_(row[1]));
                 }
                 ImGui::EndTable();
             }
@@ -523,16 +922,17 @@ void draw_dialogs(UiState& ui) {
 
     if (ui.show_about) {
         ImGui::SetNextWindowPos(centre, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-        if (ImGui::Begin("About Tone of Hell", &ui.show_about, flags)) {
+        if (ImGui::Begin((std::string(T_("About Tone of Hell")) + "###about").c_str(), &ui.show_about,
+                         flags)) {
             const toh::app::BuildInfo& build = toh::app::build_info();
-            ImGui::TextUnformatted("Tone of Hell");
-            ImGui::TextUnformatted("An open source digital audio workstation.");
+            ImGui::TextUnformatted(T_("Tone of Hell"));
+            ImGui::TextUnformatted(T_("An open source digital audio workstation."));
             ImGui::Spacing();
-            ImGui::Text("Version %s, commit %s, built %s", build.version, build.commit, build.date);
-            ImGui::TextUnformatted("Copyright (c) 2026 AmmaArk. MIT license.");
-            ImGui::TextUnformatted("https://github.com/AmmaArkf/Tone-of-Hell");
+            ImGui::Text(T_("Version %s, commit %s, built %s"), build.version, build.commit, build.date);
+            ImGui::TextUnformatted(T_("Copyright (c) 2026 AmmaArk. MIT license."));
+            ImGui::TextUnformatted(T_("https://github.com/AmmaArkf/Tone-of-Hell"));
             ImGui::Spacing();
-            ImGui::TextDisabled("Uses Dear ImGui (MIT), SDL (zlib) and miniaudio (public domain or MIT-0).");
+            ImGui::TextDisabled("%s", T_("Uses Dear ImGui (MIT), SDL (zlib) and miniaudio (public domain or MIT-0)."));
         }
         ImGui::End();
     }
@@ -547,11 +947,11 @@ void draw_metronome(Session& session, UiState& ui) {
     const float font = ImGui::GetFontSize();
 
     ImGui::SameLine();
-    if (toggle_button("Metronome", settings.enabled, ImVec4(0.55f, 0.35f, 0.80f, 1.0f), false)) {
+    if (toggle_button(T_("Metronome"), settings.enabled, ImVec4(0.55f, 0.35f, 0.80f, 1.0f), false)) {
         settings.enabled = !settings.enabled;
         changed = true;
     }
-    tooltip("Click on every beat while playing. Also plays when no file is loaded.");
+    tooltip(T_("Click on every beat while playing. Also plays when no file is loaded."));
 
     ImGui::SameLine();
     auto bpm = static_cast<float>(settings.bpm);
@@ -561,28 +961,28 @@ void draw_metronome(Session& session, UiState& ui) {
         settings.bpm = static_cast<double>(bpm);
         changed = true;
     }
-    tooltip("Tempo of the metronome and the grid. Drag, or double-click to type a value.");
+    tooltip(T_("Tempo of the metronome and the grid. Drag, or double-click to type a value."));
 
     ImGui::SameLine();
-    if (ImGui::Button("...##metronome")) {
+    if (ImGui::Button(T_("...##metronome"))) {
         ImGui::OpenPopup("metronome settings");
     }
-    tooltip("Metronome and time signature settings");
+    tooltip(T_("Metronome and time signature settings"));
 
     if (ImGui::BeginPopup("metronome settings")) {
-        ImGui::TextUnformatted("Metronome and grid");
+        ImGui::TextUnformatted(T_("Metronome and grid"));
         ImGui::Separator();
 
         int beats = settings.beats_per_bar;
         ImGui::SetNextItemWidth(7.0f * font);
-        if (ImGui::InputInt("Beats per bar", &beats)) {
+        if (ImGui::InputInt(T_("Beats per bar"), &beats)) {
             settings.beats_per_bar = std::clamp(beats, 1, 32);
             changed = true;
         }
 
         static const int units[] = {2, 4, 8, 16};
         ImGui::SetNextItemWidth(7.0f * font);
-        if (ImGui::BeginCombo("Beat unit", std::to_string(settings.beat_unit).c_str())) {
+        if (ImGui::BeginCombo(T_("Beat unit"), std::to_string(settings.beat_unit).c_str())) {
             for (const int unit : units) {
                 if (ImGui::Selectable(std::to_string(unit).c_str(), unit == settings.beat_unit)) {
                     settings.beat_unit = unit;
@@ -591,18 +991,18 @@ void draw_metronome(Session& session, UiState& ui) {
             }
             ImGui::EndCombo();
         }
-        ImGui::TextDisabled("Time signature: %d/%d. The first beat of a bar sounds higher.",
+        ImGui::TextDisabled(T_("Time signature: %d/%d. The first beat of a bar sounds higher."),
                             settings.beats_per_bar, settings.beat_unit);
 
         ImGui::SetNextItemWidth(7.0f * font);
         float volume = settings.volume * 100.0f;
-        if (ImGui::SliderFloat("##click volume", &volume, 0.0f, 200.0f, "Click volume: %.0f%%",
+        if (ImGui::SliderFloat("##click volume", &volume, 0.0f, 200.0f, T_("Click volume: %.0f%%"),
                                ImGuiSliderFlags_AlwaysClamp)) {
             settings.volume = volume / 100.0f;
             changed = true;
         }
 
-        if (ImGui::Button("Tap tempo")) {
+        if (ImGui::Button(T_("Tap tempo"))) {
             const double now = ImGui::GetTime();
             if (!ui.taps.empty() && now - ui.taps.back() > 2.0) {
                 ui.taps.clear();  // a long pause starts a new measurement
@@ -621,7 +1021,7 @@ void draw_metronome(Session& session, UiState& ui) {
             }
         }
         ImGui::SameLine();
-        ImGui::TextDisabled("Click in time with the music");
+        ImGui::TextDisabled("%s", T_("Click in time with the music"));
         ImGui::EndPopup();
     }
 
@@ -635,44 +1035,43 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     const ImVec4 record_red(0.85f, 0.15f, 0.15f, 1.0f);
 
     // Row 1: transport, metronome, master.
-    if (ImGui::Button(session.is_playing() ? "Pause" : "Play")) {
+    if (ImGui::Button(T_(session.is_playing() ? "Pause" : "Play"))) {
         session.toggle_play();
     }
-    tooltip("Space");
     ImGui::SameLine();
-    if (ImGui::Button("Stop")) {
+    if (ImGui::Button(T_("Stop"))) {
         session.stop_recording();
         session.stop();
     }
     ImGui::SameLine();
-    if (toggle_button(session.is_recording() ? "Recording##record" : "Record##record",
+    if (toggle_button(T_(session.is_recording() ? "Recording##record" : "Record##record"),
                       session.is_recording(), record_red, false)) {
         toggle_recording(session, ui);
     }
-    tooltip("Record the input onto the armed track (the R button of a track) or, when no track\n"
-            "is armed, onto a new one. Press again, or Stop, to finish. Shortcut: R");
+    tooltip(T_("Record the input onto the armed track (the R button of a track) or, when no track\n"
+               "is armed, onto a new one. Press again, or Stop, to finish."));
     ImGui::SameLine();
-    if (ImGui::Button("...##record")) {
+    if (ImGui::Button(T_("...##record"))) {
         ImGui::OpenPopup("record settings");
     }
-    tooltip("Recording settings: input, monitoring, latency correction");
+    tooltip(T_("Recording settings: input, monitoring, latency correction"));
     if (ImGui::BeginPopup("record settings")) {
         draw_record_settings(session, ui);
         ImGui::EndPopup();
     }
     ImGui::SameLine();
-    if (toggle_button("Reverse", session.reverse(), ImVec4(0.80f, 0.45f, 0.20f, 1.0f), false)) {
+    if (toggle_button(T_("Reverse"), session.reverse(), ImVec4(0.80f, 0.45f, 0.20f, 1.0f), false)) {
         session.toggle_reverse();
     }
-    tooltip("Play backwards from the playhead. Press again to play forwards.");
+    tooltip(T_("Play backwards from the playhead. Press again to play forwards."));
     ImGui::SameLine();
     bool loop = session.loop();
-    if (ImGui::Checkbox("Loop", &loop)) {
+    if (ImGui::Checkbox(T_("Loop"), &loop)) {
         session.set_loop(loop);
     }
 
     ImGui::SameLine();
-    ImGui::Text("%s / %s", format_time(session.position_frames(), session.sample_rate()).c_str(),
+    ImGui::Text(T_("%s / %s"), format_time(session.position_frames(), session.sample_rate()).c_str(),
                 format_time(session.length_frames(), session.sample_rate()).c_str());
 
     draw_metronome(session, ui);
@@ -681,11 +1080,11 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     ImGui::SameLine();
     float percent = session.master_gain() * 100.0f;
     ImGui::SetNextItemWidth(11.0f * font);
-    if (ImGui::SliderFloat("##master", &percent, 0.0f, 200.0f, "Master: %.0f%%",
+    if (ImGui::SliderFloat("##master", &percent, 0.0f, 200.0f, T_("Master: %.0f%%"),
                            ImGuiSliderFlags_AlwaysClamp)) {
         session.set_master_gain(percent / 100.0f);
     }
-    tooltip("Master volume. 100% leaves the mix unchanged. Ctrl+click to type a value.");
+    tooltip(T_("Master volume. 100% leaves the mix unchanged. Ctrl+click to type a value."));
     ImGui::SameLine();
     draw_meter(session.master_peak(), 8.0f * font, ImGui::GetFrameHeight());
 
@@ -693,33 +1092,33 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     if (clips > ui.seen_clips) {
         ImGui::SameLine();
         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.80f, 0.15f, 0.15f, 1.0f));
-        if (ImGui::SmallButton("CLIP")) {
+        if (ImGui::SmallButton(T_("CLIP"))) {
             ui.seen_clips = clips;  // click to reset the indicator
         }
         ImGui::PopStyleColor();
-        tooltip("The mix went above full scale. Lower the faders. Click to reset.");
+        tooltip(T_("The mix went above full scale. Lower the faders. Click to reset."));
     }
 
     // Row 2: files, grid, zoom.
-    if (ImGui::Button("Add files...")) {
+    if (ImGui::Button(T_("Add files..."))) {
         open_file_dialog(pending, window);
     }
-    tooltip("Every file becomes a new track. You can also drop files onto the window.");
+    tooltip(T_("Every file becomes a new track. You can also drop files onto the window."));
 
     ImGui::SameLine();
     bool snap = session.snap();
-    if (ImGui::Checkbox("Snap to", &snap)) {
+    if (ImGui::Checkbox(T_("Snap to"), &snap)) {
         session.set_snap(snap);
     }
-    tooltip("Moved and trimmed regions jump to the grid. Hold Alt while dragging to switch it off.");
+    tooltip(T_("Moved and trimmed regions jump to the grid. Hold Alt while dragging to switch it off."));
     ImGui::SameLine();
     static const char* const step_names[] = {"bars", "beats", "1/2 beats", "1/4 beats",
                                              "none (no grid)"};
     const int current_step = static_cast<int>(session.grid_step());
     ImGui::SetNextItemWidth(8.5f * font);
-    if (ImGui::BeginCombo("##grid", step_names[current_step])) {
+    if (ImGui::BeginCombo("##grid", T_(step_names[current_step]))) {
         for (int i = 0; i < 5; ++i) {
-            if (ImGui::Selectable(step_names[i], i == current_step)) {
+            if (ImGui::Selectable(T_(step_names[i]), i == current_step)) {
                 session.set_grid_step(static_cast<GridStep>(i));
             }
         }
@@ -728,48 +1127,49 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
 
     ImGui::SameLine();
     const float centre_x = ui.view.lane_origin_x + ui.view.lane_width * 0.5f;
-    if (ImGui::Button("-##zoom")) {
+    if (ImGui::Button(T_("-##zoom"))) {
         zoom_view(ui.view, 1.0 / 1.5, centre_x);
     }
-    tooltip("Zoom out (Ctrl + mouse wheel)");
+    tooltip(T_("Zoom out (Ctrl + mouse wheel)"));
     ImGui::SameLine();
-    if (ImGui::Button("+##zoom")) {
+    if (ImGui::Button(T_("+##zoom"))) {
         zoom_view(ui.view, 1.5, centre_x);
     }
-    tooltip("Zoom in (Ctrl + mouse wheel)");
+    tooltip(T_("Zoom in (Ctrl + mouse wheel)"));
     ImGui::SameLine();
-    if (ImGui::Button("Fit")) {
+    if (ImGui::Button(T_("Fit"))) {
         fit_view(session, ui.view);
     }
-    tooltip("Show the whole project");
+    tooltip(T_("Show the whole project"));
     ImGui::SameLine();
-    ImGui::Checkbox("Follow", &ui.follow);
-    tooltip("Keep the playhead in view while playing");
+    ImGui::Checkbox(T_("Follow"), &ui.follow);
+    tooltip(T_("Keep the playhead in view while playing"));
 
     ImGui::SameLine();
-    ImGui::TextDisabled("(?)");
+    ImGui::TextDisabled("%s", T_("(?)"));
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "Drag a region to move it and its left or right edge to trim it.\n"
-            "Drag the small squares in its top corners to make fades.\n"
-            "S cuts at the playhead, Delete removes the selected region; right-click for a menu.\n"
-            "Ctrl + wheel zooms, Shift + wheel scrolls, Space plays, Home returns to the start.");
+            "%s",
+            T_("Drag a region to move it and its left or right edge to trim it.\n"
+               "Drag the small squares in its top corners to make fades.\n"
+               "Right-click a region for a menu. Ctrl + wheel zooms, Shift + wheel scrolls.\n"
+               "All keyboard shortcuts are listed in Help and can be changed in Edit > Settings."));
     }
 
     if (!session.audio_running()) {
-        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.25f, 1.0f), "No audio device: playback is silent.");
+        ImGui::TextColored(ImVec4(0.95f, 0.55f, 0.25f, 1.0f), "%s", T_("No audio device: playback is silent."));
     }
     if (!ui.error.empty()) {
         ImGui::TextColored(ImVec4(0.95f, 0.40f, 0.35f, 1.0f), "%s", ui.error.c_str());
         ImGui::SameLine();
-        if (ImGui::SmallButton("Dismiss")) {
+        if (ImGui::SmallButton(T_("Dismiss"))) {
             ui.error.clear();
         }
     }
     if (!ui.notice.empty()) {
         ImGui::TextColored(ImVec4(0.45f, 0.85f, 0.50f, 1.0f), "%s", ui.notice.c_str());
         ImGui::SameLine();
-        if (ImGui::SmallButton("OK##notice")) {
+        if (ImGui::SmallButton(T_("OK##notice"))) {
             ui.notice.clear();
         }
     }
@@ -1081,14 +1481,14 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         const std::int64_t playhead = session.position_frames();
         const bool can_split =
             region != nullptr && playhead > region->start && playhead < region->end();
-        if (ImGui::MenuItem("Split at the playhead", "S", false, can_split)) {
+        if (ImGui::MenuItem(T_("Split at the playhead"), key_label(ui, Action::Split), false, can_split)) {
             split_at_playhead(session, ui);
         }
-        if (ImGui::MenuItem("Remove fades", nullptr, false,
+        if (ImGui::MenuItem(T_("Remove fades"), nullptr, false,
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
         }
-        if (ImGui::MenuItem("Remove the region", "Delete", false, region != nullptr)) {
+        if (ImGui::MenuItem(T_("Remove the region"), key_label(ui, Action::RemoveRegion), false, region != nullptr)) {
             remove_selected_region(session, ui);
         }
         ImGui::EndPopup();
@@ -1186,22 +1586,22 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
 
     ImGui::BeginChild("header", ImVec2(header_width, row_height), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_NoScrollbar);
-    if (toggle_button("M", track.mute, ImVec4(0.75f, 0.55f, 0.15f, 1.0f))) {
+    if (toggle_button(T_("M"), track.mute, ImVec4(0.75f, 0.55f, 0.15f, 1.0f))) {
         session.set_track_mute(i, !track.mute);
     }
-    tooltip("Mute");
+    tooltip(T_("Mute"));
     ImGui::SameLine();
-    if (toggle_button("S", track.solo, ImVec4(0.20f, 0.60f, 0.85f, 1.0f))) {
+    if (toggle_button(T_("S"), track.solo, ImVec4(0.20f, 0.60f, 0.85f, 1.0f))) {
         session.set_track_solo(i, !track.solo);
     }
-    tooltip("Solo");
+    tooltip(T_("Solo"));
     ImGui::SameLine();
     const bool armed = ui.armed && ui.armed_track == i;
-    if (toggle_button("R", armed, ImVec4(0.85f, 0.15f, 0.15f, 1.0f))) {
+    if (toggle_button(T_("R"), armed, ImVec4(0.85f, 0.15f, 0.15f, 1.0f))) {
         ui.armed = !armed;
         ui.armed_track = i;
     }
-    tooltip("Arm for recording: the next take goes onto this track");
+    tooltip(T_("Arm for recording: the next take goes onto this track"));
 
     // The remove button sits in the far corner, away from mute and solo, and asks first.
     // The track name gets the space in between and is shortened when it does not fit.
@@ -1216,18 +1616,18 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     tooltip(title.c_str());
 
     ImGui::SameLine(remove_x);
-    if (ImGui::SmallButton("X")) {
+    if (ImGui::SmallButton(T_("X"))) {
         ImGui::OpenPopup("remove track");
     }
-    tooltip("Remove the track");
+    tooltip(T_("Remove the track"));
     if (ImGui::BeginPopup("remove track")) {
-        ImGui::Text("Remove track %d?", static_cast<int>(i + 1));
-        if (ImGui::Button("Remove")) {
+        ImGui::Text(T_("Remove track %d?"), static_cast<int>(i + 1));
+        if (ImGui::Button(T_("Remove"))) {
             remove = true;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (ImGui::Button("Cancel")) {
+        if (ImGui::Button(T_("Cancel"))) {
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -1237,7 +1637,7 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     const float slider_width = header_width - 2.0f * font;
     float volume = track.gain * 100.0f;
     ImGui::SetNextItemWidth(slider_width);
-    if (ImGui::SliderFloat("##gain", &volume, 0.0f, 200.0f, "Volume: %.0f%%",
+    if (ImGui::SliderFloat("##gain", &volume, 0.0f, 200.0f, T_("Volume: %.0f%%"),
                            ImGuiSliderFlags_AlwaysClamp)) {
         session.set_track_gain(i, volume / 100.0f);
     }
@@ -1246,11 +1646,11 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     char pan_text[48];
     const int pan_amount = static_cast<int>(std::lround(std::fabs(pan)));
     if (pan_amount == 0) {
-        std::snprintf(pan_text, sizeof(pan_text), "Pan: centre");
+        std::snprintf(pan_text, sizeof(pan_text), "%s", T_("Pan: centre"));
     } else {
         // "%%%%" becomes "%%" here and a single percent sign on the slider.
-        std::snprintf(pan_text, sizeof(pan_text), "Pan: %d%%%% %s", pan_amount,
-                      pan < 0.0f ? "left" : "right");
+        std::snprintf(pan_text, sizeof(pan_text), T_("Pan: %d%%%% %s"), pan_amount,
+                      T_(pan < 0.0f ? "left" : "right"));
     }
     ImGui::SetNextItemWidth(slider_width);
     if (ImGui::SliderFloat("##pan", &pan, -100.0f, 100.0f, pan_text, ImGuiSliderFlags_AlwaysClamp)) {
@@ -1359,7 +1759,7 @@ void draw_tracks(Session& session, UiState& ui) {
 
     if (session.tracks().empty()) {
         ImGui::Spacing();
-        ImGui::TextDisabled("Drop audio files here (WAV, FLAC, MP3) or press \"Add files...\".");
+        ImGui::TextDisabled("%s", T_("Drop audio files here (WAV, FLAC, MP3) or press \"Add files...\"."));
     }
 }
 
@@ -1410,7 +1810,7 @@ void draw_timeline_scrollbar(const Session& session, UiState& ui) {
     draw_list->AddRectFilled(ImVec2(thumb_x, origin.y + 1.0f),
                              ImVec2(thumb_x + thumb_width, origin.y + height - 1.0f), colour,
                              height * 0.5f);
-    tooltip("Drag to move along the timeline");
+    tooltip(T_("Drag to move along the timeline"));
 }
 
 // The line at the bottom of the window: figures about the project, the audio and the build.
@@ -1427,31 +1827,31 @@ void draw_status_bar(const Session& session, const UiState& ui) {
 
     ImGui::AlignTextToFramePadding();
     if (session.is_recording()) {
-        ImGui::TextColored(ImVec4(0.95f, 0.30f, 0.30f, 1.0f), "REC %s",
+        ImGui::TextColored(ImVec4(0.95f, 0.30f, 0.30f, 1.0f), T_("REC %s"),
                            format_time(session.recorded_frames(), session.sample_rate()).c_str());
         ImGui::SameLine();
-        ImGui::TextDisabled("|");
+        ImGui::TextDisabled("%s", T_("|"));
         ImGui::SameLine();
     }
-    ImGui::Text("Tracks: %d   Regions: %d   Length: %s", static_cast<int>(session.tracks().size()),
+    ImGui::Text(T_("Tracks: %d   Regions: %d   Length: %s"), static_cast<int>(session.tracks().size()),
                 static_cast<int>(regions),
                 format_time(session.length_frames(), session.sample_rate()).c_str());
     ImGui::SameLine();
-    ImGui::TextDisabled("|");
+    ImGui::TextDisabled("%s", T_("|"));
     ImGui::SameLine();
-    ImGui::Text("Audio: %s, %u Hz, buffer %u (%.1f ms)", session.audio_running() ? "on" : "off",
+    ImGui::Text(T_("Audio: %s, %u Hz, buffer %u (%.1f ms)"), T_(session.audio_running() ? "on" : "off"),
                 config.sample_rate, config.buffer_frames, buffer_ms);
     ImGui::SameLine();
-    ImGui::TextDisabled("|");
+    ImGui::TextDisabled("%s", T_("|"));
     ImGui::SameLine();
-    ImGui::Text("Zoom: %.0f px/s   %.0f fps", ui.view.pixels_per_second,
+    ImGui::Text(T_("Zoom: %.0f px/s   %.0f fps"), ui.view.pixels_per_second,
                 static_cast<double>(ImGui::GetIO().Framerate));
 
     if (const RegionInfo* region = selected_region(session, ui)) {
         ImGui::SameLine();
-        ImGui::TextDisabled("|");
+        ImGui::TextDisabled("%s", T_("|"));
         ImGui::SameLine();
-        ImGui::Text("Selected: track %d, %s - %s", static_cast<int>(ui.selected_track + 1),
+        ImGui::Text(T_("Selected: track %d, %s - %s"), static_cast<int>(ui.selected_track + 1),
                     format_time(region->start, session.sample_rate()).c_str(),
                     format_time(region->end(), session.sample_rate()).c_str());
     }
@@ -1459,7 +1859,7 @@ void draw_status_bar(const Session& session, const UiState& ui) {
     // The build, at the right edge.
     const toh::app::BuildInfo& build = toh::app::build_info();
     char text[96];
-    std::snprintf(text, sizeof(text), "Build %s (%s, %s)", build.version, build.commit, build.date);
+    std::snprintf(text, sizeof(text), T_("Build %s (%s, %s)"), build.version, build.commit, build.date);
     const float x = ImGui::GetWindowWidth() - ImGui::CalcTextSize(text).x -
                     ImGui::GetStyle().WindowPadding.x;
     ImGui::SameLine(std::max(x, ImGui::GetCursorPosX()));
@@ -1508,7 +1908,7 @@ int main(int argc, char* argv[]) {
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // Keyboard navigation of widgets stays off: the keys belong to the user's shortcuts.
     io.IniFilename = nullptr;  // no settings file next to the program yet
     ImGui::StyleColorsDark();
 
@@ -1527,6 +1927,20 @@ int main(int argc, char* argv[]) {
         UiState ui;
         PendingFiles pending;
         PendingExport exports;
+
+        // Load what was remembered from the last run and apply it before the audio starts.
+        if (char* folder = SDL_GetPrefPath("", "Tone of Hell")) {
+            ui.settings_path = std::filesystem::u8path(folder) / "settings.txt";
+            SDL_free(folder);
+            ui.settings.load(ui.settings_path);
+        }
+        toh::app::set_language(ui.settings.language);
+        session.set_devices(ui.settings.output_device, ui.settings.input_device);
+        session.set_master_gain(ui.settings.master_gain);
+        session.set_input_gain(ui.settings.input_gain);
+        if (ui.settings.record_offset_frames >= 0) {
+            session.set_record_offset_frames(ui.settings.record_offset_frames);
+        }
 
         std::string audio_error;
         if (!session.start_audio(&audio_error)) {
@@ -1601,30 +2015,7 @@ int main(int argc, char* argv[]) {
             ImGui_ImplSDL3_NewFrame();
             ImGui::NewFrame();
 
-            if (!io.WantTextInput) {
-                if (ImGui::IsKeyPressed(ImGuiKey_Space, false)) {
-                    session.toggle_play();
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_Home, false)) {
-                    session.seek_frames(0);
-                    ui.view.start_seconds = 0.0;
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_S, false) && !io.KeyCtrl) {
-                    split_at_playhead(session, ui);
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_Delete, false)) {
-                    remove_selected_region(session, ui);
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_R, false) && !io.KeyCtrl) {
-                    toggle_recording(session, ui);
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-                    ui.selected = false;
-                }
-                if (ImGui::IsKeyPressed(ImGuiKey_O, false) && io.KeyCtrl) {
-                    open_file_dialog(pending, window);
-                }
-            }
+            handle_shortcuts(session, ui, pending, window);
 
             const ImGuiViewport* viewport = ImGui::GetMainViewport();
             ImGui::SetNextWindowPos(viewport->WorkPos);
@@ -1648,6 +2039,10 @@ int main(int argc, char* argv[]) {
             draw_timeline_scrollbar(session, ui);
             draw_status_bar(session, ui);
             draw_dialogs(ui);
+            draw_settings_window(session, ui);
+            if (ui.settings_changed) {
+                save_settings(session, ui);
+            }
             if (ui.quit) {
                 running = false;
             }
@@ -1659,6 +2054,8 @@ int main(int argc, char* argv[]) {
             ImGui_ImplSDLRenderer3_RenderDrawData(ImGui::GetDrawData(), renderer);
             SDL_RenderPresent(renderer);
         }
+
+        save_settings(session, ui);
     }  // the session (and the audio device) is closed here, before the window goes away
 
     ImGui_ImplSDLRenderer3_Shutdown();
