@@ -1,0 +1,71 @@
+name: Suggest a plugin or an integration
+description: An effect, an instrument, support for a plugin format, import or export of a format
+title: "[Plugin]: "
+labels: ["plugin", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We evaluate plugin and integration proposals by their value, license, effect on performance and by who will maintain them.
+        We do not accept code or material taken from closed programs.
+  - type: input
+    id: name
+    attributes:
+      label: Name
+      description: The name of the plugin, effect, format or integration.
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What exactly
+      options:
+        - Built-in effect
+        - Built-in instrument (synthesizer, sampler)
+        - Support for a plugin format
+        - Import or export of a file format
+        - Script or automation
+        - Integration with an external service or hardware
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: license
+    attributes:
+      label: License of the proposed solution
+      description: "For example MIT, Apache-2.0, GPL, CC0 or proprietary. This matters: we do not include closed code."
+    validations:
+      required: true
+  - type: input
+    id: link
+    attributes:
+      label: Link to the documentation, specification or repository
+  - type: textarea
+    id: why
+    attributes:
+      label: Why it is needed
+      description: Which tasks it serves and who will benefit.
+    validations:
+      required: true
+  - type: textarea
+    id: performance
+    attributes:
+      label: Performance requirements
+      description: CPU load, latency and memory allocation on the audio thread, if known.
+  - type: dropdown
+    id: help
+    attributes:
+      label: Who will do it
+      options:
+        - I am ready to implement it
+        - I am ready to help with testing
+        - I ask the community to implement it
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched for similar issues and did not find the same one.
+          required: true
+        - label: The proposal does not require copying code or material from closed programs.
+          required: true
