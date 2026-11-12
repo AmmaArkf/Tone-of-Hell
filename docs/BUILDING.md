@@ -1,6 +1,6 @@
 # Building
 
-You need Git, CMake 3.20 or newer and a C++17 compiler. The libraries the project uses are included in `third_party/`, so nothing else has to be installed.
+You need Git, CMake 3.20 or newer and a C++17 compiler. Most libraries the project uses are included in `third_party/`. SDL3 (used by the ImGui interface) is downloaded automatically the first time you configure, so that step needs an internet connection; add `-DTOH_BUILD_GUI_IMGUI=OFF` to build without it.
 
 ## Windows (MinGW-w64)
 
@@ -8,25 +8,41 @@ You need Git, CMake 3.20 or newer and a C++17 compiler. The libraries the projec
 cmake -S . -B build -G "MinGW Makefiles"
 cmake --build build -j
 ctest --test-dir build --output-on-failure
-build\apps\toh_player\toh_player.exe
+build\apps\toh_imgui\toh_imgui.exe
 ```
 
-With Visual Studio installed you can leave out `-G "MinGW Makefiles"`.
+With Visual Studio installed you can leave out `-G "MinGW Makefiles"`. The first build takes a few minutes because SDL is compiled.
 
 ## Linux
+
+Install the packages SDL needs to open a window. On Debian or Ubuntu:
+
+```
+sudo apt install pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+  libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+  libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libudev-dev
+```
+
+Then:
 
 ```
 cmake -S . -B build
 cmake --build build -j
 ctest --test-dir build --output-on-failure
-./build/apps/toh_player/toh_player
+./build/apps/toh_imgui/toh_imgui
 ```
 
 Sound goes through PulseAudio (or PipeWire's PulseAudio layer), ALSA or JACK, whichever is found when the program starts.
 
-## The test player
+## Programs
 
-`toh_player` plays a 440 Hz test tone, or the WAV, FLAC or MP3 files given as arguments. Several files play together, one per track. Options: `--loop`, `--buffer <frames>` (default 256) and `--rate <hz>` (default 48000).
+### toh_imgui: the ImGui interface
+
+Drop audio files (WAV, FLAC or MP3) onto the window or press "Add files...". Every file becomes a track with a volume slider, a pan slider, mute (M), solo (S) and remove (X). Click or drag in the ruler or on a waveform to move the playhead. Space starts and pauses playback; Home returns to the start.
+
+### toh_player: the command-line test player
+
+`toh_player` plays a 440 Hz test tone, or the files given as arguments, one per track. Options: `--loop`, `--buffer <frames>` (default 256) and `--rate <hz>` (default 48000).
 
 While it runs, type a command and press Enter:
 

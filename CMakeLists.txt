@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 project(ToneOfHell
         VERSION 0.0.1
         DESCRIPTION "An open source digital audio workstation (DAW) in C++"
-        LANGUAGES CXX)
+        LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(TOH_BUILD_APPS "Build the command-line applications" ON)
+option(TOH_BUILD_GUI_IMGUI "Build the Dear ImGui user interface (downloads SDL3 while configuring)" ON)
 option(TOH_BUILD_TESTS "Build the unit tests" ON)
 option(TOH_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 
@@ -35,11 +36,20 @@ endif()
 
 find_package(Threads REQUIRED)
 
+# Layers, from the bottom up:
+#   toh_core   the audio engine; no dependencies
+#   toh_audio  sound devices and file decoding
+#   toh_app    the session shared by every user interface
 add_subdirectory(src/core)
 add_subdirectory(src/audio)
+add_subdirectory(src/app)
 
 if(TOH_BUILD_APPS)
     add_subdirectory(apps/toh_player)
+endif()
+
+if(TOH_BUILD_GUI_IMGUI)
+    add_subdirectory(apps/toh_imgui)
 endif()
 
 if(TOH_BUILD_TESTS)

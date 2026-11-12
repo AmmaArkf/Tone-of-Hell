@@ -21,11 +21,16 @@ A short record of technical decisions: what was chosen, why, and who decided. De
 | 15 | Pan law: constant-power curve scaled so that the centre is unity gain on both channels | A centred track sounds exactly like the file | Default |
 | 16 | Mute wins over solo; buses have no solo yet | Simplest predictable rule | Default |
 | 17 | Meters show the post-fader peak with a 0.3 s release, one value per track, bus and master | Enough for a first mixer; stereo and loudness meters come with the GUI | Default |
+| 18 | Two user interfaces: Dear ImGui (with SDL3) and Qt 6. Users choose which to build and install, and can switch between them when both are installed | Owner's choice: people prefer different interfaces | Owner |
+| 19 | All program logic lives in `toh_app` (the `Session` class). A user interface only draws the session and forwards actions to it | Two interfaces must behave the same; logic is written and tested once | Default |
+| 20 | The ImGui interface is the primary one: a feature lands there first, then in the Qt interface | Keeps the two from blocking each other | Default (proposed to the owner) |
+| 21 | Switching interfaces restarts the window with the same project instead of swapping toolkits inside one process | Two windowing toolkits in one process are fragile | Default (proposed to the owner) |
+| 22 | SDL3 is downloaded by CMake with a fixed checksum instead of being copied into the repository | The source archive is about 16 MB; exception to decision 7 | Default |
+| 23 | The Qt interface is distributed under the terms of the LGPL (Qt as separate shared libraries); the project's own code stays MIT | Required by Qt's open source license | Default |
 
 ## Open decisions
 
 | Decision | Needed by |
 | --- | --- |
-| GUI framework | Stage 3 (timeline) |
 | Plugin formats and SDK licenses (CLAP first, then VST3) | Stage 7 |
 | Project file format | Stage 5 |

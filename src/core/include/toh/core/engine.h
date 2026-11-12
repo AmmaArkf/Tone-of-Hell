@@ -83,6 +83,16 @@ public:
     /// Turns looping on or off. The loop covers [start_frame, end_frame); an end_frame of -1
     /// means the end of the longest clip.
     bool set_loop(bool enabled, std::int64_t start_frame = 0, std::int64_t end_frame = -1);
+    /// Plays backwards when enabled. While playing, the sound fades out and back in around the
+    /// change of direction. Starting backwards from the very beginning starts at the end.
+    bool set_reverse(bool reverse);
+    /// Configures the built-in metronome click, which follows the timeline position.
+    /// `bpm` counts quarter notes per minute (20 to 400). The time signature is
+    /// `beats_per_bar` / `beat_unit` (for example 6/8); the first beat of every bar sounds
+    /// higher. `volume` is linear, 0 to 2, and is not affected by the master fader. With the
+    /// metronome on, playback also runs when no clip is loaded.
+    bool set_metronome(bool enabled, double bpm = 120.0, std::uint32_t beats_per_bar = 4,
+                       std::uint32_t beat_unit = 4, float volume = 0.5f);
 
     /// Releases clips the audio thread no longer uses. Call it now and then from the control
     /// thread (for example after changing clips).
@@ -138,7 +148,9 @@ private:
         Pause,
         Stop,
         Seek,
-        SetLoop
+        SetLoop,
+        SetReverse,
+        SetMetronome
     };
 
     // Messages from the control thread to the audio thread. Must stay trivially copyable.
@@ -153,6 +165,7 @@ private:
         float value2 = 0.0f;
         std::int64_t a = 0;
         std::int64_t b = 0;
+        double number = 0.0;
         const ClipData* clip = nullptr;
     };
 
@@ -187,8 +200,9 @@ private:
     void update_targets() noexcept;
     void finish_fade() noexcept;
     bool loop_region(std::int64_t& start, std::int64_t& end) const noexcept;
-    bool run_transport(std::uint32_t frames, std::int64_t loop_start, std::int64_t end_pos,
+    bool run_transport(std::uint32_t frames, std::int64_t begin_pos, std::int64_t end_pos,
                        bool looping) noexcept;
+    float metronome_sample(std::int64_t frame) const noexcept;
     void mix_block(float* out, std::uint32_t frames, bool audible) noexcept;
 
     const std::uint32_t sample_rate_;
@@ -216,6 +230,13 @@ private:
     float gain_ = 1.0f;
     float gain_target_ = 1.0f;
     float master_meter_ = 0.0f;
+    bool reverse_ = false;
+    bool wanted_reverse_ = false;  // takes effect at the bottom of the next fade
+    bool metronome_enabled_ = false;
+    double metronome_beat_frames_ = 24000.0;
+    std::int64_t metronome_beats_per_bar_ = 4;
+    float metronome_volume_ = 0.5f;
+    float metronome_gain_ = 0.0f;  // smoothed; 0 while the metronome is off
 
     // Work buffers, allocated once in the constructor.
     std::vector<std::int64_t> frame_pos_;  // timeline frame for every output frame, -1 = silence

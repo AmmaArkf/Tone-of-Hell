@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 namespace toh::core {
 namespace {
@@ -11,6 +12,11 @@ constexpr double kFadeSeconds = 0.005;           // click-free play, pause, stop
 constexpr double kGainSmoothingSeconds = 0.010;  // click-free fader, pan, mute and solo changes
 constexpr double kMeterReleaseSeconds = 0.3;     // how fast the peak meters fall back
 constexpr float kMaxGain = 8.0f;
+constexpr double kClickSeconds = 0.030;       // length of one metronome click
+constexpr double kClickDecaySeconds = 0.008;  // how fast it dies away
+constexpr double kClickFrequency = 880.0;
+constexpr double kClickAccentFrequency = 1760.0;  // first beat of the bar
+constexpr double kTwoPi = 6.283185307179586476925286766559;
 
 bool valid_gain(float linear) noexcept {
     return linear >= 0.0f && linear <= kMaxGain;  // false for NaN as well
@@ -199,6 +205,30 @@ bool Engine::set_loop(bool enabled, std::int64_t start_frame, std::int64_t end_f
     return commands_.try_push(command);
 }
 
+bool Engine::set_reverse(bool reverse) {
+    Command command(CommandType::SetReverse);
+    command.flag = reverse;
+    return commands_.try_push(command);
+}
+
+bool Engine::set_metronome(bool enabled, double bpm, std::uint32_t beats_per_bar,
+                           std::uint32_t beat_unit, float volume) {
+    const bool unit_ok =
+        beat_unit == 1 || beat_unit == 2 || beat_unit == 4 || beat_unit == 8 || beat_unit == 16;
+    if (!(bpm >= 20.0 && bpm <= 400.0) || beats_per_bar < 1 || beats_per_bar > 32 || !unit_ok ||
+        !(volume >= 0.0f && volume <= 2.0f)) {
+        return false;
+    }
+    Command command(CommandType::SetMetronome);
+    command.flag = enabled;
+    // Length of one beat in frames: bpm counts quarter notes, the beat unit may be shorter.
+    command.number = static_cast<double>(sample_rate_) * 60.0 / bpm * 4.0 /
+                     static_cast<double>(beat_unit);
+    command.a = beats_per_bar;
+    command.value = volume;
+    return commands_.try_push(command);
+}
+
 void Engine::collect_retired() {
     const ClipData* retired = nullptr;
     while (retired_.try_pop(retired)) {
@@ -315,19 +345,28 @@ void Engine::apply(const Command& command) noexcept {
             break;
 
         case CommandType::Play:
-            if (project_frames_ <= 0) {
+            if (project_frames_ <= 0 && !metronome_enabled_) {
                 break;
             }
             if (state_ == State::Stopped) {
-                if (pos_ >= project_frames_) {
+                if (!reverse_ && project_frames_ > 0 && pos_ >= project_frames_) {
                     pos_ = 0;  // the project had ended: start again
+                } else if (reverse_ && pos_ <= 0) {
+                    pos_ = project_frames_;  // at the start: play backwards from the end
                 }
                 fade_ = 0.0f;
                 state_ = State::Playing;
-            } else if (state_ == State::FadingOut) {
-                state_ = State::Playing;  // cancels the pending pause, stop or seek
+                pending_ = Pending::None;
+            } else if (state_ == State::FadingOut && pending_ != Pending::Seek) {
+                if (wanted_reverse_ != reverse_) {
+                    pending_ = Pending::Seek;  // finish the fade, turn around, keep playing
+                    pending_seek_ = -1;
+                } else {
+                    state_ = State::Playing;  // cancels the pending pause or stop
+                    pending_ = Pending::None;
+                }
             }
-            pending_ = Pending::None;
+            // A pending seek or change of direction ends in playback anyway.
             break;
 
         case CommandType::Pause:
@@ -364,13 +403,38 @@ void Engine::apply(const Command& command) noexcept {
             loop_start_ = command.a;
             loop_end_ = command.b;
             break;
+
+        case CommandType::SetReverse:
+            wanted_reverse_ = command.flag;
+            if (state_ == State::Stopped) {
+                reverse_ = wanted_reverse_;
+            } else if (state_ == State::Playing && wanted_reverse_ != reverse_) {
+                // Turn around at the bottom of a short fade so that it does not click.
+                state_ = State::FadingOut;
+                pending_ = Pending::Seek;
+                pending_seek_ = -1;  // no jump: turn around where the fade ends
+            }
+            break;
+
+        case CommandType::SetMetronome:
+            metronome_enabled_ = command.flag;
+            metronome_beat_frames_ = command.number;
+            metronome_beats_per_bar_ = command.a;
+            metronome_volume_ = command.value;
+            if (state_ == State::Stopped) {
+                metronome_gain_ = metronome_enabled_ ? metronome_volume_ : 0.0f;
+            }
+            break;
     }
 }
 
 void Engine::finish_fade() noexcept {
+    reverse_ = wanted_reverse_;
     switch (pending_) {
         case Pending::Seek:
-            pos_ = std::clamp<std::int64_t>(pending_seek_, 0, project_frames_);
+            if (pending_seek_ >= 0) {
+                pos_ = std::clamp<std::int64_t>(pending_seek_, 0, project_frames_);
+            }
             state_ = State::Playing;  // fade_ is 0 here, so playback fades in at the new position
             break;
         case Pending::Stop:
@@ -399,7 +463,7 @@ bool Engine::loop_region(std::int64_t& start, std::int64_t& end) const noexcept 
 
 // Decides, for every output frame of the block, which timeline frame it plays (or silence) and
 // how far the transport fade is open. Returns false when the whole block is silent.
-bool Engine::run_transport(std::uint32_t frames, std::int64_t loop_start, std::int64_t end_pos,
+bool Engine::run_transport(std::uint32_t frames, std::int64_t begin_pos, std::int64_t end_pos,
                            bool looping) noexcept {
     bool audible = false;
     for (std::uint32_t i = 0; i < frames; ++i) {
@@ -410,14 +474,27 @@ bool Engine::run_transport(std::uint32_t frames, std::int64_t loop_start, std::i
             continue;
         }
 
-        if (pos_ >= end_pos) {
+        if (!reverse_ && pos_ >= end_pos) {
             if (looping) {
-                pos_ = loop_start;
+                pos_ = begin_pos;
             } else {
                 // The project ended. A pending stop still returns to the start.
                 state_ = State::Stopped;
                 pos_ = pending_ == Pending::Stop ? 0 : project_frames_;
                 pending_ = Pending::None;
+                reverse_ = wanted_reverse_;
+                fade_ = 0.0f;
+                continue;
+            }
+        } else if (reverse_ && pos_ <= begin_pos) {
+            if (looping) {
+                pos_ = end_pos;
+            } else {
+                // Playing backwards reached the start.
+                state_ = State::Stopped;
+                pos_ = 0;
+                pending_ = Pending::None;
+                reverse_ = wanted_reverse_;
                 fade_ = 0.0f;
                 continue;
             }
@@ -434,12 +511,34 @@ bool Engine::run_transport(std::uint32_t frames, std::int64_t loop_start, std::i
             fade_ = std::min(1.0f, fade_ + fade_step_);
         }
 
-        frame_pos_[i] = pos_;
+        if (reverse_) {
+            --pos_;
+            frame_pos_[i] = pos_;
+        } else {
+            frame_pos_[i] = pos_;
+            ++pos_;
+        }
         frame_fade_[i] = fade_;
-        ++pos_;
         audible = true;
     }
     return audible;
+}
+
+// The metronome click at a timeline frame: a short decaying sine at the start of every beat.
+// It is a pure function of the position, so it stays in step through seeks, loops and reverse.
+float Engine::metronome_sample(std::int64_t frame) const noexcept {
+    const double beats = static_cast<double>(frame) / metronome_beat_frames_;
+    const double whole = std::floor(beats);
+    const double seconds =
+        (beats - whole) * metronome_beat_frames_ / static_cast<double>(sample_rate_);
+    if (seconds >= kClickSeconds) {
+        return 0.0f;
+    }
+    const bool accent = static_cast<std::int64_t>(whole) % metronome_beats_per_bar_ == 0;
+    const double frequency = accent ? kClickAccentFrequency : kClickFrequency;
+    const double envelope =
+        std::exp(-seconds / kClickDecaySeconds) * (1.0 - seconds / kClickSeconds);
+    return static_cast<float>(std::sin(kTwoPi * frequency * seconds) * envelope);
 }
 
 void Engine::mix_block(float* out, std::uint32_t frames, bool audible) noexcept {
@@ -551,9 +650,15 @@ void Engine::mix_block(float* out, std::uint32_t frames, bool audible) noexcept 
     for (std::uint32_t i = 0; i < frames; ++i) {
         smooth(gain_, gain_target_, coef);
         const float level = frame_fade_[i] * gain_;
+        // The metronome is added after the master fader, so the mix level does not change it.
+        smooth(metronome_gain_, metronome_enabled_ ? metronome_volume_ : 0.0f, coef);
+        float click = 0.0f;
+        if (metronome_gain_ > 0.0f && frame_pos_[i] >= 0) {
+            click = metronome_sample(frame_pos_[i]) * metronome_gain_ * frame_fade_[i];
+        }
         const std::size_t offset = static_cast<std::size_t>(i) * channels;
         for (std::size_t c = 0; c < channels; ++c) {
-            const float value = master[offset + c] * level;
+            const float value = master[offset + c] * level + click;
             const float magnitude = std::fabs(value);
             peak = std::max(peak, magnitude);
             if (magnitude > 1.0f) {
@@ -579,13 +684,17 @@ void Engine::render(float* out, std::uint32_t frames) noexcept {
     std::int64_t loop_start = 0;
     std::int64_t loop_end = 0;
     const bool looping = loop_region(loop_start, loop_end);
-    const std::int64_t end_pos = looping ? loop_end : project_frames_;
+    const std::int64_t begin_pos = looping ? loop_start : 0;
+    std::int64_t end_pos = looping ? loop_end : project_frames_;
+    if (project_frames_ <= 0 && metronome_enabled_) {
+        end_pos = std::numeric_limits<std::int64_t>::max();  // nothing loaded: run until stopped
+    }
 
     // Work through the request in blocks that fit the preallocated buffers.
     std::uint32_t done = 0;
     while (done < frames) {
         const std::uint32_t count = std::min(frames - done, kBlockFrames);
-        const bool audible = run_transport(count, loop_start, end_pos, looping);
+        const bool audible = run_transport(count, begin_pos, end_pos, looping);
         mix_block(out + static_cast<std::size_t>(done) * channels_, count, audible);
         done += count;
     }
