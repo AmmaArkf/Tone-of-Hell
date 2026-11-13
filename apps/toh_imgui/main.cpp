@@ -236,6 +236,11 @@ bool toggle_button(const char* label, bool active, const ImVec4& active_colour,
     return clicked;
 }
 
+// True when the last widget was double-clicked: sliders use it to return to their default.
+bool double_clicked() {
+    return ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left);
+}
+
 void tooltip(const char* text) {
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
         ImGui::SetTooltip("%s", text);
@@ -648,6 +653,10 @@ void draw_settings_window(Session& session, UiState& ui) {
                 session.set_master_gain(volume / 100.0f);
                 ui.settings_changed = true;
             }
+            if (double_clicked()) {
+                session.set_master_gain(1.0f);
+                ui.settings_changed = true;
+            }
             ImGui::TextDisabled("%s", T_("The same as the Master slider in the toolbar."));
 
             ImGui::Spacing();
@@ -656,6 +665,10 @@ void draw_settings_window(Session& session, UiState& ui) {
             if (ImGui::SliderFloat("##input gain", &sensitivity, 0.0f, 400.0f,
                                    T_("Input sensitivity: %.0f%%"), ImGuiSliderFlags_AlwaysClamp)) {
                 session.set_input_gain(sensitivity / 100.0f);
+                ui.settings_changed = true;
+            }
+            if (double_clicked()) {
+                session.set_input_gain(1.0f);
                 ui.settings_changed = true;
             }
             ImGui::TextDisabled("%s", T_("Applied to the input before monitoring and recording."));
@@ -909,6 +922,7 @@ void draw_dialogs(UiState& ui) {
                 {"Alt while dragging", "Ignore the grid"},
                 {"Right-click a region", "Menu: split, remove fades, remove"},
                 {"Click the ruler or an empty lane", "Move the playhead"},
+                {"Double-click a slider", "Back to its normal value"},
             };
             if (ImGui::BeginTable("shortcuts", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
                 // The keyboard shortcuts as they are set right now, then the fixed mouse actions.
@@ -1018,6 +1032,10 @@ void draw_metronome(Session& session, UiState& ui) {
             settings.volume = volume / 100.0f;
             changed = true;
         }
+        if (double_clicked()) {
+            settings.volume = toh::app::MetronomeSettings().volume;
+            changed = true;
+        }
 
         if (ImGui::Button(T_("Tap tempo"))) {
             const double now = ImGui::GetTime();
@@ -1101,7 +1119,10 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
                            ImGuiSliderFlags_AlwaysClamp)) {
         session.set_master_gain(percent / 100.0f);
     }
-    tooltip(T_("Master volume. 100% leaves the mix unchanged. Ctrl+click to type a value."));
+    if (double_clicked()) {
+        session.set_master_gain(1.0f);
+    }
+    tooltip(T_("Master volume. 100% leaves the mix unchanged. Double-click: back to 100%. Ctrl+click: type a value."));
     ImGui::SameLine();
     draw_meter(session.master_peak(), 8.0f * font, ImGui::GetFrameHeight());
 
@@ -1658,6 +1679,10 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
                            ImGuiSliderFlags_AlwaysClamp)) {
         session.set_track_gain(i, volume / 100.0f);
     }
+    if (double_clicked()) {
+        session.set_track_gain(i, 1.0f);
+    }
+    tooltip(T_("Double-click: back to 100%"));
 
     float pan = track.pan * 100.0f;
     char pan_text[48];
@@ -1673,6 +1698,10 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     if (ImGui::SliderFloat("##pan", &pan, -100.0f, 100.0f, pan_text, ImGuiSliderFlags_AlwaysClamp)) {
         session.set_track_pan(i, std::fabs(pan) < 3.0f ? 0.0f : pan / 100.0f);  // snap to centre
     }
+    if (double_clicked()) {
+        session.set_track_pan(i, 0.0f);
+    }
+    tooltip(T_("Double-click: back to the centre"));
 
     draw_meter(session.track_peak(i), slider_width, 0.75f * font);
     ImGui::EndChild();

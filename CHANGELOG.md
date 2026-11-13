@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.7
+
+- A double-click on a slider returns it to its normal value: track volume and master volume to 100%, pan to the centre, input sensitivity to 100%, metronome click volume to 50%.
+
 ## 0.0.6
 
 - Export to MP3: File > Export audio now also offers MP3 at 320 kbps, 192 kbps or variable bit rate (best quality). The files carry a header with their exact length.
