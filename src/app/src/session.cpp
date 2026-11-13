@@ -4,7 +4,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
+#include <sstream>
 #include <map>
 #include <set>
 #include <system_error>
@@ -12,6 +14,8 @@
 
 #include "toh/audio/clip_loader.h"
 #include "toh/audio/mp3_writer.h"
+
+#include "miniz.h"
 
 namespace toh::app {
 namespace {
@@ -171,6 +175,7 @@ Session::Session(const audio::DeviceConfig& config)
       engine_(config.sample_rate, config.channels),
       // A first guess for the way through the sound card: one buffer out and one buffer in.
       record_offset_(2 * static_cast<std::int64_t>(config.buffer_frames)) {
+    saved_state_ = state_text();  // an empty project counts as saved
     loader_ = std::thread([this] { loader_main(); });
 }
 
@@ -1063,6 +1068,7 @@ std::shared_ptr<const core::ClipData> CacheWriter::finish(Overview* overview, st
         auto clip = std::make_shared<core::ClipData>();
         clip->channels = channels_;
         clip->sample_rate = sample_rate_;
+        disk->set_remove_on_close(true);  // a cache file goes when nothing uses it any more
         clip->disk = std::move(disk);
         result = std::move(clip);
         if (overview != nullptr) {
@@ -1128,10 +1134,16 @@ void Session::finish_take() {
 }
 
 // ---- Project -----------------------------------------------------------------------------
+//
+// A project file (*.tohp) is a zip archive: "project.txt" describes the project, one value
+// per line, and "audio/audio-N.f32" hold its audio as raw float samples (the format of the
+// cache files). When a project is opened its audio is unpacked into the cache folder and
+// played from there.
 
 namespace {
 
 constexpr const char* kProjectHeader = "Tone of Hell project";
+constexpr const char* kProjectEntry = "project.txt";
 
 // A project file holds one value per line, so line breaks inside names become spaces.
 std::string one_line(std::string text) {
@@ -1143,145 +1155,167 @@ std::string one_line(std::string text) {
     return text;
 }
 
-std::filesystem::path audio_folder_of(const std::filesystem::path& file) {
-    std::filesystem::path folder = file.parent_path() / file.stem();
-    folder += " audio";
-    return folder;
+// Audio entries are plain names: nothing that could point outside the archive's audio folder.
+bool valid_audio_name(const std::string& name) {
+    return !name.empty() && name.find_first_of("/\\:") == std::string::npos &&
+           name.find("..") == std::string::npos;
 }
 
-// Writes the audio of a clip as raw float samples (the format of the cache files).
-bool write_audio_file(const core::ClipData& clip, const std::filesystem::path& path,
-                      std::string* error) {
-    if (clip.disk != nullptr) {
-        std::error_code code;
-        std::filesystem::copy_file(clip.disk->path(), path,
-                                   std::filesystem::copy_options::overwrite_existing, code);
-        if (code) {
-            set_error(error, "cannot copy audio into the project folder: " + code.message());
-            return false;
+// A zip archive together with its file, closed in every case.
+struct ZipFile {
+    mz_zip_archive zip;
+    std::FILE* file = nullptr;
+    bool reading = false;
+    bool writing = false;
+
+    ZipFile() { std::memset(&zip, 0, sizeof(zip)); }
+    ~ZipFile() {
+        if (reading) {
+            mz_zip_reader_end(&zip);
         }
-        return true;
+        if (writing) {
+            mz_zip_writer_end(&zip);
+        }
+        if (file != nullptr) {
+            std::fclose(file);
+        }
     }
-    std::FILE* file = core::open_file(path, "wb");
-    if (file == nullptr) {
-        set_error(error, "cannot create " + path.u8string());
-        return false;
-    }
-    const std::size_t samples = clip.samples.size();
-    const bool written =
-        samples == 0 || std::fwrite(clip.samples.data(), sizeof(float), samples, file) == samples;
-    const bool closed = std::fclose(file) == 0;
-    if (!written || !closed) {
-        set_error(error, "cannot write " + path.u8string() + " (is the disk full?)");
-        return false;
-    }
-    return true;
-}
+    ZipFile(const ZipFile&) = delete;
+    ZipFile& operator=(const ZipFile&) = delete;
+};
 
 }  // namespace
 
-bool Session::save_project(const std::filesystem::path& file, std::string* error) {
-    const std::filesystem::path folder = audio_folder_of(file);
-    std::error_code code;
-    std::filesystem::create_directories(folder, code);
-    if (code) {
-        set_error(error, "cannot create the folder " + folder.u8string() + ": " + code.message());
-        return false;
-    }
-    if (folder != project_audio_folder_) {
-        saved_audio_.clear();  // another project: its audio is written anew
-        project_audio_folder_ = folder;
-    }
-
-    // Every source that a region uses, in a fixed order, with the file that holds it.
+std::vector<std::shared_ptr<const Source>> Session::used_sources() const {
     std::vector<std::shared_ptr<const Source>> sources;
-    std::map<const Source*, std::size_t> index_of;
     for (const TrackInfo& track : tracks_) {
         for (const RegionInfo& region : track.regions) {
-            if (index_of.emplace(region.source.get(), sources.size()).second) {
+            if (std::find(sources.begin(), sources.end(), region.source) == sources.end()) {
                 sources.push_back(region.source);
             }
         }
     }
-    std::map<std::shared_ptr<const Source>, std::string> files;
-    std::set<std::string> taken;
-    for (const auto& source : sources) {
-        const auto saved = saved_audio_.find(source);
-        if (saved != saved_audio_.end() && std::filesystem::exists(folder / saved->second, code)) {
-            files[source] = saved->second;
-            taken.insert(saved->second);
-        }
-    }
-    int next = 1;
-    for (const auto& source : sources) {
-        if (files.count(source) != 0) {
-            continue;
-        }
-        std::string name;
-        do {
-            name = "audio-" + std::to_string(next++) + ".f32";
-        } while (taken.count(name) != 0 || std::filesystem::exists(folder / name, code));
-        if (!write_audio_file(*source->clip, folder / name, error)) {
-            return false;
-        }
-        files[source] = name;
-        taken.insert(name);
-    }
+    return sources;
+}
 
-    // The project file is written under another name first, so a failed save never leaves a
-    // broken project behind.
+std::string Session::project_text(const std::vector<std::shared_ptr<const Source>>& sources,
+                                  const std::vector<std::string>& files) const {
+    std::map<const Source*, std::size_t> index_of;
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        index_of[sources[i].get()] = i;
+    }
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out.precision(17);
+    out << kProjectHeader << "\n";
+    out << "version=1\n";
+    out << "sample_rate=" << config_.sample_rate << "\n";
+    out << "channels=" << config_.channels << "\n";
+    out << "loop=" << (loop_ ? 1 : 0) << "\n";
+    out << "metronome=" << (metronome_.enabled ? 1 : 0) << "\n";
+    out << "bpm=" << metronome_.bpm << "\n";
+    out << "beats_per_bar=" << metronome_.beats_per_bar << "\n";
+    out << "beat_unit=" << metronome_.beat_unit << "\n";
+    out << "metronome_volume=" << metronome_.volume << "\n";
+    out << "grid_step=" << static_cast<int>(grid_step_) << "\n";
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        out << "\n[source]\n";
+        out << "file=" << files[i] << "\n";
+        out << "name=" << one_line(sources[i]->name) << "\n";
+    }
+    for (const TrackInfo& track : tracks_) {
+        out << "\n[track]\n";
+        out << "name=" << one_line(track.name) << "\n";
+        out << "icon=" << one_line(track.icon) << "\n";
+        out << "gain=" << track.gain << "\n";
+        out << "pan=" << track.pan << "\n";
+        out << "mute=" << (track.mute ? 1 : 0) << "\n";
+        out << "solo=" << (track.solo ? 1 : 0) << "\n";
+        for (const RegionInfo& region : track.regions) {
+            out << "[region]\n";
+            out << "source=" << index_of[region.source.get()] << "\n";
+            out << "start=" << region.start << "\n";
+            out << "offset=" << region.offset << "\n";
+            out << "length=" << region.length << "\n";
+            out << "fade_in=" << region.fade_in << "\n";
+            out << "fade_out=" << region.fade_out << "\n";
+        }
+    }
+    return out.str();
+}
+
+// The project as it is now, with the sources named by their address: equal texts mean equal
+// projects.
+std::string Session::state_text() const {
+    const std::vector<std::shared_ptr<const Source>> sources = used_sources();
+    std::vector<std::string> names;
+    names.reserve(sources.size());
+    for (const auto& source : sources) {
+        char text[32];
+        std::snprintf(text, sizeof(text), "%p", static_cast<const void*>(source.get()));
+        names.emplace_back(text);
+    }
+    return project_text(sources, names);
+}
+
+bool Session::modified() const { return state_text() != saved_state_; }
+
+bool Session::save_project(const std::filesystem::path& file, std::string* error) {
+    const std::vector<std::shared_ptr<const Source>> sources = used_sources();
+    std::vector<std::string> names;
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        names.push_back("audio-" + std::to_string(i + 1) + ".f32");
+    }
+    const std::string text = project_text(sources, names);
+
+    // The archive is written under another name first, so a failed save never destroys the
+    // project that was there.
     std::filesystem::path temporary = file;
     temporary += ".saving";
+    std::error_code code;
+    bool written = false;
     {
-        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
-        if (!out) {
+        ZipFile zip;
+        zip.file = core::open_file(temporary, "wb");
+        if (zip.file == nullptr) {
             set_error(error, "cannot create " + file.u8string());
             return false;
         }
-        out.imbue(std::locale::classic());
-        out.precision(17);
-        out << kProjectHeader << "\n";
-        out << "version=1\n";
-        out << "sample_rate=" << config_.sample_rate << "\n";
-        out << "channels=" << config_.channels << "\n";
-        out << "loop=" << (loop_ ? 1 : 0) << "\n";
-        out << "metronome=" << (metronome_.enabled ? 1 : 0) << "\n";
-        out << "bpm=" << metronome_.bpm << "\n";
-        out << "beats_per_bar=" << metronome_.beats_per_bar << "\n";
-        out << "beat_unit=" << metronome_.beat_unit << "\n";
-        out << "metronome_volume=" << metronome_.volume << "\n";
-        out << "grid_step=" << static_cast<int>(grid_step_) << "\n";
-        for (const auto& source : sources) {
-            out << "\n[source]\n";
-            out << "file=" << files[source] << "\n";
-            out << "name=" << one_line(source->name) << "\n";
-        }
-        for (const TrackInfo& track : tracks_) {
-            out << "\n[track]\n";
-            out << "name=" << one_line(track.name) << "\n";
-            out << "icon=" << one_line(track.icon) << "\n";
-            out << "gain=" << track.gain << "\n";
-            out << "pan=" << track.pan << "\n";
-            out << "mute=" << (track.mute ? 1 : 0) << "\n";
-            out << "solo=" << (track.solo ? 1 : 0) << "\n";
-            for (const RegionInfo& region : track.regions) {
-                out << "[region]\n";
-                out << "source=" << index_of[region.source.get()] << "\n";
-                out << "start=" << region.start << "\n";
-                out << "offset=" << region.offset << "\n";
-                out << "length=" << region.length << "\n";
-                out << "fade_in=" << region.fade_in << "\n";
-                out << "fade_out=" << region.fade_out << "\n";
+        zip.writing = mz_zip_writer_init_cfile(&zip.zip, zip.file, MZ_ZIP_FLAG_WRITE_ZIP64) != 0;
+        bool ok = zip.writing && mz_zip_writer_add_mem(&zip.zip, kProjectEntry, text.data(),
+                                                       text.size(), MZ_DEFAULT_LEVEL) != 0;
+        for (std::size_t i = 0; ok && i < sources.size(); ++i) {
+            const core::ClipData& clip = *sources[i]->clip;
+            const std::string entry = "audio/" + names[i];
+            const auto bytes = static_cast<mz_uint64>(clip.frames()) * clip.channels * sizeof(float);
+            if (clip.disk != nullptr) {
+                std::FILE* audio = core::open_file(clip.disk->path(), "rb");
+                ok = audio != nullptr &&
+                     mz_zip_writer_add_cfile(&zip.zip, entry.c_str(), audio, bytes, nullptr, nullptr,
+                                             0, MZ_BEST_SPEED, nullptr, 0, nullptr, 0) != 0;
+                if (audio != nullptr) {
+                    std::fclose(audio);
+                }
+            } else {
+                ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), clip.samples.data(),
+                                           static_cast<std::size_t>(bytes), MZ_BEST_SPEED) != 0;
             }
         }
-        out.flush();
-        if (!out) {
-            set_error(error, "cannot write " + file.u8string() + " (is the disk full?)");
-            out.close();
-            std::filesystem::remove(temporary, code);
-            return false;
+        ok = ok && mz_zip_writer_finalize_archive(&zip.zip) != 0;
+        if (zip.writing) {
+            mz_zip_writer_end(&zip.zip);
+            zip.writing = false;
         }
+        const bool closed = std::fclose(zip.file) == 0;
+        zip.file = nullptr;
+        written = ok && closed;
     }
+    if (!written) {
+        std::filesystem::remove(temporary, code);
+        set_error(error, "cannot write " + file.u8string() + " (is the disk full?)");
+        return false;
+    }
+
     std::filesystem::rename(temporary, file, code);
     if (code) {
         std::error_code ignored;
@@ -1293,22 +1327,8 @@ bool Session::save_project(const std::filesystem::path& file, std::string* error
         set_error(error, "cannot replace " + file.u8string() + ": " + code.message());
         return false;
     }
-
-    // Audio files of this project that nothing uses any more. The loader must not hold one
-    // open meanwhile (a file that is still open cannot be removed on Windows; it goes with a
-    // later save).
-    saved_audio_ = std::move(files);
-    const std::lock_guard<std::mutex> busy(loader_busy_);
-    for (std::filesystem::directory_iterator it(folder, code), end; !code && it != end;
-         it.increment(code)) {
-        const std::string name = it->path().filename().u8string();
-        if (name.rfind("audio-", 0) == 0 && it->path().extension() == ".f32" &&
-            taken.count(name) == 0) {
-            std::error_code ignored;
-            std::filesystem::remove(it->path(), ignored);
-        }
-    }
     project_file_ = file;
+    saved_state_ = state_text();
     return true;
 }
 
@@ -1317,11 +1337,29 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         set_error(error, "stop the recording first");
         return false;
     }
-    std::ifstream in(file, std::ios::binary);
-    if (!in) {
+    ZipFile zip;
+    std::error_code code;
+    const std::uintmax_t size = std::filesystem::file_size(file, code);
+    zip.file = code ? nullptr : core::open_file(file, "rb");
+    if (zip.file == nullptr) {
         set_error(error, "cannot open " + file.u8string());
         return false;
     }
+    zip.reading = mz_zip_reader_init_cfile(&zip.zip, zip.file, static_cast<mz_uint64>(size), 0) != 0;
+    const int text_index =
+        zip.reading ? mz_zip_reader_locate_file(&zip.zip, kProjectEntry, nullptr, 0) : -1;
+    std::string text;
+    if (text_index >= 0) {
+        std::size_t text_size = 0;
+        void* data = mz_zip_reader_extract_to_heap(&zip.zip, static_cast<mz_uint>(text_index),
+                                                   &text_size, 0);
+        if (data != nullptr) {
+            text.assign(static_cast<const char*>(data), text_size);
+            mz_free(data);
+        }
+    }
+
+    std::istringstream in(text);
     std::string line;
     std::getline(in, line);
     if (!line.empty() && line.back() == '\r') {
@@ -1468,22 +1506,32 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         return false;
     }
 
-    // The audio files: only plain names inside the project's audio folder are accepted.
-    const std::filesystem::path folder = audio_folder_of(file);
+    // Unpack the audio into the cache folder. The cache files go when nothing uses them.
     std::vector<std::shared_ptr<const Source>> loaded;
-    std::map<std::shared_ptr<const Source>, std::string> saved;
     for (const SourceEntry& entry : sources) {
-        if (entry.file.empty() || entry.file.find_first_of("/\\:") != std::string::npos ||
-            entry.file.find("..") != std::string::npos) {
+        if (!valid_audio_name(entry.file)) {
             set_error(error, "the project names an invalid audio file: " + entry.file);
             return false;
         }
-        const std::filesystem::path path = folder / std::filesystem::u8path(entry.file);
-        auto disk = core::PagedFile::open(path, config_.channels);
+        const int index =
+            mz_zip_reader_locate_file(&zip.zip, ("audio/" + entry.file).c_str(), nullptr, 0);
+        const std::filesystem::path path = index >= 0 ? new_cache_file("project") : std::filesystem::path();
+        std::FILE* out = path.empty() ? nullptr : core::open_file(path, "wb");
+        bool ok = out != nullptr &&
+                  mz_zip_reader_extract_to_cfile(&zip.zip, static_cast<mz_uint>(index), out, 0) != 0;
+        if (out != nullptr) {
+            ok = std::fclose(out) == 0 && ok;
+        }
+        std::shared_ptr<core::PagedFile> disk = ok ? core::PagedFile::open(path, config_.channels) : nullptr;
         if (!disk) {
-            set_error(error, "an audio file of the project is missing: " + path.u8string());
+            if (!path.empty()) {
+                std::error_code ignored;
+                std::filesystem::remove(path, ignored);
+            }
+            set_error(error, "an audio file of the project is missing or damaged: " + entry.file);
             return false;
         }
+        disk->set_remove_on_close(true);
         auto clip = std::make_shared<core::ClipData>();
         clip->channels = config_.channels;
         clip->sample_rate = config_.sample_rate;
@@ -1492,7 +1540,6 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         source->name = entry.name;
         source->overview = make_overview(*clip);
         source->clip = std::move(clip);
-        saved[source] = entry.file;
         loaded.push_back(std::move(source));
     }
 
@@ -1546,8 +1593,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     }
     seek_frames(0);
     project_file_ = file;
-    project_audio_folder_ = folder;
-    saved_audio_ = std::move(saved);
+    saved_state_ = state_text();
     return true;
 }
 
@@ -1563,8 +1609,7 @@ void Session::new_project() {
     update_streaming();
     seek_frames(0);
     project_file_.clear();
-    project_audio_folder_.clear();
-    saved_audio_.clear();
+    saved_state_ = state_text();
 }
 
 void Session::clear_engine_slot(std::size_t slot) {

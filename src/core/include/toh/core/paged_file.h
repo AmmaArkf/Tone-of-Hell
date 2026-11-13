@@ -45,6 +45,8 @@ public:
         return (frames_ + frames_per_page_ - 1) / frames_per_page_;
     }
     const std::filesystem::path& path() const noexcept { return path_; }
+    /// Deletes the file when the last user lets go of it (for cache files).
+    void set_remove_on_close(bool remove) noexcept { remove_on_close_ = remove; }
 
     /// Audio thread: copies one frame (channels() samples) to `out` if its page is in memory.
     bool read_frame(std::int64_t frame, float* out) const noexcept;
@@ -77,6 +79,7 @@ private:
     bool load_blocking_page(std::int64_t page);
 
     std::filesystem::path path_;
+    bool remove_on_close_ = false;
     std::uint32_t channels_ = 0;
     std::int64_t frames_ = 0;
     std::int64_t frames_per_page_ = 1;

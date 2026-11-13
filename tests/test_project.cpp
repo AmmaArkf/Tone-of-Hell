@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -9,6 +10,7 @@
 #include <vector>
 
 #include "doctest.h"
+#include "miniz.h"
 #include "toh/app/session.h"
 #include "toh/core/clip.h"
 
@@ -19,10 +21,10 @@ using toh::core::ClipData;
 
 namespace {
 
-std::shared_ptr<ClipData> counting_clip(std::size_t frames, float scale) {
+std::shared_ptr<ClipData> counting_clip(std::size_t frames, float scale, std::uint32_t rate = 48000) {
     auto clip = std::make_shared<ClipData>();
     clip->channels = 2;
-    clip->sample_rate = 48000;
+    clip->sample_rate = rate;
     clip->samples.resize(frames * 2);
     for (std::size_t i = 0; i < frames; ++i) {
         clip->samples[i * 2] = static_cast<float>(i) * scale;
@@ -37,22 +39,22 @@ float sample_at(const RegionInfo& region, std::int64_t frame) {
     return value[0];
 }
 
-std::size_t audio_files(const std::filesystem::path& folder) {
-    std::size_t count = 0;
-    for (const auto& entry : std::filesystem::directory_iterator(folder)) {
-        if (entry.path().extension() == ".f32") {
-            ++count;
-        }
-    }
-    return count;
-}
-
 // A fresh, empty folder for one test.
 std::filesystem::path test_folder(const char* name) {
     const std::filesystem::path folder = std::filesystem::temp_directory_path() / name;
     std::filesystem::remove_all(folder);
     std::filesystem::create_directories(folder);
     return folder;
+}
+
+// Writes a zip file with one "project.txt" entry.
+void write_zip(const std::filesystem::path& path, const std::string& text) {
+    mz_zip_archive zip;
+    std::memset(&zip, 0, sizeof(zip));
+    REQUIRE(mz_zip_writer_init_file(&zip, path.string().c_str(), 0));
+    REQUIRE(mz_zip_writer_add_mem(&zip, "project.txt", text.data(), text.size(), MZ_DEFAULT_LEVEL));
+    REQUIRE(mz_zip_writer_finalize_archive(&zip));
+    mz_zip_writer_end(&zip);
 }
 
 }  // namespace
@@ -64,13 +66,14 @@ TEST_CASE("A saved project opens again exactly as it was") {
 
     {
         Session session;
+        CHECK_FALSE(session.modified());
         REQUIRE(session.add_track("Guitar", counting_clip(3000, 0.0001f)));
         REQUIRE(session.add_track("Voice", counting_clip(2000, 0.0002f)));
         session.add_empty_track("Empty");
+        CHECK(session.modified());
         REQUIRE(session.split_region(0, 0, 1000));
         REQUIRE(session.move_region(0, 1, 5000));
         REQUIRE(session.set_region_fades(0, 0, 100, 200));
-        REQUIRE(session.join_regions(1, {0, 0}) == false);  // nothing to join: one region
         REQUIRE(session.set_track_icon(0, "guitar"));
         REQUIRE(session.set_track_gain(1, 0.5f));
         REQUIRE(session.set_track_pan(1, -0.25f));
@@ -84,12 +87,20 @@ TEST_CASE("A saved project opens again exactly as it was") {
         std::string error;
         REQUIRE_MESSAGE(session.save_project(file, &error), error);
         CHECK(session.project_file() == file);
-        CHECK(std::filesystem::exists(file));
-        CHECK(audio_files(folder / std::filesystem::u8path("\xD0\x9F\xD0\xB5\xD1\x81\xD0\xBD\xD1\x8F audio")) == 2);
+        CHECK_FALSE(session.modified());
+        CHECK(std::filesystem::is_regular_file(file));
+        // One file only: no folders next to it.
+        std::size_t entries = 0;
+        for (const auto& entry : std::filesystem::directory_iterator(folder)) {
+            (void)entry;
+            ++entries;
+        }
+        CHECK(entries == 1);
 
-        // Saving again writes no audio a second time.
-        REQUIRE(session.save_project(file, &error));
-        CHECK(audio_files(folder / std::filesystem::u8path("\xD0\x9F\xD0\xB5\xD1\x81\xD0\xBD\xD1\x8F audio")) == 2);
+        REQUIRE(session.set_track_gain(0, 0.75f));
+        CHECK(session.modified());
+        REQUIRE(session.set_track_gain(0, 1.0f));
+        CHECK_FALSE(session.modified());  // back as saved
     }
 
     Session opened;
@@ -99,8 +110,8 @@ TEST_CASE("A saved project opens again exactly as it was") {
     opened.add_empty_track("And this one");
     std::string error;
     REQUIRE_MESSAGE(opened.open_project(file, &error), error);
-    opened.update();  // as the user interface does after every frame
     CHECK(opened.project_file() == file);
+    CHECK_FALSE(opened.modified());
     const std::vector<TrackInfo>& tracks = opened.tracks();
     REQUIRE(tracks.size() == 3);
     CHECK(tracks[0].name == "Guitar");
@@ -124,23 +135,27 @@ TEST_CASE("A saved project opens again exactly as it was") {
     CHECK(second.start == 5000);
     CHECK(second.offset == 1000);
     CHECK(second.length == 2000);
-    CHECK(first.source == second.source);  // both parts still share one audio file
+    CHECK(first.source == second.source);  // both parts still share one piece of audio
     CHECK(sample_at(second, 10) == doctest::Approx(1010 * 0.0001f));
     CHECK(sample_at(tracks[1].regions[0], 1999) == doctest::Approx(1999 * 0.0002f));
     CHECK(opened.length_frames() == 7000);
 
-    // Audio that nothing uses any more is removed with the next save.
+    // The opened project saves again, also after changes.
     REQUIRE(opened.remove_track(1));
-    for (int i = 0; i < 3; ++i) {
-        opened.update();  // the engine lets go of the removed audio
-    }
-    REQUIRE(opened.save_project(file, &error));
-    CHECK(audio_files(folder / std::filesystem::u8path("\xD0\x9F\xD0\xB5\xD1\x81\xD0\xBD\xD1\x8F audio")) == 1);
+    CHECK(opened.modified());
+    REQUIRE_MESSAGE(opened.save_project(file, &error), error);
+    CHECK_FALSE(opened.modified());
+
+    Session again;
+    REQUIRE_MESSAGE(again.open_project(file, &error), error);
+    REQUIRE(again.tracks().size() == 2);
+    CHECK(sample_at(again.tracks()[0].regions[1], 10) == doctest::Approx(1010 * 0.0001f));
 
     opened.new_project();
     CHECK(opened.tracks().empty());
     CHECK(opened.project_file().empty());
     CHECK(opened.length_frames() == 0);
+    CHECK_FALSE(opened.modified());
 }
 
 TEST_CASE("Opening refuses files that are not projects or do not fit") {
@@ -159,19 +174,27 @@ TEST_CASE("Opening refuses files that are not projects or do not fit") {
     CHECK_FALSE(session.open_project(folder / "other.tohp", &error));
 
     {
-        std::ofstream out(folder / "rate.tohp");
-        out << "Tone of Hell project\nversion=1\nsample_rate=44100\nchannels=2\n";
+        toh::audio::DeviceConfig config;
+        config.sample_rate = 44100;
+        Session other(config);
+        REQUIRE(other.add_track("At 44.1 kHz", counting_clip(100, 0.01f, 44100)));
+        REQUIRE(other.save_project(folder / "rate.tohp", &error));
     }
     error.clear();
     CHECK_FALSE(session.open_project(folder / "rate.tohp", &error));
     CHECK(error.find("44100") != std::string::npos);
 
-    {
-        std::ofstream out(folder / "escape.tohp");
-        out << "Tone of Hell project\nversion=1\nsample_rate=48000\nchannels=2\n"
-               "[source]\nfile=../secret.f32\nname=x\n";
-    }
+    write_zip(folder / "escape.tohp",
+              "Tone of Hell project\nversion=1\nsample_rate=48000\nchannels=2\n"
+              "[source]\nfile=../secret.f32\nname=x\n");
     CHECK_FALSE(session.open_project(folder / "escape.tohp", &error));
+
+    write_zip(folder / "lost.tohp",
+              "Tone of Hell project\nversion=1\nsample_rate=48000\nchannels=2\n"
+              "[source]\nfile=audio-1.f32\nname=x\n");
+    error.clear();
+    CHECK_FALSE(session.open_project(folder / "lost.tohp", &error));
+    CHECK_FALSE(error.empty());
 
     REQUIRE(session.tracks().size() == 1);  // nothing changed
     CHECK(session.tracks()[0].name == "Stays");

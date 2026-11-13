@@ -290,10 +290,9 @@ public:
 
     // ---- Project -------------------------------------------------------------------------
 
-    /// Saves the project: a text file (`file`, usually "*.tohp") and, next to it, a folder
-    /// named after it plus " audio" with the audio of every region. Audio that is already in
-    /// that folder is not written again, and audio files that nothing uses any more are
-    /// removed. Returns false on failure (`error`, if given, says why).
+    /// Saves the project into one file (usually "*.tohp"): a zip archive with a description
+    /// of the project and the audio of every region. Returns false on failure (`error`, if
+    /// given, says why); the file that was there before stays as it was.
     bool save_project(const std::filesystem::path& file, std::string* error = nullptr);
     /// Replaces everything in the session with a project saved by save_project(). On failure
     /// nothing changes.
@@ -302,6 +301,8 @@ public:
     void new_project();
     /// The file the project was last saved to or opened from; empty for a new project.
     const std::filesystem::path& project_file() const noexcept { return project_file_; }
+    /// True when the project differs from what was last saved, opened or started.
+    bool modified() const;
 
     // ---- Export --------------------------------------------------------------------------
 
@@ -366,6 +367,13 @@ private:
     void sync_track_regions(std::size_t index);
     /// Empties one track slot of the engine.
     void clear_engine_slot(std::size_t slot);
+    /// Every source that a region uses, in the order of the tracks.
+    std::vector<std::shared_ptr<const Source>> used_sources() const;
+    /// The text that describes the project, with `files[i]` naming the audio of `sources[i]`.
+    std::string project_text(const std::vector<std::shared_ptr<const Source>>& sources,
+                             const std::vector<std::string>& files) const;
+    /// The project as it is now, for comparing (see modified()).
+    std::string state_text() const;
     void sync_engine_tracks(std::size_t first);
     void update_length();
     void drain_recording();
@@ -423,9 +431,7 @@ private:
     int cache_count_ = 0;
 
     std::filesystem::path project_file_;
-    std::filesystem::path project_audio_folder_;
-    /// The file in project_audio_folder_ that holds each source, for sources saved there.
-    std::map<std::shared_ptr<const Source>, std::string> saved_audio_;
+    std::string saved_state_;  // state_text() when the project was saved, opened or started
 
     std::mutex loader_mutex_;  // guards the loader_ members below
     std::condition_variable loader_cv_;

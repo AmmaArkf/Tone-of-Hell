@@ -2,6 +2,18 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.1.0
+
+The first pre-release. Everything since 0.0.1 in short: playback, recording, a multitrack mixer with regions, fades, splitting, joining and moving between tracks, a metronome and grid, reverse playback, WAV and MP3 export, projects, and an interface in English and Russian.
+
+New in this version:
+
+- A project is one file: "*.tohp" is a zip archive with the description of the project and all its audio, compressed. Every project gets a folder of its own (".../Song/Song.tohp").
+- Closing the program, starting a new project and opening one ask whether to save unsaved changes. The window title shows a star while there are any.
+- Temporary files are removed as soon as nothing uses them (for example a removed recording), and the rest when the program closes.
+- A log file for every session (Edit > Settings > General > Logs, on by default; Help > Open the logs folder). It records the version, the audio device, the errors you saw, late disk reads, lost recording input and crashes. The 20 newest logs are kept.
+- Scissors next to the magnet (key C): while they are on, a click on a region cuts it where the mouse is, also at a nearby edge or the playhead when the magnet is on.
+
 ## 0.0.18
 
 - Projects can be saved and opened: File > New project (Ctrl+N), Open a project (Ctrl+Shift+O), Save the project (Ctrl+S) and Save the project as (Ctrl+Shift+S). The first Ctrl+S asks where to save.

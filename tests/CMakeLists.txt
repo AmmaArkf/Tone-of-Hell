@@ -14,7 +14,7 @@ add_executable(toh_tests
     test_transport.cpp)
 
 target_include_directories(toh_tests SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/doctest)
-target_link_libraries(toh_tests PRIVATE toh_core toh_app toh_warnings Threads::Threads)
+target_link_libraries(toh_tests PRIVATE toh_core toh_app toh_miniz toh_warnings Threads::Threads)
 
 toh_copy_runtime_dlls(toh_tests)
 

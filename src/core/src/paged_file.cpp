@@ -63,6 +63,10 @@ PagedFile::~PagedFile() {
     if (blocking_file_ != nullptr) {
         std::fclose(blocking_file_);
     }
+    if (remove_on_close_) {
+        std::error_code code;
+        std::filesystem::remove(path_, code);
+    }
 }
 
 // A sequence lock: the frame is copied, then the slot's version is checked again. If the loader

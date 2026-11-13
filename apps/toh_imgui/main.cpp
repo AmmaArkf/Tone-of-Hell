@@ -22,6 +22,7 @@
 
 #include "toh/app/build_info.h"
 #include "toh/app/i18n.h"
+#include "toh/app/log.h"
 #include "toh/app/settings.h"
 #include "toh/app/session.h"
 #include "toh/core/clip.h"
@@ -110,12 +111,10 @@ struct PendingPath {
 
 void SDLCALL path_dialog_callback(void* user_data, const char* const* file_list, int /*filter*/) {
     auto* request = static_cast<PendingPath*>(user_data);
-    if (file_list == nullptr || file_list[0] == nullptr) {
-        return;  // the dialog failed or was cancelled
-    }
     {
+        // An empty path means that the dialog failed or was cancelled.
         const std::lock_guard<std::mutex> lock(request->mutex);
-        request->path = file_list[0];
+        request->path = file_list != nullptr && file_list[0] != nullptr ? file_list[0] : "";
         request->ready = true;
     }
     wake_main_loop();
@@ -182,7 +181,17 @@ struct UiState {
     std::filesystem::path settings_path;
     bool settings_changed = false; // write the settings file soon
     PendingPath path_request;      // project and folder dialogs
-    bool confirm_new_project = false;
+    enum class Then { Nothing, Quit, NewProject, OpenProject };
+    Then after_save = Then::Nothing;    // what to do once the "save as" dialog has saved
+    Then pending_then = Then::Nothing;  // waits for the answer about unsaved changes
+    bool ask_unsaved = false;
+    bool cut_tool = false;              // the scissors: a click cuts a region
+    std::filesystem::path logs_folder;
+    std::string logged_error;           // the last error and notice written to the log
+    std::string logged_notice;
+    std::uint64_t logged_disk_misses = 0;
+    std::uint64_t logged_dropped = 0;
+    std::uint64_t last_log_ticks = 0;
     std::string window_title;      // what the window title shows now
     bool show_settings = false;
     int capturing = -1;            // the action whose shortcut is being changed, or -1
@@ -329,6 +338,28 @@ bool magnet_button(bool on) {
                    ImVec2(origin.x + size * 0.82f, origin.y + size * 0.18f), IM_COL32(230, 90, 80, 230),
                    2.0f);
     }
+    return clicked;
+}
+
+// The scissors button of the toolbar: a click on a region cuts it while it is on.
+bool scissors_button(bool on) {
+    const float size = ImGui::GetFrameHeight();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton("scissors", ImVec2(size, size));
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    ImU32 background = ImGui::GetColorU32(hovered ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+    if (on) {
+        background = hovered ? IM_COL32(70, 110, 180, 255) : IM_COL32(50, 90, 160, 255);
+    }
+    d->AddRectFilled(origin, ImVec2(origin.x + size, origin.y + size), background,
+                     ImGui::GetStyle().FrameRounding);
+    const auto P = [&](float u, float v) { return ImVec2(origin.x + u * size, origin.y + v * size); };
+    const ImU32 ink = on ? IM_COL32(245, 245, 250, 255) : IM_COL32(170, 170, 180, 255);
+    d->AddLine(P(0.30f, 0.14f), P(0.64f, 0.62f), ink, 0.08f * size);
+    d->AddLine(P(0.70f, 0.14f), P(0.36f, 0.62f), ink, 0.08f * size);
+    d->AddCircle(P(0.30f, 0.74f), 0.12f * size, ink, 16, 0.07f * size);
+    d->AddCircle(P(0.70f, 0.74f), 0.12f * size, ink, 16, 0.07f * size);
     return clicked;
 }
 
@@ -981,17 +1012,56 @@ void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
     }
 }
 
-// Ctrl+S: saves to the project's file, or asks for one the first time.
-void save_project(Session& session, UiState& ui) {
+// Ctrl+S: saves to the project's file, or asks for one the first time (then it returns false;
+// the save happens when the dialog answers).
+bool save_project(Session& session, UiState& ui) {
     if (session.project_file().empty()) {
         open_path_dialog(session, ui, PendingPath::Kind::SaveProject);
-        return;
+        return false;
     }
     std::string error;
     if (session.save_project(session.project_file(), &error)) {
         ui.notice = std::string(T_("Saved: ")) + session.project_file().u8string();
+        return true;
+    }
+    ui.error = std::string(T_("Save: ")) + error;
+    return false;
+}
+
+// Opens a folder in the file manager.
+void open_folder(const std::filesystem::path& folder) {
+    std::error_code code;
+    std::filesystem::create_directories(folder, code);
+    const std::string url = "file:///" + folder.generic_u8string();
+    SDL_OpenURL(url.c_str());
+}
+
+void do_then(Session& session, UiState& ui, UiState::Then then) {
+    switch (then) {
+        case UiState::Then::Quit:
+            ui.quit = true;
+            break;
+        case UiState::Then::NewProject:
+            session.new_project();
+            ui.selected = false;
+            ui.armed = false;
+            toh::app::logging::info("New project");
+            break;
+        case UiState::Then::OpenProject:
+            open_path_dialog(session, ui, PendingPath::Kind::OpenProject);
+            break;
+        case UiState::Then::Nothing:
+            break;
+    }
+}
+
+// Does `then` at once when nothing would be lost; otherwise asks about the changes first.
+void unless_unsaved(Session& session, UiState& ui, UiState::Then then) {
+    if (session.modified()) {
+        ui.pending_then = then;
+        ui.ask_unsaved = true;
     } else {
-        ui.error = std::string(T_("Save: ")) + error;
+        do_then(session, ui, then);
     }
 }
 
@@ -1008,6 +1078,12 @@ void handle_path_request(Session& session, UiState& ui) {
         kind = ui.path_request.kind;
         path = ui.path_request.path;
     }
+    if (path.empty()) {  // cancelled
+        if (kind == PendingPath::Kind::SaveProject) {
+            ui.after_save = UiState::Then::Nothing;
+        }
+        return;
+    }
     std::string error;
     if (kind == PendingPath::Kind::ProjectsFolder) {
         ui.settings.projects_folder = path;
@@ -1017,8 +1093,20 @@ void handle_path_request(Session& session, UiState& ui) {
         if (file.extension() != ".tohp") {
             file += ".tohp";
         }
+        // Every project gets a folder of its own, named like the project.
+        if (file.parent_path().filename() != file.stem()) {
+            const std::filesystem::path folder = file.parent_path() / file.stem();
+            std::error_code code;
+            std::filesystem::create_directories(folder, code);
+            if (!code) {
+                file = folder / file.filename();
+            }
+        }
+        const UiState::Then then = ui.after_save;
+        ui.after_save = UiState::Then::Nothing;
         if (session.save_project(file, &error)) {
             ui.notice = std::string(T_("Saved: ")) + file.u8string();
+            do_then(session, ui, then);
         } else {
             ui.error = std::string(T_("Save: ")) + error;
         }
@@ -1032,41 +1120,88 @@ void handle_path_request(Session& session, UiState& ui) {
     }
 }
 
-// "New project" asks first when there is something to lose.
-void draw_new_project_popup(Session& session, UiState& ui) {
-    if (ui.confirm_new_project) {
-        ImGui::OpenPopup("new project");
-        ui.confirm_new_project = false;
+// The question about unsaved changes, before closing, starting anew or opening a project.
+void draw_unsaved_popup(Session& session, UiState& ui) {
+    if (ui.ask_unsaved) {
+        ImGui::OpenPopup("###unsaved");
+        ui.ask_unsaved = false;
     }
-    if (ImGui::BeginPopupModal("new project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::TextUnformatted(T_("Start a new project? Changes that are not saved are lost."));
-        if (ImGui::Button(T_("New project"))) {
-            session.new_project();
-            ui.selected = false;
-            ui.armed = false;
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    const std::string title = std::string(T_("Unsaved changes")) + "###unsaved";
+    if (ImGui::BeginPopupModal(title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        const std::string name = session.project_file().empty()
+                                     ? std::string(T_("Untitled"))
+                                     : session.project_file().stem().u8string();
+        ImGui::Text(T_("Save the changes to \"%s\"?"), name.c_str());
+        ImGui::TextDisabled("%s", T_("Without saving, the changes are lost."));
+        ImGui::Spacing();
+        if (ImGui::Button(T_("Save"))) {
+            const UiState::Then then = ui.pending_then;
+            ui.pending_then = UiState::Then::Nothing;
             ImGui::CloseCurrentPopup();
+            if (session.project_file().empty()) {
+                ui.after_save = then;  // the "save as" dialog finishes the job
+                open_path_dialog(session, ui, PendingPath::Kind::SaveProject);
+            } else if (save_project(session, ui)) {
+                do_then(session, ui, then);
+            }
         }
         ImGui::SameLine();
-        if (ImGui::Button(T_("Cancel"))) {
+        if (ImGui::Button(T_("Don't save"))) {
+            const UiState::Then then = ui.pending_then;
+            ui.pending_then = UiState::Then::Nothing;
+            ImGui::CloseCurrentPopup();
+            do_then(session, ui, then);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T_("Cancel")) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            ui.pending_then = UiState::Then::Nothing;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
     }
 }
 
-void new_project(Session& session, UiState& ui) {
-    if (session.tracks().empty()) {
-        session.new_project();
-    } else {
-        ui.confirm_new_project = true;
+// Writes the errors and notices the user saw, and audio trouble, to the session log.
+void log_events(Session& session, UiState& ui) {
+    if (!ui.error.empty() && ui.error != ui.logged_error) {
+        toh::app::logging::error(ui.error);
+        ui.logged_error = ui.error;
+    }
+    if (!ui.notice.empty() && ui.notice != ui.logged_notice) {
+        toh::app::logging::info(ui.notice);
+        ui.logged_notice = ui.notice;
+    }
+    const std::uint64_t now = SDL_GetTicks();
+    if (now - ui.last_log_ticks < 2000) {
+        return;  // audio trouble is summed up at most every two seconds
+    }
+    ui.last_log_ticks = now;
+    const std::uint64_t misses = session.disk_misses();
+    if (misses != ui.logged_disk_misses) {
+        toh::app::logging::warning("Audio from disk came late: " +
+                                   std::to_string(misses - ui.logged_disk_misses) +
+                                   " frames played as silence");
+        ui.logged_disk_misses = misses;
+    }
+    const std::uint64_t dropped = session.engine().record_dropped_frames();
+    if (dropped != ui.logged_dropped) {
+        toh::app::logging::warning("Recording lost " + std::to_string(dropped - ui.logged_dropped) +
+                                   " input frames (the disk or the program was too slow)");
+        ui.logged_dropped = dropped;
     }
 }
 
-// The window title names the project.
+// The window title names the project and shows a star while it has unsaved changes.
 void update_window_title(const Session& session, UiState& ui) {
     std::string title = "Tone of Hell";
-    if (!session.project_file().empty()) {
-        title = session.project_file().stem().u8string() + " - " + title;
+    const bool modified = session.modified();
+    if (!session.project_file().empty() || modified) {
+        const std::string name = session.project_file().empty()
+                                     ? std::string(T_("Untitled"))
+                                     : session.project_file().stem().u8string();
+        title = name + (modified ? "*" : "") + " - " + title;
     }
     if (title != ui.window_title) {
         ui.window_title = title;
@@ -1133,10 +1268,13 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
             add_new_track(session, ui, false);
             break;
         case Action::NewProject:
-            new_project(session, ui);
+            unless_unsaved(session, ui, UiState::Then::NewProject);
             break;
         case Action::OpenProject:
-            open_path_dialog(session, ui, PendingPath::Kind::OpenProject);
+            unless_unsaved(session, ui, UiState::Then::OpenProject);
+            break;
+        case Action::CutTool:
+            ui.cut_tool = !ui.cut_tool;
             break;
         case Action::SaveProject:
             save_project(session, ui);
@@ -1239,6 +1377,24 @@ void draw_settings_window(Session& session, UiState& ui) {
             }
             ImGui::TextDisabled("%s", T_("Click a track name to select it, Ctrl+click to select several. "
                                          "With nothing selected, every track plays."));
+
+            ImGui::SeparatorText(T_("Logs"));
+            if (ImGui::Checkbox(T_("Write a log file for every session"), &ui.settings.write_logs)) {
+                ui.settings_changed = true;
+                if (ui.settings.write_logs) {
+                    toh::app::logging::start(ui.logs_folder);
+                    toh::app::logging::info("Logging switched on");
+                } else {
+                    toh::app::logging::info("Logging switched off");
+                    toh::app::logging::stop();
+                }
+            }
+            tooltip(T_("A log lists what the program did and every error. Send it along when you "
+                       "report a problem. The 20 newest logs are kept."));
+            ImGui::TextDisabled("%s", ui.logs_folder.u8string().c_str());
+            if (ImGui::Button(T_("Open the logs folder"))) {
+                open_folder(ui.logs_folder);
+            }
 
             ImGui::SeparatorText(T_("Projects"));
             ImGui::TextUnformatted(T_("Folder for projects (the save and open dialogs start here):"));
@@ -1441,10 +1597,10 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
 
     if (ImGui::BeginMenu(T_("File"))) {
         if (ImGui::MenuItem(T_("New project"), key_label(ui, Action::NewProject))) {
-            new_project(session, ui);
+            unless_unsaved(session, ui, UiState::Then::NewProject);
         }
         if (ImGui::MenuItem(T_("Open a project..."), key_label(ui, Action::OpenProject))) {
-            open_path_dialog(session, ui, PendingPath::Kind::OpenProject);
+            unless_unsaved(session, ui, UiState::Then::OpenProject);
         }
         if (ImGui::MenuItem(T_("Save the project"), key_label(ui, Action::SaveProject))) {
             save_project(session, ui);
@@ -1480,7 +1636,7 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         }
         ImGui::Separator();
         if (ImGui::MenuItem(T_("Exit"), "Alt+F4")) {
-            ui.quit = true;
+            unless_unsaved(session, ui, UiState::Then::Quit);
         }
         ImGui::EndMenu();
     }
@@ -1605,6 +1761,10 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         if (ImGui::MenuItem(T_("About Tone of Hell..."))) {
             ui.show_about = true;
         }
+        ImGui::Separator();
+        if (ImGui::MenuItem(T_("Open the logs folder"))) {
+            open_folder(ui.logs_folder);
+        }
         ImGui::EndMenu();
     }
 
@@ -1635,6 +1795,7 @@ void draw_dialogs(UiState& ui) {
                 {"Right-click empty track space", "Menu: add a track"},
                 {"Drag a region close to another", "Its edge sticks to the other edge"},
                 {"Drag a region up or down", "Move it to another track"},
+                {"Scissors on, click a region", "Cut it where the mouse is"},
                 {"J", "Join the selected region with the next one"},
                 {"Click a track name", "Select the track (Ctrl: several)"},
                 {"Double-click a track name", "Rename the track"},
@@ -1872,6 +2033,13 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
                    ? "Magnet on: dragged regions stick to the edges of other regions.\n"
                      "Click to switch it off, or hold Alt while dragging."
                    : "Magnet off: regions move freely. Click to switch it on."));
+    ImGui::SameLine();
+    if (scissors_button(ui.cut_tool)) {
+        ui.cut_tool = !ui.cut_tool;
+    }
+    tooltip(T_(ui.cut_tool ? "Scissors on: click a region to cut it where the mouse is.\n"
+                             "Click to switch them off."
+                           : "Scissors off. Click to switch them on, then click a region to cut it."));
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(T_("Grid:"));
@@ -2268,7 +2436,11 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     Hit hit;
     if (hovered && ui.drag == DragKind::None) {
         hit = hit_test(session, view, track, io.MousePos, origin.y);
-        if (hit.kind == DragKind::TrimStart || hit.kind == DragKind::TrimEnd) {
+        if (ui.cut_tool) {
+            if (hit.kind != DragKind::None) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
+            }
+        } else if (hit.kind == DragKind::TrimStart || hit.kind == DragKind::TrimEnd) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         } else if (hit.kind == DragKind::FadeIn || hit.kind == DragKind::FadeOut) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
@@ -2276,7 +2448,19 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     }
 
     // Start of a click or drag.
-    if (ImGui::IsItemActivated()) {
+    if (ImGui::IsItemActivated() && ui.cut_tool && hit.kind != DragKind::None) {
+        // The scissors: cut the region under the mouse where it is (or at an edge nearby).
+        std::int64_t frame = x_to_frame(session, view, io.MousePos.x);
+        if (ui.settings.magnet && !io.KeyAlt) {
+            const std::int64_t magnet = nearest_magnet(session, view, track_index, hit.region,
+                                                       frame, 0.5f * ImGui::GetFontSize(), -1);
+            if (magnet >= 0) {
+                frame = magnet;
+            }
+        }
+        session.split_region(track_index, hit.region, frame);
+        ui.selected = false;
+    } else if (ImGui::IsItemActivated()) {
         ui.drag_track = track_index;
         ui.drag_owner = track_index;
         if (hit.kind == DragKind::None) {
@@ -2512,6 +2696,11 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
             draw_list->AddText(ImVec2(std::max(x0, view.lane_origin_x) + 6.0f, origin.y + 3.0f),
                                IM_COL32(255, 90, 80, 255), T_("Input overloaded"));
         }
+    }
+    // Where the scissors would cut.
+    if (ui.cut_tool && hovered && hit.kind != DragKind::None) {
+        const float x = std::floor(io.MousePos.x) + 0.5f;
+        draw_list->AddLine(ImVec2(x, origin.y), ImVec2(x, corner.y), IM_COL32(255, 90, 80, 230), 2.0f);
     }
     // Where a dragged edge sticks, across every lane.
     if (ui.drag != DragKind::None && ui.magnet_frame >= 0) {
@@ -3003,9 +3192,33 @@ int main(int argc, char* argv[]) {
             session.set_record_offset_frames(ui.settings.record_offset_frames);
         }
 
+        // The log of this session, next to the settings file.
+        if (!ui.settings_path.empty()) {
+            ui.logs_folder = ui.settings_path.parent_path() / "logs";
+            if (ui.settings.write_logs) {
+                toh::app::logging::start(ui.logs_folder);
+            }
+        }
+        toh::app::logging::install_crash_handler();
+        {
+            const toh::app::BuildInfo& build = toh::app::build_info();
+            toh::app::logging::info(std::string("Tone of Hell ") + build.version + " (commit " +
+                                    build.commit + ", built " + build.date + ") on " +
+                                    SDL_GetPlatform());
+            toh::app::logging::info("Settings: " + ui.settings_path.u8string());
+        }
+
         std::string audio_error;
         if (!session.start_audio(&audio_error)) {
             ui.error = audio_error;
+        } else {
+            const toh::audio::DeviceConfig& config = session.config();
+            const std::string output = session.output_device();
+            toh::app::logging::info("Audio started: output \"" +
+                                    (output.empty() ? std::string("system default") : output) + "\", " +
+                                    std::to_string(config.sample_rate) + " Hz, " +
+                                    std::to_string(config.channels) + " channels, buffer " +
+                                    std::to_string(config.buffer_frames) + " frames");
         }
         for (int i = 1; i < argc; ++i) {
             pending.add(argv[i]);  // SDL passes the arguments as UTF-8
@@ -3021,10 +3234,10 @@ int main(int argc, char* argv[]) {
             while (have_event) {
                 ImGui_ImplSDL3_ProcessEvent(&event);
                 if (event.type == SDL_EVENT_QUIT) {
-                    running = false;
+                    unless_unsaved(session, ui, UiState::Then::Quit);
                 } else if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
                            event.window.windowID == SDL_GetWindowID(window)) {
-                    running = false;
+                    unless_unsaved(session, ui, UiState::Then::Quit);
                 } else if (event.type == SDL_EVENT_DROP_FILE && event.drop.data != nullptr) {
                     pending.add(event.drop.data);
                 }
@@ -3078,6 +3291,7 @@ int main(int argc, char* argv[]) {
             }
             handle_path_request(session, ui);
             update_window_title(session, ui);
+            log_events(session, ui);
             // A picture file arrived from the "track picture" dialog.
             {
                 const std::lock_guard<std::mutex> lock(ui.icon_request.mutex);
@@ -3102,7 +3316,7 @@ int main(int argc, char* argv[]) {
                              ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
             draw_menu_bar(session, pending, exports, window, ui);
-            draw_new_project_popup(session, ui);
+            draw_unsaved_popup(session, ui);
             draw_toolbar(session, pending, window, ui);
             ImGui::Separator();
             // The track area leaves room below for the timeline scrollbar and the status bar.
@@ -3134,12 +3348,14 @@ int main(int argc, char* argv[]) {
         }
 
         save_settings(session, ui);
+        toh::app::logging::info("The program closes normally");
         for (const auto& entry : ui.textures) {
             if (entry.second != nullptr) {
                 SDL_DestroyTexture(entry.second);
             }
         }
     }  // the session (and the audio device) is closed here, before the window goes away
+    toh::app::logging::stop();
 
     ImGui_ImplSDLRenderer3_Shutdown();
     ImGui_ImplSDL3_Shutdown();

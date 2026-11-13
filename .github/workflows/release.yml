@@ -1,0 +1,118 @@
+name: Release
+
+# Pushing a tag such as "v0.1.0" builds the program for Windows and Linux, runs the tests and
+# publishes the packages as a GitHub release. Versions below 1.0.0 are marked as pre-releases.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        # The C++ runtime is linked in, so the program runs without extra installers.
+        run: cmake -S . -B build -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $name = "ToneOfHell-$version-windows-x64"
+          $dist = "dist/$name"
+          New-Item -ItemType Directory -Force "$dist/licenses" | Out-Null
+          Copy-Item build/apps/toh_imgui/Release/toh_imgui.exe "$dist/Tone of Hell.exe"
+          Copy-Item build/apps/toh_imgui/Release/*.dll $dist
+          Copy-Item build/apps/toh_player/Release/toh_player.exe $dist
+          Copy-Item README.md, CHANGELOG.md, LICENSE $dist
+          Copy-Item build/_deps/lame-src/COPYING "$dist/licenses/LAME-COPYING.txt"
+          Copy-Item build/_deps/sdl3-src/LICENSE.txt "$dist/licenses/SDL-LICENSE.txt"
+          Copy-Item third_party/imgui/LICENSE.txt "$dist/licenses/DearImGui-LICENSE.txt"
+          Copy-Item third_party/miniz/LICENSE "$dist/licenses/miniz-LICENSE.txt"
+          Compress-Archive -Path $dist -DestinationPath "dist/$name.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.zip
+
+  linux:
+    name: Linux package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the packages SDL needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxfixes-dev \
+            libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
+            libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libudev-dev
+      - name: Configure
+        # The programs look for the MP3 library next to themselves.
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release '-DCMAKE_BUILD_RPATH=$ORIGIN'
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          name="ToneOfHell-$version-linux-x64"
+          dist="dist/$name"
+          mkdir -p "$dist/licenses"
+          cp build/apps/toh_imgui/toh_imgui "$dist/tone-of-hell"
+          cp build/apps/toh_player/toh_player "$dist/"
+          find build -maxdepth 3 -name 'libmp3lame.so*' -exec cp -P {} "$dist/" \;
+          cp README.md CHANGELOG.md LICENSE "$dist/"
+          cp build/_deps/lame-src/COPYING "$dist/licenses/LAME-COPYING.txt"
+          cp build/_deps/sdl3-src/LICENSE.txt "$dist/licenses/SDL-LICENSE.txt"
+          cp third_party/imgui/LICENSE.txt "$dist/licenses/DearImGui-LICENSE.txt"
+          cp third_party/miniz/LICENSE "$dist/licenses/miniz-LICENSE.txt"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/*.tar.gz
+
+  publish:
+    name: Publish the release
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release notes from the changelog
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v heading="## $version" '$0 == heading {found = 1; next} found && /^## / {exit} found {print}' \
+            CHANGELOG.md > notes.md
+          cat >> notes.md <<'EOF'
+
+          ---
+
+          **Windows:** unpack the zip and start `Tone of Hell.exe`. The program is not signed yet, so Windows SmartScreen may warn the first time ("More info" > "Run anyway").
+          **Linux:** unpack the archive and start `./tone-of-hell` (built on Ubuntu; older distributions may lack a new enough C library).
+
+          This is a pre-release: expect rough edges, and keep copies of projects that matter.
+          EOF
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          prerelease=""
+          case "$version" in 0.*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* $prerelease \
+            --title "Tone of Hell $version" --notes-file notes.md

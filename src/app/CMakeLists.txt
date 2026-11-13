@@ -1,13 +1,21 @@
+# miniz (third_party/miniz) reads and writes the zip archives that projects are saved in.
+add_library(toh_miniz STATIC ${PROJECT_SOURCE_DIR}/third_party/miniz/miniz.c)
+target_include_directories(toh_miniz SYSTEM PUBLIC ${PROJECT_SOURCE_DIR}/third_party/miniz)
+if(MSVC)
+    target_compile_definitions(toh_miniz PRIVATE _CRT_SECURE_NO_WARNINGS)
+endif()
+
 add_library(toh_app STATIC
     src/build_info.cpp
     src/i18n.cpp
+    src/log.cpp
     src/session.cpp
     src/settings.cpp)
 
 target_include_directories(toh_app PUBLIC include)
 target_link_libraries(toh_app
     PUBLIC toh_core toh_audio Threads::Threads
-    PRIVATE toh_warnings)
+    PRIVATE toh_warnings toh_miniz)
 
 # Build information shown in the user interfaces. The commit is read when CMake configures the
 # project, so after new commits it is refreshed by the next configure run.

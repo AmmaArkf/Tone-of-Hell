@@ -33,6 +33,7 @@ enum class Action {
     OpenProject,
     SaveProject,
     SaveProjectAs,
+    CutTool,
     Count
 };
 
@@ -73,6 +74,8 @@ struct Settings {
     /// Where the save and open dialogs for projects start (UTF-8). Empty: the folder
     /// "Tone of Hell" in the user's Documents folder.
     std::string projects_folder;
+    /// Write a log file for every session.
+    bool write_logs = true;
     std::array<std::string, kActionCount> shortcuts;
 
     const std::string& shortcut(Action action) const noexcept {

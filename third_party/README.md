@@ -7,6 +7,7 @@ These files are copied from their projects unchanged. Do not edit them: update t
 | miniaudio | 0.11.26 | `miniaudio/miniaudio.h` | Public domain or MIT-0 (see the end of the file) | https://github.com/mackron/miniaudio | Audio output and file decoding |
 | doctest | 2.5.3 | `doctest/doctest.h` | MIT (see the top of the file) | https://github.com/doctest/doctest | Unit tests only; not part of the program |
 | Dear ImGui | 1.93.0 | `imgui/` (core files and the SDL3 and SDL_Renderer3 backends) | MIT (`imgui/LICENSE.txt`) | https://github.com/ocornut/imgui | The ImGui user interface |
+| miniz | 3.1.2 | `miniz/miniz.c`, `miniz/miniz.h` | MIT (`miniz/LICENSE`) | https://github.com/richgel999/miniz | Reading and writing project files (zip archives) |
 
 ## Checksums (SHA-256)
 
@@ -28,6 +29,11 @@ These files are copied from their projects unchanged. Do not edit them: update t
 | `imgui/backends/imgui_impl_sdl3.h` | `fa184f17d59d31e986df2e827ef964d7b3c28bcba7789643a4aaaed344cb868e` |
 | `imgui/backends/imgui_impl_sdlrenderer3.cpp` | `039528b1cac2b6a8e272b4f6f9d2f9301ee531e07c49249677558f62d3e009f0` |
 | `imgui/backends/imgui_impl_sdlrenderer3.h` | `09b1a375f061c97cf0df6d5db9b297d165f2875f8a912e34989118a8a32ce9ec` |
+| `miniz/miniz.c` | `e2c1aeb66eef9191d8c3feb164db2def2335a61d039bf04ed849f6b042433b30` |
+| `miniz/miniz.h` | `b53b62ed122e559b8f679e3cb787a0b0035fe87a58f909da0e44931678f4e85f` |
+| `miniz/LICENSE` | `0115478d567121238cf6cc1c0c361926cf07a49d9e4c9e66da97fac6a01646b3` |
+
+miniz comes from the release archive `miniz-3.1.2.zip` (SHA-256 `f0446d863f9c19926ad9483c523fdc42e42b8d4a6a431d27e09d49c79a140d9a`).
 
 The checksums were taken on Windows right after downloading. A Git checkout may convert line endings, which changes them.
 
