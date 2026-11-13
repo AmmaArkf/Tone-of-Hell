@@ -37,4 +37,8 @@ The checksums were taken on Windows right after downloading. A Git checkout may 
 | --- | --- | --- | --- | --- |
 | SDL | 3.4.20 | zlib | https://github.com/libsdl-org/SDL | Window, input and file dialogs of the ImGui user interface |
 
+| LAME | 4.0 | LGPL 2 or later | https://lame.sourceforge.io | MP3 export; built as a separate shared library (`mp3lame`) |
+
 SDL is too large to keep in the repository. CMake downloads the official release archive and checks its SHA-256 (`f3bb06f55bed9557227a700af2ea62e49497ebdf58037732a731a5fb3ef8581f`); see `apps/toh_imgui/CMakeLists.txt`. Configure with `-DTOH_BUILD_GUI_IMGUI=OFF` to build without it.
+
+LAME is licensed under the LGPL, so it is deliberately kept apart from our code: CMake downloads the official release archive `lame-4.0.tar.gz` and checks its SHA-256 (`3df5124d5ad3a98312ffd7ba6a9b36230e4f8a3e66d3ce0f425e336c32d216eb`), then builds only its encoder library as a separate DLL or shared object (see `cmake/Lame.cmake` and `cmake/lame/config.h`). The programs load it at start-up, and anyone may replace it with another build of LAME. When the program is distributed, the LAME license (`COPYING` in its archive) must be included next to the library.

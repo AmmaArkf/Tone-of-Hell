@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.6
+
+- Export to MP3: File > Export audio now also offers MP3 at 320 kbps, 192 kbps or variable bit rate (best quality). The files carry a header with their exact length.
+- MP3 encoding uses LAME 4.0, built as a separate library (LGPL) that is downloaded while the build is configured. The project's own code stays under the MIT license.
+- CMake 3.21 or newer is now needed.
+
 ## 0.0.5
 
 - A settings window (Edit > Settings) with three tabs:

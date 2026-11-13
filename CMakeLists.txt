@@ -1,7 +1,7 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.21)
 
 project(ToneOfHell
-        VERSION 0.0.5
+        VERSION 0.0.6
         DESCRIPTION "An open source digital audio workstation (DAW) in C++"
         LANGUAGES C CXX)
 
@@ -39,6 +39,20 @@ if(MSVC)
 endif()
 
 find_package(Threads REQUIRED)
+
+# On Windows a program finds its DLLs next to its .exe. This copies the shared libraries a
+# target uses (for now the LAME encoder) there after every build.
+function(toh_copy_runtime_dlls target)
+    if(WIN32)
+        add_custom_command(TARGET ${target} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    $<TARGET_RUNTIME_DLLS:${target}> $<TARGET_FILE_DIR:${target}>
+            COMMAND_EXPAND_LISTS)
+    endif()
+endfunction()
+
+# The LAME MP3 encoder, as a separate LGPL library (downloaded while configuring).
+include(cmake/Lame.cmake)
 
 # Layers, from the bottom up:
 #   toh_core   the audio engine; no dependencies

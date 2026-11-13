@@ -43,6 +43,7 @@ A short record of technical decisions: what was chosen, why, and who decided. De
 | 37 | Keyboard shortcuts are configurable actions; one key belongs to at most one action. Keyboard navigation of widgets is off so that keys always reach the shortcuts | Owner's request | Owner |
 | 38 | Input sensitivity is a gain on the input before monitoring, recording and the input meter. It does not change the sound card's own input level | The program cannot reliably control every sound card's hardware gain | Default |
 | 39 | GPU acceleration of effects is shown as planned but not offered until effects exist (stage 9) | A switch that does nothing would mislead | Default |
+| 40 | MP3 export uses LAME 4.0 (LGPL) as a separate shared library, downloaded and checked by CMake and copied next to the programs; it is never linked statically or copied into this repository | Owner's choice; keeps our code MIT and lets users replace the library, as the LGPL requires | Owner |
 
 ## Open decisions
 

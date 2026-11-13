@@ -189,8 +189,13 @@ const Entry kRussian[] = {
     {"An open source digital audio workstation.", "Цифровая звуковая рабочая станция с открытым кодом."},
     {"Version %s, commit %s, built %s", "Версия %s, коммит %s, сборка от %s"},
     {"Copyright (c) 2026 AmmaArk. MIT license.", "Copyright (c) 2026 AmmaArk. Лицензия MIT."},
-    {"Uses Dear ImGui (MIT), SDL (zlib) and miniaudio (public domain or MIT-0).",
-     "Использует Dear ImGui (MIT), SDL (zlib) и miniaudio (общественное достояние или MIT-0)."},
+    {"Uses Dear ImGui (MIT), SDL (zlib), miniaudio (public domain or MIT-0) and LAME (LGPL, as a separate library).",
+     "Использует Dear ImGui (MIT), SDL (zlib), miniaudio (общественное достояние или MIT-0) и LAME (LGPL, отдельной библиотекой)."},
+    {"MP3, 320 kbps...", "MP3, 320 кбит/с..."},
+    {"MP3, 192 kbps...", "MP3, 192 кбит/с..."},
+    {"MP3, variable bit rate (best quality)...", "MP3, переменный битрейт (лучшее качество)..."},
+    {"Exported: ", "Экспортировано: "},
+    {"Export: ", "Экспорт: "},
 
     // Action names (shortcuts)
     {"Play or pause", "Играть или пауза"},

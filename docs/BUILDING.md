@@ -1,6 +1,6 @@
 # Building
 
-You need Git, CMake 3.20 or newer and a C++17 compiler. Most libraries the project uses are included in `third_party/`. SDL3 (used by the ImGui interface) is downloaded automatically the first time you configure, so that step needs an internet connection; add `-DTOH_BUILD_GUI_IMGUI=OFF` to build without it.
+You need Git, CMake 3.21 or newer and a C++17 compiler (and a C compiler, for the LAME MP3 encoder). Most libraries the project uses are included in `third_party/`. SDL3 (used by the ImGui interface) and LAME (the MP3 encoder) are downloaded automatically the first time you configure, so that step needs an internet connection; add `-DTOH_BUILD_GUI_IMGUI=OFF` to build without it.
 
 ## Windows (MinGW-w64)
 
@@ -59,7 +59,7 @@ Recording: press "Record" (or `R`). The input device is opened the first time. T
 
 Settings: "Edit > Settings" chooses the language, the sound devices, the output volume and the input sensitivity, and lets you change every keyboard shortcut. "Help > Keyboard and mouse" lists the shortcuts as they are set.
 
-Export: "File > Export audio" writes the whole project to a WAV file as it sounds, without the metronome.
+Export: "File > Export audio" writes the whole project to a WAV or MP3 file as it sounds, without the metronome.
 
 ### toh_player: the command-line test player
 

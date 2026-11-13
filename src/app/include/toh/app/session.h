@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -197,6 +198,10 @@ public:
     /// disturbed. This call blocks until the file is written.
     bool export_wav(const std::filesystem::path& path, audio::SampleFormat format,
                     std::string* error = nullptr) const;
+    /// The same as export_wav, as an MP3 file. `kbps` is a constant bit rate (320, 192, 128
+    /// ...) or 0 for variable bit rate at the best quality.
+    bool export_mp3(const std::filesystem::path& path, int kbps,
+                    std::string* error = nullptr) const;
 
     // ---- Master --------------------------------------------------------------------------
 
@@ -239,6 +244,9 @@ private:
     void sync_engine_tracks(std::size_t first);
     void update_length();
     void drain_recording();
+    /// Renders the whole project offline and hands it to `sink` block by block. Stops and
+    /// returns false as soon as `sink` returns false.
+    bool render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const;
     void finish_take();
 
     audio::DeviceConfig config_;

@@ -82,6 +82,7 @@ struct PendingExport {
     bool ready = false;
     std::string path;  // UTF-8
     toh::audio::SampleFormat format = toh::audio::SampleFormat::Int24;
+    int mp3_kbps = -1;  // -1: a WAV file; 0 or more: an MP3 file (0 = variable bit rate)
 };
 
 void SDLCALL export_dialog_callback(void* user_data, const char* const* file_list, int /*filter*/) {
@@ -298,14 +299,20 @@ void remove_selected_region(Session& session, UiState& ui) {
 
 // ---- Menu bar ----------------------------------------------------------------------------
 
-void open_export_dialog(PendingExport& exports, SDL_Window* window, toh::audio::SampleFormat format) {
+// Asks for a file name to export to. `mp3_kbps` is -1 for a WAV file in `format`, otherwise the
+// MP3 bit rate (0 = variable).
+void open_export_dialog(PendingExport& exports, SDL_Window* window,
+                        toh::audio::SampleFormat format, int mp3_kbps = -1) {
     {
         const std::lock_guard<std::mutex> lock(exports.mutex);
         exports.format = format;
+        exports.mp3_kbps = mp3_kbps;
         exports.ready = false;
     }
-    static const SDL_DialogFileFilter filters[] = {{"WAV audio", "wav"}};
-    SDL_ShowSaveFileDialog(&export_dialog_callback, &exports, window, filters, 1, nullptr);
+    static const SDL_DialogFileFilter wav_filters[] = {{"WAV audio", "wav"}};
+    static const SDL_DialogFileFilter mp3_filters[] = {{"MP3 audio", "mp3"}};
+    SDL_ShowSaveFileDialog(&export_dialog_callback, &exports, window,
+                           mp3_kbps >= 0 ? mp3_filters : wav_filters, 1, nullptr);
 }
 
 // The record button: stops a running recording, otherwise opens the input if needed and starts
@@ -760,6 +767,16 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
             if (ImGui::MenuItem(T_("WAV, 32-bit float..."))) {
                 open_export_dialog(exports, window, toh::audio::SampleFormat::Float32);
             }
+            ImGui::Separator();
+            if (ImGui::MenuItem(T_("MP3, 320 kbps..."))) {
+                open_export_dialog(exports, window, toh::audio::SampleFormat::Int24, 320);
+            }
+            if (ImGui::MenuItem(T_("MP3, 192 kbps..."))) {
+                open_export_dialog(exports, window, toh::audio::SampleFormat::Int24, 192);
+            }
+            if (ImGui::MenuItem(T_("MP3, variable bit rate (best quality)..."))) {
+                open_export_dialog(exports, window, toh::audio::SampleFormat::Int24, 0);
+            }
             ImGui::EndMenu();
         }
         ImGui::Separator();
@@ -932,7 +949,7 @@ void draw_dialogs(UiState& ui) {
             ImGui::TextUnformatted(T_("Copyright (c) 2026 AmmaArk. MIT license."));
             ImGui::TextUnformatted(T_("https://github.com/AmmaArkf/Tone-of-Hell"));
             ImGui::Spacing();
-            ImGui::TextDisabled("%s", T_("Uses Dear ImGui (MIT), SDL (zlib) and miniaudio (public domain or MIT-0)."));
+            ImGui::TextDisabled("%s", T_("Uses Dear ImGui (MIT), SDL (zlib), miniaudio (public domain or MIT-0) and LAME (LGPL, as a separate library)."));
         }
         ImGui::End();
     }
@@ -1980,11 +1997,13 @@ int main(int argc, char* argv[]) {
             {
                 std::string export_path;
                 toh::audio::SampleFormat export_format = toh::audio::SampleFormat::Int24;
+                int export_kbps = -1;
                 {
                     const std::lock_guard<std::mutex> lock(exports.mutex);
                     if (exports.ready) {
                         export_path = exports.path;
                         export_format = exports.format;
+                        export_kbps = exports.mp3_kbps;
                         exports.ready = false;
                     }
                 }
@@ -1997,15 +2016,19 @@ int main(int argc, char* argv[]) {
                             character = static_cast<char>(character - 'A' + 'a');
                         }
                     }
-                    if (ending != ".wav") {
-                        export_path += ".wav";
+                    const char* const extension = export_kbps >= 0 ? ".mp3" : ".wav";
+                    if (ending != extension) {
+                        export_path += extension;
                     }
                     std::string error;
-                    if (session.export_wav(std::filesystem::u8path(export_path), export_format,
-                                           &error)) {
-                        ui.notice = "Exported: " + export_path;
+                    const auto export_file = std::filesystem::u8path(export_path);
+                    const bool exported =
+                        export_kbps >= 0 ? session.export_mp3(export_file, export_kbps, &error)
+                                         : session.export_wav(export_file, export_format, &error);
+                    if (exported) {
+                        ui.notice = std::string(T_("Exported: ")) + export_path;
                     } else {
-                        ui.error = "Export: " + error;
+                        ui.error = std::string(T_("Export: ")) + error;
                     }
                 }
             }

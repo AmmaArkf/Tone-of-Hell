@@ -32,3 +32,4 @@ target_link_libraries(toh_imgui_lib PUBLIC SDL3::SDL3)
 
 add_executable(toh_imgui WIN32 main.cpp)
 target_link_libraries(toh_imgui PRIVATE toh_app toh_imgui_lib toh_warnings)
+toh_copy_runtime_dlls(toh_imgui)

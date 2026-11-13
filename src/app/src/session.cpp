@@ -5,6 +5,7 @@
 #include <utility>
 
 #include "toh/audio/clip_loader.h"
+#include "toh/audio/mp3_writer.h"
 
 namespace toh::app {
 namespace {
@@ -560,6 +561,39 @@ bool Session::export_wav(const std::filesystem::path& path, audio::SampleFormat 
         return false;
     }
 
+    audio::WavWriter writer;
+    if (!writer.open(path, config_.sample_rate, config_.channels, format, error)) {
+        return false;
+    }
+    const bool written = render_project(
+        [&writer](const float* data, std::uint32_t frames) { return writer.write(data, frames); });
+    if (!written) {
+        set_error(error, "cannot write the file (is the disk full?)");
+        return false;
+    }
+    writer.close();
+    return true;
+}
+
+bool Session::export_mp3(const std::filesystem::path& path, int kbps, std::string* error) const {
+    if (length_frames_ <= 0) {
+        set_error(error, "there is nothing to export");
+        return false;
+    }
+    audio::Mp3Writer writer;
+    if (!writer.open(path, config_.sample_rate, config_.channels, kbps, error)) {
+        return false;
+    }
+    const bool written = render_project(
+        [&writer](const float* data, std::uint32_t frames) { return writer.write(data, frames); });
+    if (!writer.close() || !written) {
+        set_error(error, "cannot write the file (is the disk full?)");
+        return false;
+    }
+    return true;
+}
+
+bool Session::render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const {
     // A second engine renders the same project offline, so playback is not disturbed.
     const auto offline = std::make_unique<core::Engine>(config_.sample_rate, config_.channels);
     for (std::size_t i = 0; i < tracks_.size(); ++i) {
@@ -574,23 +608,17 @@ bool Session::export_wav(const std::filesystem::path& path, audio::SampleFormat 
     offline->set_gain(master_gain_);
     offline->play(false);  // no fade-in: the file starts exactly like the project
 
-    audio::WavWriter writer;
-    if (!writer.open(path, config_.sample_rate, config_.channels, format, error)) {
-        return false;
-    }
     const std::uint32_t block = 4096;
     std::vector<float> buffer(static_cast<std::size_t>(block) * config_.channels);
     std::int64_t remaining = length_frames_;
     while (remaining > 0) {
         const auto frames = static_cast<std::uint32_t>(std::min<std::int64_t>(remaining, block));
         offline->render(buffer.data(), frames);
-        if (!writer.write(buffer.data(), frames)) {
-            set_error(error, "cannot write the file (is the disk full?)");
+        if (!sink(buffer.data(), frames)) {
             return false;
         }
         remaining -= frames;
     }
-    writer.close();
     return true;
 }
 

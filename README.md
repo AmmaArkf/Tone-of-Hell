@@ -40,7 +40,7 @@ The status of every stage is tracked in [ROADMAP.md](ROADMAP.md). In short:
 Instructions will appear together with the first code (stage 1). Planned requirements:
 
 - a compiler with C++17 support or newer (MSVC, GCC, Clang);
-- CMake 3.20 or newer;
+- CMake 3.21 or newer;
 - Git.
 
 ## How to help
@@ -111,7 +111,7 @@ The project is released under the MIT license, see [LICENSE](LICENSE).
 Инструкция появится вместе с первым кодом (этап 1). Планируемые требования:
 
 - компилятор с поддержкой C++17 или новее (MSVC, GCC, Clang);
-- CMake 3.20 или новее;
+- CMake 3.21 или новее;
 - Git.
 
 ### Как помочь
