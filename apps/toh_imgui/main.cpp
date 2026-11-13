@@ -187,6 +187,8 @@ struct UiState {
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::filesystem::path logs_folder;
+    std::string dropped_picture;  // a picture file dropped on the window (UTF-8)
+    float dropped_y = 0.0f;       // where it was dropped
     std::string logged_error;           // the last error and notice written to the log
     std::string logged_notice;
     std::uint64_t logged_disk_misses = 0;
@@ -874,6 +876,9 @@ SDL_Texture* texture_for(UiState& ui, const std::string& path) {
             texture = SDL_CreateTextureFromSurface(ui.renderer, surface);
             SDL_DestroySurface(surface);
         }
+        if (texture == nullptr && std::filesystem::exists(std::filesystem::u8path(path))) {
+            ui.error = std::string(T_("Cannot show the picture ")) + path + ": " + SDL_GetError();
+        }
     }
     ui.textures[path] = texture;
     return texture;
@@ -1191,6 +1196,38 @@ void log_events(Session& session, UiState& ui) {
                                    " input frames (the disk or the program was too slow)");
         ui.logged_dropped = dropped;
     }
+}
+
+// Picture files are given to tracks when they are dropped on the window; other files are audio.
+bool is_picture_file(const std::string& path) {
+    std::string extension = std::filesystem::u8path(path).extension().u8string();
+    for (char& c : extension) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return extension == ".png" || extension == ".bmp" || extension == ".jpg" ||
+           extension == ".jpeg" || extension == ".gif" || extension == ".webp";
+}
+
+std::size_t lane_under(const UiState& ui, float y, std::size_t count);  // with the lanes below
+
+// Gives a dropped picture to the track it was dropped on.
+void apply_dropped_picture(Session& session, UiState& ui) {
+    if (ui.dropped_picture.empty()) {
+        return;
+    }
+    std::string extension = std::filesystem::u8path(ui.dropped_picture).extension().u8string();
+    for (char& c : extension) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    const std::size_t track = lane_under(ui, ui.dropped_y, session.tracks().size());
+    if (extension != ".png" && extension != ".bmp") {
+        ui.error = T_("Track pictures can be PNG or BMP files.");
+    } else if (track < session.tracks().size()) {
+        session.set_track_icon(track, "file:" + ui.dropped_picture);
+    } else {
+        ui.error = T_("Drop the picture onto a track to give it that picture.");
+    }
+    ui.dropped_picture.clear();
 }
 
 // The window title names the project and shows a star while it has unsaved changes.
@@ -1831,6 +1868,7 @@ void draw_dialogs(UiState& ui) {
                 {"Click a track name", "Select the track (Ctrl: several)"},
                 {"Double-click a track name", "Rename the track"},
                 {"Click the picture of a track", "Choose a picture for it"},
+                {"Drop a PNG file onto a track", "It becomes the picture of that track"},
             };
             if (ImGui::BeginTable("shortcuts", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
                 // The keyboard shortcuts as they are set right now, then the fixed mouse actions.
@@ -3271,7 +3309,12 @@ int main(int argc, char* argv[]) {
                            event.window.windowID == SDL_GetWindowID(window)) {
                     unless_unsaved(session, ui, UiState::Then::Quit);
                 } else if (event.type == SDL_EVENT_DROP_FILE && event.drop.data != nullptr) {
-                    pending.add(event.drop.data);
+                    if (is_picture_file(event.drop.data)) {
+                        ui.dropped_picture = event.drop.data;
+                        ui.dropped_y = event.drop.y;
+                    } else {
+                        pending.add(event.drop.data);
+                    }
                 }
                 have_event = SDL_PollEvent(&event);
             }
@@ -3322,6 +3365,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             handle_path_request(session, ui);
+            apply_dropped_picture(session, ui);
             update_window_title(session, ui);
             log_events(session, ui);
             // A picture file arrived from the "track picture" dialog.

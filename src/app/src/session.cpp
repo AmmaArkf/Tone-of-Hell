@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <iterator>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -241,12 +243,12 @@ const std::filesystem::path& Session::cache_folder() {
     return cache_folder_;
 }
 
-std::filesystem::path Session::new_cache_file(const char* kind) {
+std::filesystem::path Session::new_cache_file(const char* kind, const char* extension) {
     const std::filesystem::path& folder = cache_folder();
     if (folder.empty()) {
         return {};
     }
-    return folder / (std::string(kind) + "-" + std::to_string(++cache_count_) + ".f32");
+    return folder / (std::string(kind) + "-" + std::to_string(++cache_count_) + extension);
 }
 
 // ---- Playing from disk -------------------------------------------------------------------
@@ -1200,7 +1202,8 @@ std::vector<std::shared_ptr<const Source>> Session::used_sources() const {
 }
 
 std::string Session::project_text(const std::vector<std::shared_ptr<const Source>>& sources,
-                                  const std::vector<std::string>& files) const {
+                                  const std::vector<std::string>& files,
+                                  const std::map<std::string, std::string>* icons) const {
     std::map<const Source*, std::size_t> index_of;
     for (std::size_t i = 0; i < sources.size(); ++i) {
         index_of[sources[i].get()] = i;
@@ -1227,7 +1230,14 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
     for (const TrackInfo& track : tracks_) {
         out << "\n[track]\n";
         out << "name=" << one_line(track.name) << "\n";
-        out << "icon=" << one_line(track.icon) << "\n";
+        std::string icon = track.icon;
+        if (icons != nullptr) {
+            const auto found = icons->find(icon);
+            if (found != icons->end()) {
+                icon = found->second;  // a picture that travels inside the project
+            }
+        }
+        out << "icon=" << one_line(icon) << "\n";
         out << "gain=" << track.gain << "\n";
         out << "pan=" << track.pan << "\n";
         out << "mute=" << (track.mute ? 1 : 0) << "\n";
@@ -1267,7 +1277,29 @@ bool Session::save_project(const std::filesystem::path& file, std::string* error
     for (std::size_t i = 0; i < sources.size(); ++i) {
         names.push_back("audio-" + std::to_string(i + 1) + ".f32");
     }
-    const std::string text = project_text(sources, names);
+    // Pictures of tracks that come from files travel inside the project, so they are there on
+    // another computer too and when the file is moved.
+    std::map<std::string, std::string> icons;
+    std::vector<std::pair<std::string, std::string>> pictures;  // entry name, file contents
+    for (const TrackInfo& track : tracks_) {
+        if (track.icon.rfind("file:", 0) != 0 || icons.count(track.icon) != 0) {
+            continue;
+        }
+        const std::filesystem::path path = std::filesystem::u8path(track.icon.substr(5));
+        std::ifstream picture(path, std::ios::binary);
+        if (!picture) {
+            continue;  // a picture that is gone stays a reference
+        }
+        std::string bytes((std::istreambuf_iterator<char>(picture)), std::istreambuf_iterator<char>());
+        std::string extension = path.extension().u8string();
+        for (char& c : extension) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        const std::string name = "picture-" + std::to_string(pictures.size() + 1) + extension;
+        icons[track.icon] = "embedded:" + name;
+        pictures.emplace_back(name, std::move(bytes));
+    }
+    const std::string text = project_text(sources, names, &icons);
 
     // The archive is written under another name first, so a failed save never destroys the
     // project that was there.
@@ -1285,6 +1317,11 @@ bool Session::save_project(const std::filesystem::path& file, std::string* error
         zip.writing = mz_zip_writer_init_cfile(&zip.zip, zip.file, MZ_ZIP_FLAG_WRITE_ZIP64) != 0;
         bool ok = zip.writing && mz_zip_writer_add_mem(&zip.zip, kProjectEntry, text.data(),
                                                        text.size(), MZ_DEFAULT_LEVEL) != 0;
+        for (std::size_t i = 0; ok && i < pictures.size(); ++i) {
+            const std::string entry = "pictures/" + pictures[i].first;
+            ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), pictures[i].second.data(),
+                                       pictures[i].second.size(), MZ_NO_COMPRESSION) != 0;
+        }
         for (std::size_t i = 0; ok && i < sources.size(); ++i) {
             const core::ClipData& clip = *sources[i]->clip;
             const std::string entry = "audio/" + names[i];
@@ -1544,6 +1581,34 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         loaded.push_back(std::move(source));
     }
 
+    // Pictures inside the project are unpacked into the cache folder as well.
+    std::map<std::string, std::string> unpacked;  // entry name -> icon
+    const auto picture_icon = [&](const std::string& name) {
+        const auto found = unpacked.find(name);
+        if (found != unpacked.end()) {
+            return found->second;
+        }
+        std::string icon;
+        if (valid_audio_name(name)) {
+            const int index =
+                mz_zip_reader_locate_file(&zip.zip, ("pictures/" + name).c_str(), nullptr, 0);
+            const std::string extension = std::filesystem::u8path(name).extension().u8string();
+            const std::filesystem::path path =
+                index >= 0 ? new_cache_file("picture", extension.c_str()) : std::filesystem::path();
+            std::FILE* out = path.empty() ? nullptr : core::open_file(path, "wb");
+            bool ok = out != nullptr &&
+                      mz_zip_reader_extract_to_cfile(&zip.zip, static_cast<mz_uint>(index), out, 0) != 0;
+            if (out != nullptr) {
+                ok = std::fclose(out) == 0 && ok;
+            }
+            if (ok) {
+                icon = "file:" + path.u8string();
+            }
+        }
+        unpacked[name] = icon;
+        return icon;
+    };
+
     std::vector<TrackInfo> fresh;
     for (const TrackEntry& entry : tracks) {
         if (fresh.size() >= core::Engine::kMaxTracks) {
@@ -1551,7 +1616,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         }
         TrackInfo track;
         track.name = entry.name.empty() ? "Track " + std::to_string(fresh.size() + 1) : entry.name;
-        track.icon = entry.icon;
+        track.icon = entry.icon.rfind("embedded:", 0) == 0 ? picture_icon(entry.icon.substr(9))
+                                                           : entry.icon;
         track.gain = entry.gain;
         track.pan = entry.pan;
         track.mute = entry.mute;

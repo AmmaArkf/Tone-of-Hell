@@ -5,6 +5,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <vector>
@@ -75,6 +76,11 @@ TEST_CASE("A saved project opens again exactly as it was") {
         REQUIRE(session.move_region(0, 1, 5000));
         REQUIRE(session.set_region_fades(0, 0, 100, 200));
         REQUIRE(session.set_track_icon(0, "guitar"));
+        {
+            std::ofstream picture(folder / "picture.png", std::ios::binary);
+            picture << "not really a PNG, but the bytes must come back";
+        }
+        REQUIRE(session.set_track_icon(1, "file:" + (folder / "picture.png").u8string()));
         REQUIRE(session.set_track_gain(1, 0.5f));
         REQUIRE(session.set_track_pan(1, -0.25f));
         REQUIRE(session.set_track_mute(2, true));
@@ -89,6 +95,7 @@ TEST_CASE("A saved project opens again exactly as it was") {
         CHECK(session.project_file() == file);
         CHECK_FALSE(session.modified());
         CHECK(std::filesystem::is_regular_file(file));
+        std::filesystem::remove(folder / "picture.png");  // the project has its own copy
         // One file only: no folders next to it.
         std::size_t entries = 0;
         for (const auto& entry : std::filesystem::directory_iterator(folder)) {
@@ -117,6 +124,13 @@ TEST_CASE("A saved project opens again exactly as it was") {
     CHECK(tracks[0].name == "Guitar");
     CHECK(tracks[0].icon == "guitar");
     CHECK(tracks[1].name == "Voice");
+    REQUIRE(tracks[1].icon.rfind("file:", 0) == 0);
+    {
+        std::ifstream picture(std::filesystem::u8path(tracks[1].icon.substr(5)), std::ios::binary);
+        REQUIRE(picture);
+        std::string bytes((std::istreambuf_iterator<char>(picture)), std::istreambuf_iterator<char>());
+        CHECK(bytes == "not really a PNG, but the bytes must come back");
+    }
     CHECK(tracks[1].gain == doctest::Approx(0.5f));
     CHECK(tracks[1].pan == doctest::Approx(-0.25f));
     CHECK(tracks[2].mute);

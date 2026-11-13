@@ -396,7 +396,8 @@ private:
     std::vector<std::shared_ptr<const Source>> used_sources() const;
     /// The text that describes the project, with `files[i]` naming the audio of `sources[i]`.
     std::string project_text(const std::vector<std::shared_ptr<const Source>>& sources,
-                             const std::vector<std::string>& files) const;
+                             const std::vector<std::string>& files,
+                             const std::map<std::string, std::string>* icons = nullptr) const;
     /// The project as it is now, for comparing (see modified()).
     std::string state_text() const;
 
@@ -428,7 +429,7 @@ private:
         std::int64_t offset = 0;
         std::int64_t length = 0;
     };
-    std::filesystem::path new_cache_file(const char* kind);
+    std::filesystem::path new_cache_file(const char* kind, const char* extension = ".f32");
     void update_streaming();
     /// Loads the pages around `position` now, on the calling thread.
     void prefetch_now(std::int64_t position);

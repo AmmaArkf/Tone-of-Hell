@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.1.3
+
+- Pictures of tracks that come from files are saved inside the project, so they survive moving or deleting the file and opening the project on another computer.
+- A PNG or BMP file dropped onto a track becomes its picture (before, it was taken for an audio file and failed to load). Other picture formats get a clear message.
+- When a picture cannot be shown, the reason appears at the bottom of the window.
+
 ## 0.1.2
 
 - Undo (Ctrl+Z) and redo (Ctrl+Y), also in the Edit menu, which names the step ("Undo: Remove a track"). Every edit of tracks and regions is a step, a whole drag is one step, and up to 200 steps are kept. Mute, solo, the selection, the loop and the metronome are not steps. Opening a project or starting a new one clears the history.
