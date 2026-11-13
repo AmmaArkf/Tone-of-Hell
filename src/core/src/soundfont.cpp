@@ -336,7 +336,10 @@ void SoundFont::add_note(const Preset& preset, const Note& note, double t_frames
         if (t < held) {
             level = held_level(t);
         } else if (t - held < zone.release) {
-            level = held_level(held) * (1.0 - (t - held) / zone.release);
+            // Like the decay, the release falls by 100 dB over its time (as SoundFont 2 says),
+            // so a long release fades quickly at first instead of ringing on as if the sustain
+            // pedal were held.
+            level = held_level(held) * std::pow(10.0, -5.0 * (t - held) / zone.release);
         }
         if (level <= 0.0) {
             continue;

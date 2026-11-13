@@ -103,7 +103,8 @@ void SDLCALL export_dialog_callback(void* user_data, const char* const* file_lis
 
 // A path chosen in a project or folder dialog, waiting for the main loop.
 struct PendingPath {
-    enum class Kind { SaveProject, OpenProject, ProjectsFolder, SoundFont, ImportMidi, ExportMidi };
+    enum class Kind { SaveProject, OpenProject, ProjectsFolder, SoundFont, ImportMidi, ExportMidi,
+                      SamplerSound };
     std::mutex mutex;
     bool ready = false;
     Kind kind = Kind::SaveProject;
@@ -187,6 +188,7 @@ struct UiState {
     Then pending_then = Then::Nothing;  // waits for the answer about unsaved changes
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
+    std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
     // A selected part of the tracks (dragged out inside regions) and what was cut or copied.
     bool has_range = false;
     std::size_t range_first = 0;
@@ -1280,6 +1282,19 @@ std::filesystem::path projects_folder(const UiState& ui) {
     return folder;
 }
 
+std::string pitch_name(int pitch);  // C4 for 60, with sharps
+
+// A note with a fraction: its name, and how many cents it is off when it is.
+std::string note_label(double note) {
+    const long nearest = std::lround(note);
+    std::string label = pitch_name(static_cast<int>(nearest));
+    const long cents = std::lround((note - static_cast<double>(nearest)) * 100.0);
+    if (cents != 0) {
+        label += (cents > 0 ? " +" : " ") + std::to_string(cents) + T_(" cents");
+    }
+    return label;
+}
+
 void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
     {
         const std::lock_guard<std::mutex> lock(ui.path_request.mutex);
@@ -1302,6 +1317,10 @@ void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
     } else if (kind == PendingPath::Kind::SoundFont) {
         static const SDL_DialogFileFilter sf_filters[] = {{"SoundFont", "sf2"}};
         SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, sf_filters, 1,
+                               nullptr, false);
+    } else if (kind == PendingPath::Kind::SamplerSound) {
+        static const SDL_DialogFileFilter sound_filters[] = {{"Sound", "wav;mp3;flac"}};
+        SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, sound_filters, 1,
                                nullptr, false);
     } else if (kind == PendingPath::Kind::ImportMidi) {
         static const SDL_DialogFileFilter midi_filters[] = {{"MIDI file", "mid;midi"}};
@@ -1395,6 +1414,20 @@ void handle_path_request(Session& session, UiState& ui) {
         ui.settings.soundfont_path = path;
         ui.settings_changed = true;
         load_soundfont(session, ui, std::filesystem::u8path(path));
+        return;
+    }
+    if (kind == PendingPath::Kind::SamplerSound) {
+        if (session.set_track_sampler(ui.sampler_track, std::filesystem::u8path(path), &error)) {
+            const auto& sound = session.tracks()[ui.sampler_track].sampler;
+            if (sound && sound->detected >= 0.0) {
+                ui.notice = std::string(T_("Sampler: the note of the sound is ")) +
+                            note_label(sound->detected);
+            } else {
+                ui.notice = T_("Sampler: no clear note found, C4 is used. Set it in the Sampler menu.");
+            }
+        } else {
+            ui.error = std::string(T_("Sampler: ")) + error;
+        }
         return;
     }
     if (kind == PendingPath::Kind::ImportMidi) {
@@ -3266,6 +3299,90 @@ void draw_region(const Session& session, const View& view, const TrackInfo& trac
     }
 }
 
+// The spectrum of a sampler sound: quiet frequencies blue, loud ones yellow to red, with the
+// note that was found and the note it plays at marked.
+void draw_spectrum(const toh::core::SamplerSound& sound) {
+    const float font = ImGui::GetFontSize();
+    const ImVec2 size(20.0f * font, 5.0f * font);
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::Dummy(size);
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    d->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y), IM_COL32(14, 16, 22, 255));
+    const auto heat = [](float v) {
+        const float r = std::clamp(v * 2.0f, 0.0f, 1.0f);
+        const float g = std::clamp(v < 0.5f ? v * 1.6f : 1.6f - (v - 0.5f) * 2.4f, 0.0f, 1.0f);
+        const float b = std::clamp(1.0f - v * 2.0f, 0.0f, 1.0f);
+        return IM_COL32(static_cast<int>(r * 255.0f), static_cast<int>(g * 255.0f),
+                        static_cast<int>(60.0f + b * 195.0f), 255);
+    };
+    const std::size_t bins = sound.spectrum.size();
+    for (std::size_t b = 0; b < bins; ++b) {
+        const float v = sound.spectrum[b];
+        const float x0 = origin.x + size.x * static_cast<float>(b) / static_cast<float>(bins);
+        const float x1 = origin.x + size.x * static_cast<float>(b + 1) / static_cast<float>(bins);
+        d->AddRectFilled(ImVec2(x0, origin.y + size.y * (1.0f - v)), ImVec2(x1, origin.y + size.y), heat(v));
+    }
+    const auto x_of = [&](double hz) {
+        const double t = std::log(hz / toh::core::kSpectrumLow) /
+                         std::log(toh::core::kSpectrumHigh / toh::core::kSpectrumLow);
+        return origin.x + size.x * static_cast<float>(std::clamp(t, 0.0, 1.0));
+    };
+    const double root_hz = 440.0 * std::exp2((sound.root - 69.0) / 12.0);
+    const float root_x = x_of(root_hz);
+    d->AddLine(ImVec2(root_x, origin.y), ImVec2(root_x, origin.y + size.y), IM_COL32(240, 240, 250, 230), 1.5f);
+    if (sound.frequency > 0.0) {
+        const float x = x_of(sound.frequency);
+        d->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + size.y), IM_COL32(255, 60, 50, 255), 2.0f);
+    }
+    d->AddText(ImVec2(origin.x + 4.0f, origin.y + 2.0f), IM_COL32(200, 205, 220, 220), "30 Hz");
+    d->AddText(ImVec2(origin.x + size.x - 3.5f * font, origin.y + 2.0f), IM_COL32(200, 205, 220, 220), "8 kHz");
+}
+
+// The Sampler menu of a track: load a sound, see its spectrum, choose the note it plays at.
+void sampler_menu(Session& session, UiState& ui, std::size_t track) {
+    if (track >= session.tracks().size()) {
+        return;
+    }
+    const auto sound = session.tracks()[track].sampler;  // a copy: the menu may replace it
+    if (ImGui::MenuItem(sound ? T_("Load another sound...") : T_("Load a sound..."))) {
+        ui.sampler_track = track;
+        open_path_dialog(session, ui, PendingPath::Kind::SamplerSound);
+    }
+    if (!sound) {
+        ImGui::TextDisabled("%s", T_("Any sound file becomes the instrument of the track:\n"
+                                     "every note plays it higher or lower."));
+        return;
+    }
+    ImGui::Separator();
+    ImGui::Text(T_("Sound: %s"), sound->name.c_str());
+    if (sound->detected >= 0.0) {
+        ImGui::Text(T_("Found in its spectrum: %s (%.1f Hz)"), note_label(sound->detected).c_str(),
+                    sound->frequency);
+    } else {
+        ImGui::TextDisabled("%s", T_("No clear note found in the sound."));
+    }
+    draw_spectrum(*sound);
+    ImGui::TextDisabled("%s", T_("Red: the loudest note found. White: the note it plays at."));
+
+    int note = static_cast<int>(std::lround(sound->root));
+    float cents = static_cast<float>((sound->root - static_cast<double>(note)) * 100.0);
+    const std::string note_text = pitch_name(note);
+    ImGui::SetNextItemWidth(14.0f * ImGui::GetFontSize());
+    bool changed = ImGui::SliderInt(T_("Note of the sound"), &note, 0, 127, note_text.c_str());
+    ImGui::SetNextItemWidth(14.0f * ImGui::GetFontSize());
+    changed |= ImGui::SliderFloat(T_("Fine tuning"), &cents, -50.0f, 50.0f, T_("%.0f cents"));
+    if (changed) {
+        session.set_track_sampler_root(track, std::clamp(static_cast<double>(note) + cents / 100.0, 0.0, 127.0));
+    }
+    if (ImGui::MenuItem(T_("Use the note found in the sound"), nullptr, false, sound->detected >= 0.0)) {
+        session.set_track_sampler_root(track, sound->detected);
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem(T_("Remove the sampler"))) {
+        session.clear_track_sampler(track);
+    }
+}
+
 // One lane: draws the regions of a track and handles the mouse on them.
 void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row_height) {
     const View& view = ui.view;
@@ -3380,9 +3497,14 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
             if (instrument_menu(session, owner.program, owner.instrument, program, instrument)) {
                 session.set_track_program(ui.selected_track, program);
                 session.set_track_instrument(ui.selected_track, instrument);
+                session.clear_track_sampler(ui.selected_track);  // the chosen sound plays now
             }
             ImGui::Separator();
             ImGui::TextDisabled("%s", T_("Double-click in the region: add or remove a note"));
+            ImGui::EndMenu();
+        }
+        if (region != nullptr && region->has_notes() && ImGui::BeginMenu(T_("Sampler"))) {
+            sampler_menu(session, ui, ui.selected_track);
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(T_("Region speed"), region != nullptr && !region->has_notes())) {
@@ -4490,6 +4612,15 @@ void draw_tracks(Session& session, UiState& ui) {
                 add_instrument_track(session, ui, instrument, program);
             }
             ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem(T_("New sampler track (any sound)..."))) {
+            const std::size_t before = session.tracks().size();
+            add_instrument_track(session, ui, toh::core::Instrument::Keys, -1);
+            if (session.tracks().size() > before) {
+                session.set_track_name(before, T_("Sampler"));
+                ui.sampler_track = before;
+                open_path_dialog(session, ui, PendingPath::Kind::SamplerSound);
+            }
         }
         draw_playback_menu(session, ui);
         ImGui::EndPopup();

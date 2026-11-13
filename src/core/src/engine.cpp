@@ -307,7 +307,8 @@ bool Engine::start_recording() { return commands_.try_push(Command(CommandType::
 
 bool Engine::stop_recording() { return commands_.try_push(Command(CommandType::StopRecording)); }
 
-bool Engine::live_note_on(int pitch, float velocity, int program, Instrument instrument) {
+bool Engine::live_note_on(int pitch, float velocity, int program, Instrument instrument,
+                          std::shared_ptr<const SamplerSound> sampler) {
     if (pitch < 0 || pitch > 127) {
         return false;
     }
@@ -316,6 +317,10 @@ bool Engine::live_note_on(int pitch, float velocity, int program, Instrument ins
     command.value = std::clamp(velocity, 0.0f, 1.0f);
     command.a = program;
     command.b = static_cast<std::int64_t>(instrument);
+    command.sampler = sampler.get();
+    if (sampler && std::find(samplers_.begin(), samplers_.end(), sampler) == samplers_.end()) {
+        samplers_.push_back(std::move(sampler));  // alive as long as a voice may use it
+    }
     return commands_.try_push(command);
 }
 
@@ -336,7 +341,8 @@ void Engine::render_live(float* out, std::uint32_t frames) noexcept {
             continue;
         }
         const SoundFont::Preset* const preset =
-            font != nullptr && voice.program >= 0 ? font->find(voice.program) : nullptr;
+            font != nullptr && voice.program >= 0 && voice.sampler == nullptr ? font->find(voice.program)
+                                                                              : nullptr;
         Note note;
         note.pitch = static_cast<std::uint8_t>(voice.pitch);
         note.velocity = voice.velocity;
@@ -346,7 +352,9 @@ void Engine::render_live(float* out, std::uint32_t frames) noexcept {
         for (std::uint32_t i = 0; i < frames; ++i) {
             float left = 0.0f;
             float right = 0.0f;
-            if (preset != nullptr) {
+            if (voice.sampler != nullptr) {
+                left = right = sampler_note(*voice.sampler, note, voice.time, rate);
+            } else if (preset != nullptr) {
                 font->add_note(*preset, note, voice.time, rate, left, right);
             } else {
                 left = right = note_sample(voice.instrument, note, voice.time, rate);
@@ -361,7 +369,10 @@ void Engine::render_live(float* out, std::uint32_t frames) noexcept {
             voice.time += 1.0;
         }
         const double release =
-            (preset != nullptr ? preset->release : instrument_release_seconds(voice.instrument)) * rate;
+            (voice.sampler != nullptr ? kSamplerReleaseSeconds
+             : preset != nullptr      ? preset->release
+                                      : instrument_release_seconds(voice.instrument)) *
+            rate;
         if (voice.released && voice.time > voice.released_at + release + 1.0) {
             voice.active = false;
         }
@@ -641,6 +652,7 @@ void Engine::apply(const Command& command) noexcept {
             target->velocity = command.value;
             target->program = static_cast<int>(command.a);
             target->instrument = static_cast<Instrument>(command.b);
+            target->sampler = command.sampler;
             break;
         }
         case CommandType::LiveNoteOff:
@@ -929,16 +941,20 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 std::array<std::uint32_t, 64> active{};
                 std::size_t active_count = 0;
                 // With a program and a SoundFont, recorded instruments play the notes.
+                // A sampler plays them before anything else.
+                const SamplerSound* const sampler =
+                    note_data != nullptr ? region.sampler.get() : nullptr;
                 const SoundFont* const font =
-                    note_data != nullptr && region.program >= 0
+                    note_data != nullptr && region.program >= 0 && sampler == nullptr
                         ? soundfont_.load(std::memory_order_acquire)
                         : nullptr;
                 const SoundFont::Preset* const preset =
                     font != nullptr ? font->find(region.program) : nullptr;
                 if (note_data != nullptr) {
                     const double release =
-                        (preset != nullptr ? preset->release
-                                           : instrument_release_seconds(region.instrument)) *
+                        (sampler != nullptr ? kSamplerReleaseSeconds
+                         : preset != nullptr ? preset->release
+                                             : instrument_release_seconds(region.instrument)) *
                         static_cast<double>(sample_rate_);
                     const std::int64_t low = region.offset + std::max<std::int64_t>(block_low - begin, 0);
                     const std::int64_t high = region.offset + (block_high - begin) + 1;
@@ -998,9 +1014,12 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                         float value = 0.0f;
                         for (std::size_t k = 0; k < active_count; ++k) {
                             const Note& note = note_data->notes[active[k]];
-                            value += note_sample(region.instrument, note,
-                                                 note_pos - static_cast<double>(note.start),
-                                                 static_cast<double>(sample_rate_));
+                            const double since = note_pos - static_cast<double>(note.start);
+                            value += sampler != nullptr
+                                         ? sampler_note(*sampler, note, since,
+                                                        static_cast<double>(sample_rate_))
+                                         : note_sample(region.instrument, note, since,
+                                                       static_cast<double>(sample_rate_));
                         }
                         value *= region_fade;
                         for (std::size_t c = 0; c < channels; ++c) {

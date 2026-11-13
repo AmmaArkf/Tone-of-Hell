@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -562,6 +563,66 @@ bool Session::set_region_notes(std::size_t track, std::size_t region, std::vecto
     return true;
 }
 
+bool Session::set_track_sampler(std::size_t index, const std::filesystem::path& file,
+                                std::string* error) {
+    if (index >= tracks_.size()) {
+        set_error(error, "the track does not exist");
+        return false;
+    }
+    std::vector<float> mono;
+    const std::size_t limit = static_cast<std::size_t>(config_.sample_rate) * 60;
+    const std::uint32_t channels = std::max<std::uint32_t>(config_.channels, 1);
+    const std::int64_t frames = audio::decode_stream(
+        file, config_.sample_rate, channels,
+        [&mono, limit, channels](const float* data, std::size_t count) {
+            for (std::size_t i = 0; i < count && mono.size() < limit; ++i) {
+                float sum = 0.0f;
+                for (std::uint32_t c = 0; c < channels; ++c) {
+                    sum += data[i * channels + c];
+                }
+                mono.push_back(sum / static_cast<float>(channels));
+            }
+            return true;
+        },
+        error);
+    if (frames < 0) {
+        return false;
+    }
+    if (mono.empty()) {
+        set_error(error, "the file contains no audio");
+        return false;
+    }
+    return set_track_sampler_sound(
+        index, core::make_sampler_sound(file.stem().u8string(), std::move(mono), config_.sample_rate));
+}
+
+bool Session::set_track_sampler_sound(std::size_t index,
+                                      std::shared_ptr<const core::SamplerSound> sound) {
+    if (index >= tracks_.size()) {
+        return false;
+    }
+    tracks_[index].sampler = std::move(sound);
+    sync_track_regions(index);
+    pending_label_ = "Sampler";
+    return true;
+}
+
+bool Session::set_track_sampler_root(std::size_t index, double root) {
+    if (index >= tracks_.size() || !tracks_[index].sampler || !(root >= 0.0 && root <= 127.0)) {
+        return false;
+    }
+    auto changed = std::make_shared<core::SamplerSound>(*tracks_[index].sampler);
+    changed->root = root;
+    return set_track_sampler_sound(index, std::move(changed));
+}
+
+bool Session::clear_track_sampler(std::size_t index) {
+    if (index >= tracks_.size() || !tracks_[index].sampler) {
+        return false;
+    }
+    return set_track_sampler_sound(index, nullptr);
+}
+
 bool Session::is_instrument_track(std::size_t index) const noexcept {
     if (index >= tracks_.size()) {
         return false;
@@ -580,11 +641,13 @@ bool Session::note_on(int pitch, float velocity) {
     }
     int program = -1;
     core::Instrument instrument = core::Instrument::Keys;
+    std::shared_ptr<const core::SamplerSound> sampler;
     if (live_track_ < tracks_.size()) {
         program = tracks_[live_track_].program;
         instrument = tracks_[live_track_].instrument;
+        sampler = tracks_[live_track_].sampler;
     }
-    engine_.live_note_on(pitch, velocity, program, instrument);
+    engine_.live_note_on(pitch, velocity, program, instrument, std::move(sampler));
     if (notes_recording_) {
         const auto key = static_cast<std::size_t>(pitch);
         if (open_note_start_[key] >= 0) {
@@ -703,6 +766,7 @@ void Session::sync_track_regions(std::size_t index) {
         region.rate = info.rate;
         region.instrument = tracks_[index].instrument;
         region.program = tracks_[index].program;
+        region.sampler = tracks_[index].sampler;
         regions.push_back(std::move(region));
     }
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions);
@@ -1731,6 +1795,11 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
         out << "icon=" << one_line(icon) << "\n";
         out << "instrument=" << static_cast<int>(track.instrument) << "\n";
         out << "program=" << track.program << "\n";
+        if (track.sampler) {
+            out << "sampler_name=" << one_line(track.sampler->name) << "\n";
+            out << "sampler_rate=" << track.sampler->sample_rate << "\n";
+            out << "sampler_root=" << track.sampler->root << "\n";
+        }
         out << "gain=" << track.gain << "\n";
         out << "pan=" << track.pan << "\n";
         out << "mute=" << (track.mute ? 1 : 0) << "\n";
@@ -1853,6 +1922,16 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
         zip.writing = mz_zip_writer_init_cfile(&zip.zip, zip.file, MZ_ZIP_FLAG_WRITE_ZIP64) != 0;
         bool ok = zip.writing && mz_zip_writer_add_mem(&zip.zip, kProjectEntry, text.data(),
                                                        text.size(), MZ_DEFAULT_LEVEL) != 0;
+        // Sampler sounds: the mono samples as 32-bit floats.
+        for (std::size_t t = 0; ok && t < tracks_.size(); ++t) {
+            if (!tracks_[t].sampler || !tracks_[t].sampler->data) {
+                continue;
+            }
+            const std::vector<float>& samples = *tracks_[t].sampler->data;
+            const std::string entry = "samples/sample-" + std::to_string(t + 1) + ".f32";
+            ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), samples.data(),
+                                       samples.size() * sizeof(float), MZ_DEFAULT_LEVEL) != 0;
+        }
         for (std::size_t i = 0; ok && i < pictures.size(); ++i) {
             const std::string entry = "pictures/" + pictures[i].first;
             ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), pictures[i].second.data(),
@@ -1983,6 +2062,10 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         bool solo = false;
         long long instrument = 0;
         long long program = -1;
+        bool sampler = false;
+        std::string sampler_name;
+        double sampler_rate = 0.0;
+        double sampler_root = -1.0;
         std::vector<RegionEntry> regions;
     };
     std::vector<SourceEntry> sources;
@@ -2076,6 +2159,13 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().instrument = integer;
                 } else if (key == "program") {
                     tracks.back().program = integer;
+                } else if (key == "sampler_name") {
+                    tracks.back().sampler = true;
+                    tracks.back().sampler_name = value;
+                } else if (key == "sampler_rate") {
+                    tracks.back().sampler_rate = real;
+                } else if (key == "sampler_root") {
+                    tracks.back().sampler_root = real;
                 }
                 break;
             case Section::Region: {
@@ -2242,6 +2332,30 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         if (entry.program >= -1 && entry.program <= core::SoundFont::kDrums) {
             track.program = static_cast<int>(entry.program);
         }
+        if (entry.sampler) {
+            const std::string sample_entry = "samples/sample-" + std::to_string(fresh.size() + 1) + ".f32";
+            const int sample_index = mz_zip_reader_locate_file(&zip.zip, sample_entry.c_str(), nullptr, 0);
+            std::vector<float> samples;
+            if (sample_index >= 0) {
+                std::size_t sample_bytes = 0;
+                void* data = mz_zip_reader_extract_to_heap(&zip.zip, static_cast<mz_uint>(sample_index),
+                                                           &sample_bytes, 0);
+                if (data != nullptr) {
+                    samples.resize(sample_bytes / sizeof(float));
+                    std::memcpy(samples.data(), data, samples.size() * sizeof(float));
+                    mz_free(data);
+                }
+            }
+            if (!samples.empty()) {
+                const double sample_rate =
+                    entry.sampler_rate > 0.0 ? entry.sampler_rate : static_cast<double>(config_.sample_rate);
+                const double root = entry.sampler_root >= 0.0 && entry.sampler_root <= 127.0
+                                        ? entry.sampler_root
+                                        : -1.0;
+                track.sampler = core::make_sampler_sound(entry.sampler_name, std::move(samples),
+                                                         sample_rate, root);
+            }
+        }
         for (const RegionEntry& region : entry.regions) {
             if (region.source < 0 || static_cast<std::size_t>(region.source) >= loaded.size()) {
                 continue;
@@ -2367,7 +2481,8 @@ std::string Session::edit_text() const {
     out.precision(9);
     for (const TrackInfo& track : tracks_) {
         out << "T|" << track.name << "|" << track.icon << "|" << track.gain << "|" << track.pan << "|"
-            << static_cast<int>(track.instrument) << "|" << track.program << "\n";
+            << static_cast<int>(track.instrument) << "|" << track.program << "|"
+            << static_cast<const void*>(track.sampler.get()) << "\n";
         for (const RegionInfo& region : track.regions) {
             out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
                 << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"

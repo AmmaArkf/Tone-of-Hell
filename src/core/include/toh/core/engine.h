@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "toh/core/clip.h"
+#include "toh/core/sampler.h"
 #include "toh/core/soundfont.h"
 #include "toh/core/spsc_queue.h"
 #include "toh/core/spsc_ring.h"
@@ -54,6 +55,8 @@ struct Region {
     /// For note regions: a program of the SoundFont (0..127, SoundFont::kDrums) that plays them
     /// instead of `instrument`, or -1.
     int program = -1;
+    /// For note regions: a sound that plays them instead of both (a sampler), or null.
+    std::shared_ptr<const SamplerSound> sampler;
 };
 
 /// How many frames of its clip a region plays.
@@ -154,7 +157,8 @@ public:
 
     /// Live notes, played right away (from a keyboard) whether or not playback runs. `program`
     /// and `instrument` choose the sound as for note regions. Control thread.
-    bool live_note_on(int pitch, float velocity, int program, Instrument instrument);
+    bool live_note_on(int pitch, float velocity, int program, Instrument instrument,
+                      std::shared_ptr<const SamplerSound> sampler = nullptr);
     bool live_note_off(int pitch);
     bool live_all_notes_off();
     static constexpr double kMinSpeed = 0.25;
@@ -308,6 +312,7 @@ private:
         std::int64_t b = 0;
         double number = 0.0;
         const TrackContent* content = nullptr;
+        const SamplerSound* sampler = nullptr;
     };
 
     enum class State : std::uint8_t { Stopped, Playing, FadingOut };
@@ -357,6 +362,7 @@ private:
         float velocity = 0.8f;
         int program = -1;
         Instrument instrument = Instrument::Keys;
+        const SamplerSound* sampler = nullptr;
         double time = 0.0;      // frames since the note began
         double released_at = 0.0;
     };
@@ -384,6 +390,7 @@ private:
     std::atomic<double> speed_{1.0};
     std::atomic<const SoundFont*> soundfont_{nullptr};
     std::vector<std::shared_ptr<const SoundFont>> soundfonts_;  // keeps every one alive
+    std::vector<std::shared_ptr<const SamplerSound>> samplers_;  // the ones live notes used
     bool loop_enabled_ = false;
     std::int64_t loop_start_ = 0;
     std::int64_t loop_end_ = -1;

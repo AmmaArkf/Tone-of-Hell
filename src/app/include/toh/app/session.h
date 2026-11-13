@@ -124,6 +124,8 @@ struct TrackInfo {
     /// A program of the SoundFont that plays the note regions instead (0..127 General MIDI,
     /// core::SoundFont::kDrums for drums), or -1 for `instrument`.
     int program = -1;
+    /// A sound that plays the note regions of this track instead (a sampler), or null.
+    std::shared_ptr<const core::SamplerSound> sampler;
     std::vector<RegionInfo> regions;  // in the order they were created
     float gain = 1.0f;
     float pan = 0.0f;
@@ -210,6 +212,17 @@ public:
     /// an instrument track) it is also written down.
     bool note_on(int pitch, float velocity);
     void note_off(int pitch);
+
+    // ---- The sampler ---------------------------------------------------------------------
+
+    /// Makes a sound file the instrument of a track: its notes play the sound higher or lower.
+    /// The note of the sound is found from its spectrum (up to the first minute is used).
+    bool set_track_sampler(std::size_t index, const std::filesystem::path& file,
+                           std::string* error = nullptr);
+    bool set_track_sampler_sound(std::size_t index, std::shared_ptr<const core::SamplerSound> sound);
+    /// The note at which the sound plays as recorded (with a fraction for fine tuning).
+    bool set_track_sampler_root(std::size_t index, double root);
+    bool clear_track_sampler(std::size_t index);
 
     /// Chooses a program of the SoundFont for a track (-1: the built-in instrument).
     bool set_track_program(std::size_t index, int program);

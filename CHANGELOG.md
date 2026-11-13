@@ -2,6 +2,13 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.10
+
+- Sampler: any sound file (WAV, MP3, FLAC) can be the instrument of a track. Every note plays the sound higher or lower, like a tape. Add a track with "New sampler track (any sound)..." (right-click the track area), or choose Sampler in the menu of a note region.
+- The note of the sound is found by itself from its spectrum: the loudest frequency of its loudest part, or the fundamental below it when that frequency is an overtone. The Sampler menu shows the spectrum (quiet blue, loud red), the note found, and lets you set the note and fine tuning yourself.
+- Sampler sounds are saved inside the project, and they play live notes from keyboards too.
+- Fixed: SoundFont instruments with a long release (strings, pads, choirs) rang on after the key was released as if the sustain pedal were held. The release now falls by 100 dB over its time, as the SoundFont 2 standard says, instead of in a straight line.
+
 ## 0.2.9
 
 - Note (MIDI) regions can be made longer: drag either edge of the region further out than its notes went, or use + bar and - bar in the piano roll. The notes stay where they are.
