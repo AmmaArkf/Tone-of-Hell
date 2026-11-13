@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.18
+
+- Pan automation: with Automation on, a list next to the button chooses Volume or Pan. The pan line has left at the top, the centre in the middle and right at the bottom. While a track has pan points they decide its pan instead of the pan control. Saved in the project, part of exports and undo.
+
 ## 0.2.17
 
 - Volume automation (stage 8 begins): the Automation button on the toolbar shows a line on every lane for the volume of the track along the song, from 0 % at the bottom to 200 % at the top. Click to add a point, drag to move it (it sticks to the grid and to 100 %; Alt: free), right-click to remove it. Between points the volume moves in a straight line; it is multiplied with the fader of the track. Saved in the project, part of exports, and every edit is one undo step.

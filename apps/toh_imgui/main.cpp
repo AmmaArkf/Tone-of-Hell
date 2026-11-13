@@ -189,7 +189,8 @@ struct UiState {
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
-    bool automation_mode = false;       // the lanes show and edit the volume automation
+    bool automation_mode = false;       // the lanes show and edit an automation curve
+    int automation_target = 0;          // which one: 0 volume, 1 pan
     bool auto_drag = false;             // a point of it is being dragged
     std::size_t auto_track = 0;
     std::size_t auto_point = 0;
@@ -3092,6 +3093,21 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     tooltip(T_("Volume automation: the lanes show a line for the volume of each track along the song.\n"
                "Click to add a point, drag to move it, right-click to remove it. Switch off to edit regions again."));
     ImGui::SameLine();
+    if (ui.automation_mode) {
+        static const char* const targets[] = {"Volume", "Pan"};
+        ImGui::SetNextItemWidth(8.0f * ImGui::GetFontSize());
+        if (ImGui::BeginCombo("##automation target", T_(targets[ui.automation_target]))) {
+            for (int k = 0; k < 2; ++k) {
+                if (ImGui::Selectable(T_(targets[k]), ui.automation_target == k)) {
+                    ui.automation_target = k;
+                    ui.auto_drag = false;
+                }
+            }
+            ImGui::EndCombo();
+        }
+        tooltip(T_("What the lines on the lanes show and change"));
+        ImGui::SameLine();
+    }
     if (toggle_button(T_("Piano keys"), ui.musical_keyboard, ImVec4(0.55f, 0.35f, 0.80f, 1.0f), false)) {
         ui.musical_keyboard = !ui.musical_keyboard;
     }
@@ -3362,6 +3378,46 @@ std::size_t lane_under(const UiState& ui, float y, std::size_t count) {
 
 // ---- Volume automation ---------------------------------------------------------------------
 
+// The curve that is edited, as heights from 0 (bottom of the lane) to 2 (top): the volume as it
+// is (0 % to 200 %), the pan turned so that left is at the top and the centre in the middle.
+std::vector<toh::core::CurvePoint> automation_points(const Session& session, const UiState& ui,
+                                                     std::size_t track) {
+    if (ui.automation_target == 0) {
+        return session.tracks()[track].volume_curve;
+    }
+    std::vector<toh::core::CurvePoint> points = session.tracks()[track].pan_curve;
+    for (toh::core::CurvePoint& point : points) {
+        point.value = 1.0f - point.value;
+    }
+    return points;
+}
+
+void store_automation(Session& session, const UiState& ui, std::size_t track,
+                      std::vector<toh::core::CurvePoint> points) {
+    if (ui.automation_target == 0) {
+        session.set_track_volume_curve(track, std::move(points));
+        return;
+    }
+    for (toh::core::CurvePoint& point : points) {
+        point.value = 1.0f - point.value;
+    }
+    session.set_track_pan_curve(track, std::move(points));
+}
+
+// What a height means, for the label next to a point.
+void automation_label(const UiState& ui, float height, char* text, std::size_t size) {
+    if (ui.automation_target == 0) {
+        std::snprintf(text, size, "%d%%", static_cast<int>(std::lround(height * 100.0f)));
+        return;
+    }
+    const int amount = static_cast<int>(std::lround(std::fabs(1.0f - height) * 100.0f));
+    if (amount == 0) {
+        std::snprintf(text, size, "%s", T_("centre"));
+    } else {
+        std::snprintf(text, size, "%d%% %s", amount, height > 1.0f ? T_("left") : T_("right"));
+    }
+}
+
 // The curve goes from 0 % at the bottom of the lane to 200 % at the top.
 float automation_y(float value, float top, float height) { return top + height * (1.0f - value / 2.0f); }
 
@@ -3370,7 +3426,7 @@ float automation_y(float value, float top, float height) { return top + height *
 void edit_automation(Session& session, UiState& ui, std::size_t track_index, const ImVec2& origin,
                      float row_height, bool hovered) {
     const ImGuiIO& io = ImGui::GetIO();
-    std::vector<toh::core::CurvePoint> points = session.tracks()[track_index].volume_curve;
+    std::vector<toh::core::CurvePoint> points = automation_points(session, ui, track_index);
     const float value = std::clamp(2.0f * (1.0f - (io.MousePos.y - origin.y) / row_height), 0.0f, 2.0f);
     std::int64_t frame = std::max<std::int64_t>(x_to_frame(session, ui.view, io.MousePos.x), 0);
     if (ui.settings.magnet && !io.KeyAlt) {
@@ -3398,7 +3454,7 @@ void edit_automation(Session& session, UiState& ui, std::size_t track_index, con
                 ++near;
             }
             points.insert(points.begin() + static_cast<std::ptrdiff_t>(near), point);
-            session.set_track_volume_curve(track_index, points);
+            store_automation(session, ui, track_index, points);
         }
         ui.auto_drag = true;
         ui.auto_track = track_index;
@@ -3412,20 +3468,20 @@ void edit_automation(Session& session, UiState& ui, std::size_t track_index, con
         points[ui.auto_point].frame = std::clamp(frame, low, high);
         // Near 100 % the value sticks to it (Alt: free).
         points[ui.auto_point].value = !io.KeyAlt && std::fabs(value - 1.0f) < 0.03f ? 1.0f : value;
-        session.set_track_volume_curve(track_index, points);
+        store_automation(session, ui, track_index, points);
     }
     if (ui.auto_drag && ui.auto_track == track_index && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         ui.auto_drag = false;
     }
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && near < points.size()) {
         points.erase(points.begin() + static_cast<std::ptrdiff_t>(near));
-        session.set_track_volume_curve(track_index, points);
+        store_automation(session, ui, track_index, points);
     }
 }
 
 void draw_automation(const Session& session, const UiState& ui, std::size_t track_index, const ImVec2& origin,
                      float width, float row_height, bool hovered) {
-    const auto& points = session.tracks()[track_index].volume_curve;
+    const std::vector<toh::core::CurvePoint> points = automation_points(session, ui, track_index);
     ImDrawList* d = ImGui::GetWindowDrawList();
     const ImU32 line = IM_COL32(255, 170, 60, 255);
     const float left = origin.x;
@@ -3437,7 +3493,9 @@ void draw_automation(const Session& session, const UiState& ui, std::size_t trac
         d->AddLine(ImVec2(left, unity), ImVec2(right, unity), IM_COL32(255, 170, 60, 140), 1.5f);
         if (hovered) {
             d->AddText(ImVec2(left + 8.0f, origin.y + 4.0f), IM_COL32(255, 210, 150, 230),
-                       T_("Click to add a volume point. Drag to move it, right-click to remove it."));
+                       T_(ui.automation_target == 0
+                              ? "Click to add a volume point. Drag to move it, right-click to remove it."
+                              : "Click to add a pan point: left is up, right is down. Right-click removes it."));
         }
         return;
     }
@@ -3457,8 +3515,8 @@ void draw_automation(const Session& session, const UiState& ui, std::size_t trac
                            std::fabs(at.y - io.MousePos.y) <= 0.5f * ImGui::GetFontSize();
         d->AddCircleFilled(at, dragged || under ? 5.5f : 4.0f, dragged || under ? IM_COL32(255, 235, 200, 255) : line);
         if (dragged || under) {
-            char text[32];
-            std::snprintf(text, sizeof(text), "%d%%", static_cast<int>(std::lround(points[p].value * 100.0f)));
+            char text[48];
+            automation_label(ui, points[p].value, text, sizeof(text));
             d->AddText(ImVec2(at.x + 8.0f, std::max(at.y - ImGui::GetFontSize() - 2.0f, origin.y)),
                        IM_COL32(255, 235, 200, 255), text);
         }

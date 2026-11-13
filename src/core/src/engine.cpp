@@ -93,7 +93,7 @@ bool Engine::push_content(std::uint32_t track, std::unique_ptr<TrackContent> con
 bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
                                const std::vector<std::shared_ptr<AudioEffect>>& effects,
                                std::shared_ptr<AudioEffect> instrument, std::int64_t latency,
-                               std::vector<CurvePoint> volume) {
+                               std::vector<CurvePoint> volume, std::vector<CurvePoint> pan) {
     if (track >= kMaxTracks) {
         return false;
     }
@@ -108,6 +108,9 @@ bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& r
     std::stable_sort(volume.begin(), volume.end(),
                      [](const CurvePoint& a, const CurvePoint& b) { return a.frame < b.frame; });
     content->volume = std::move(volume);
+    std::stable_sort(pan.begin(), pan.end(),
+                     [](const CurvePoint& a, const CurvePoint& b) { return a.frame < b.frame; });
+    content->pan = std::move(pan);
     for (const auto& effect : effects) {
         if (effect) {
             content->effects.push_back(effect);
@@ -542,8 +545,10 @@ void Engine::update_targets() noexcept {
     for (Track& track : tracks_) {
         const bool audible = !track.mute && (!any_solo || track.solo);
         const float base = audible ? track.gain : 0.0f;
-        track.target_left = stereo ? base * track.pan_left : base;
-        track.target_right = stereo ? base * track.pan_right : base;
+        // A track with pan automation gets its pan from the curve, not from the pan control.
+        const bool own_pan = stereo && (track.content == nullptr || track.content->pan.empty());
+        track.target_left = own_pan ? base * track.pan_left : base;
+        track.target_right = own_pan ? base * track.pan_right : base;
         if (snap) {
             track.current_left = track.target_left;
             track.current_right = track.target_right;
@@ -571,6 +576,7 @@ void Engine::apply(const Command& command) noexcept {
             }
             track.content = command.content;
             track.frames = track.content != nullptr ? track.content->end : 0;
+            update_targets();  // the content says whether the pan is automated
             project_frames_ = 0;
             for (const Track& other : tracks_) {
                 project_frames_ = std::max(project_frames_, other.frames);
@@ -1278,6 +1284,10 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
             const std::vector<CurvePoint>* const curve =
                 track.content->volume.empty() ? nullptr : &track.content->volume;
             float automation = curve != nullptr ? track.automation : 1.0f;
+            const std::vector<CurvePoint>* const pan_curve =
+                stereo && !track.content->pan.empty() ? &track.content->pan : nullptr;
+            float pan_left = pan_curve != nullptr ? track.auto_pan_left : 1.0f;
+            float pan_right = pan_curve != nullptr ? track.auto_pan_right : 1.0f;
 
             float* destination = master;
             if (track.bus >= 0) {
@@ -1301,9 +1311,18 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                     automation = curve_at(*curve, frame_pos_[i]);
                     track.automation = automation;
                 }
+                if (pan_curve != nullptr && frame_pos_[i] >= 0) {
+                    // The same constant-power curve as the pan control.
+                    const float pan = std::clamp(curve_at(*pan_curve, frame_pos_[i]), -1.0f, 1.0f);
+                    const float angle = (pan + 1.0f) * 0.78539816f;
+                    pan_left = pan >= 1.0f ? 0.0f : std::min(1.0f, 1.41421356f * std::cos(angle));
+                    pan_right = pan <= -1.0f ? 0.0f : std::min(1.0f, 1.41421356f * std::sin(angle));
+                    track.auto_pan_left = pan_left;
+                    track.auto_pan_right = pan_right;
+                }
                 if (stereo) {
-                    const float left = src[0] * track.current_left * automation;
-                    const float right = src[1] * track.current_right * automation;
+                    const float left = src[0] * track.current_left * automation * pan_left;
+                    const float right = src[1] * track.current_right * automation * pan_right;
                     dst[0] += left;
                     dst[1] += right;
                     peak = std::max(peak, std::max(std::fabs(left), std::fabs(right)));

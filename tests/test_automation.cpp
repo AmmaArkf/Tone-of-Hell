@@ -52,6 +52,38 @@ TEST_CASE("The engine plays a track at the volume of its automation") {
     CHECK(out[1500] == doctest::Approx(1.0f));
 }
 
+TEST_CASE("Pan automation decides the pan instead of the pan control") {
+    Engine engine(48000, 2);
+    toh::core::Region region;
+    region.clip = ones(4096, 2);
+    region.length = 4096;
+    REQUIRE(engine.set_track_pan(0, 1.0f));  // the control says right; the curve says left
+    REQUIRE(engine.set_track_regions(0, {region}, {}, nullptr, 0, {}, {{0, -1.0f}, {1000, 0.0f}}));
+    REQUIRE(engine.play(false));
+    std::vector<float> out(2 * 2048);
+    for (int block = 0; block < 4; ++block) {
+        engine.render(out.data() + 2 * block * 512, 512);
+    }
+    CHECK(out[2 * 10] == doctest::Approx(1.0f).epsilon(0.02));      // left
+    CHECK(out[2 * 10 + 1] == doctest::Approx(0.0f).epsilon(0.02));  // right
+    CHECK(out[2 * 1500] == doctest::Approx(1.0f));                  // centre: both full
+    CHECK(out[2 * 1500 + 1] == doctest::Approx(1.0f));
+
+    Session session;
+    REQUIRE(session.add_track("take", ones(48000, 2)));
+    REQUIRE(session.set_track_pan_curve(0, {{0, -3.0f}, {1000, 0.25f}}));
+    CHECK(session.tracks()[0].pan_curve[0].value == doctest::Approx(-1.0f));
+    const auto folder = std::filesystem::temp_directory_path() / "toh_pan_automation_test";
+    std::filesystem::create_directories(folder);
+    std::string error;
+    REQUIRE_MESSAGE(session.save_project(folder / "p.tohp", &error), error);
+    Session reopened;
+    REQUIRE_MESSAGE(reopened.open_project(folder / "p.tohp", &error), error);
+    REQUIRE(reopened.tracks()[0].pan_curve.size() == 2);
+    CHECK(reopened.tracks()[0].pan_curve[1].value == doctest::Approx(0.25f));
+    std::filesystem::remove_all(folder);
+}
+
 TEST_CASE("Volume automation is saved, opened again and undone") {
     Session session;
     REQUIRE(session.add_track("take", ones(48000, 2)));

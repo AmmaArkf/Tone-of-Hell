@@ -142,6 +142,9 @@ struct TrackInfo {
     /// Volume automation: the gain (0 to 2) along the timeline, multiplied with `gain`. Sorted
     /// by frame; empty means none.
     std::vector<core::CurvePoint> volume_curve;
+    /// Pan automation: -1 (left) to 1 (right) along the timeline. While it has points they
+    /// decide the pan instead of `pan`.
+    std::vector<core::CurvePoint> pan_curve;
     float gain = 1.0f;
     float pan = 0.0f;
     bool mute = false;
@@ -273,6 +276,8 @@ public:
     /// Replaces the volume automation of a track (see TrackInfo::volume_curve). The points
     /// are sorted and their values limited to 0..2.
     bool set_track_volume_curve(std::size_t index, std::vector<core::CurvePoint> points);
+    /// Replaces the pan automation of a track (see TrackInfo::pan_curve); values limited to -1..1.
+    bool set_track_pan_curve(std::size_t index, std::vector<core::CurvePoint> points);
     bool set_track_selected(std::size_t index, bool selected);
     /// Selects one track and deselects every other one.
     void select_only_track(std::size_t index);
