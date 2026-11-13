@@ -60,6 +60,33 @@ struct Region {
     std::shared_ptr<const SamplerSound> sampler;
 };
 
+/// One point of an automation curve: the value at a timeline frame. Between two points the
+/// value moves in a straight line; before the first and after the last it stays.
+struct CurvePoint {
+    std::int64_t frame = 0;
+    float value = 1.0f;
+};
+
+/// The value of a curve (points sorted by frame, not empty) at a timeline frame.
+inline float curve_at(const std::vector<CurvePoint>& points, std::int64_t frame) noexcept {
+    if (frame <= points.front().frame) {
+        return points.front().value;
+    }
+    if (frame >= points.back().frame) {
+        return points.back().value;
+    }
+    std::size_t low = 0;
+    std::size_t high = points.size() - 1;
+    while (high - low > 1) {
+        const std::size_t middle = (low + high) / 2;
+        (points[middle].frame <= frame ? low : high) = middle;
+    }
+    const CurvePoint& a = points[low];
+    const CurvePoint& b = points[high];
+    const float t = static_cast<float>(frame - a.frame) / static_cast<float>(b.frame - a.frame);
+    return a.value + (b.value - a.value) * t;
+}
+
 /// How many frames of its clip a region plays.
 inline std::int64_t clip_frames_used(std::int64_t length, double rate) noexcept {
     return static_cast<std::int64_t>(std::ceil(static_cast<double>(length) * rate - 1e-9));
@@ -105,11 +132,13 @@ public:
     /// shortened. Regions that overlap are mixed together. An empty list empties the track.
     /// `effects` are the insert effects of the track, in the order the sound passes them.
     /// `instrument` (a plugin) plays the note regions of the track instead, before the effects.
+    /// `volume` is the volume automation of the track (gain 0 to 2, multiplied with its fader).
     /// `latency` is how many frames the instrument and effects together delay the sound: the
     /// track then reads its regions that much ahead (delay compensation, up to 2 seconds).
     bool set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
                            const std::vector<std::shared_ptr<AudioEffect>>& effects = {},
-                           std::shared_ptr<AudioEffect> instrument = nullptr, std::int64_t latency = 0);
+                           std::shared_ptr<AudioEffect> instrument = nullptr, std::int64_t latency = 0,
+                           std::vector<CurvePoint> volume = {});
     /// Asks the audio thread to confirm that it has taken in every change made so far:
     /// synced() returns `token` (or a later one) once it has.
     bool request_sync(std::int64_t token);
@@ -285,6 +314,7 @@ private:
         std::vector<std::shared_ptr<AudioEffect>> effects;
         std::shared_ptr<AudioEffect> instrument;
         std::int64_t latency = 0;  // frames the plugins delay the sound
+        std::vector<CurvePoint> volume;  // volume automation, sorted by frame
         std::int64_t end = 0;  // end of the last region
     };
 
@@ -352,6 +382,7 @@ private:
         float current_right = 1.0f;
         float meter = 0.0f;
         std::int64_t last_position = -1;  // for an instrument plugin: where the last block ended
+        float automation = 1.0f;          // the last value of the volume automation
         bool notes_on = false;            // notes were started on it and not all ended
     };
 

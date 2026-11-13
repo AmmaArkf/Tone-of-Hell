@@ -139,6 +139,9 @@ struct TrackInfo {
     /// An instrument plugin that plays the note regions (before everything else), if any.
     EffectSlot plugin_instrument;
     std::vector<RegionInfo> regions;  // in the order they were created
+    /// Volume automation: the gain (0 to 2) along the timeline, multiplied with `gain`. Sorted
+    /// by frame; empty means none.
+    std::vector<core::CurvePoint> volume_curve;
     float gain = 1.0f;
     float pan = 0.0f;
     bool mute = false;
@@ -267,6 +270,9 @@ public:
     bool set_track_pan(std::size_t index, float pan);
     bool set_track_mute(std::size_t index, bool mute);
     bool set_track_solo(std::size_t index, bool solo);
+    /// Replaces the volume automation of a track (see TrackInfo::volume_curve). The points
+    /// are sorted and their values limited to 0..2.
+    bool set_track_volume_curve(std::size_t index, std::vector<core::CurvePoint> points);
     bool set_track_selected(std::size_t index, bool selected);
     /// Selects one track and deselects every other one.
     void select_only_track(std::size_t index);

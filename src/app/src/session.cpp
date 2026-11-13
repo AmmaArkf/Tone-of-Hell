@@ -949,7 +949,7 @@ void Session::sync_track_regions(std::size_t index) {
     }
     const TrackPlugins plugins = track_plugins(tracks_[index]);
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, plugins.effects,
-                              plugins.instrument, plugins.latency);
+                              plugins.instrument, plugins.latency, tracks_[index].volume_curve);
     update_streaming();
 }
 
@@ -989,6 +989,22 @@ bool Session::set_track_gain(std::size_t index, float linear) {
         return false;
     }
     tracks_[index].gain = linear;
+    return true;
+}
+
+bool Session::set_track_volume_curve(std::size_t index, std::vector<core::CurvePoint> points) {
+    if (index >= tracks_.size()) {
+        return false;
+    }
+    for (core::CurvePoint& point : points) {
+        point.frame = std::max<std::int64_t>(point.frame, 0);
+        point.value = std::clamp(point.value, 0.0f, 2.0f);
+    }
+    std::stable_sort(points.begin(), points.end(),
+                     [](const core::CurvePoint& a, const core::CurvePoint& b) { return a.frame < b.frame; });
+    tracks_[index].volume_curve = std::move(points);
+    sync_track_regions(index);
+    pending_label_ = "Volume automation";
     return true;
 }
 
@@ -1991,6 +2007,13 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
         }
         out << "gain=" << track.gain << "\n";
         out << "pan=" << track.pan << "\n";
+        if (!track.volume_curve.empty()) {
+            out << "volume_curve=";
+            for (std::size_t p = 0; p < track.volume_curve.size(); ++p) {
+                out << (p > 0 ? "," : "") << track.volume_curve[p].frame << ":" << track.volume_curve[p].value;
+            }
+            out << "\n";
+        }
         out << "mute=" << (track.mute ? 1 : 0) << "\n";
         out << "solo=" << (track.solo ? 1 : 0) << "\n";
         for (const RegionInfo& region : track.regions) {
@@ -2291,6 +2314,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         std::string icon;
         float gain = 1.0f;
         float pan = 0.0f;
+        std::string volume_curve;
         bool mute = false;
         bool solo = false;
         long long instrument = 0;
@@ -2392,6 +2416,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().icon = value;
                 } else if (key == "gain") {
                     tracks.back().gain = std::clamp(static_cast<float>(real), 0.0f, 2.0f);
+                } else if (key == "volume_curve") {
+                    tracks.back().volume_curve = value;
                 } else if (key == "pan") {
                     tracks.back().pan = std::clamp(static_cast<float>(real), -1.0f, 1.0f);
                 } else if (key == "mute") {
@@ -2595,6 +2621,24 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                                                            : entry.icon;
         track.gain = entry.gain;
         track.pan = entry.pan;
+        // "frame:value,frame:value"
+        for (const char* cursor = entry.volume_curve.c_str(); *cursor != '\0';) {
+            char* after = nullptr;
+            core::CurvePoint point;
+            point.frame = std::max<long long>(std::strtoll(cursor, &after, 10), 0);
+            if (after == cursor || *after != ':') {
+                break;
+            }
+            cursor = after + 1;
+            point.value = std::clamp(static_cast<float>(std::strtod(cursor, &after)), 0.0f, 2.0f);
+            if (after == cursor) {
+                break;
+            }
+            track.volume_curve.push_back(point);
+            cursor = *after == ',' ? after + 1 : after;
+        }
+        std::stable_sort(track.volume_curve.begin(), track.volume_curve.end(),
+                         [](const core::CurvePoint& a, const core::CurvePoint& b) { return a.frame < b.frame; });
         track.mute = entry.mute;
         track.solo = entry.solo;
         if (entry.instrument >= 0 && entry.instrument < core::kInstrumentCount) {
@@ -2805,6 +2849,11 @@ std::string Session::edit_text() const {
                 << "\n";
         }
         out << "I|" << static_cast<const void*>(track.plugin_instrument.plugin.get()) << "\n";
+        out << "V";
+        for (const core::CurvePoint& point : track.volume_curve) {
+            out << "|" << point.frame << ":" << point.value;
+        }
+        out << "\n";
         for (const RegionInfo& region : track.regions) {
             out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
                 << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"
@@ -3088,7 +3137,7 @@ bool Session::render_project(const std::function<bool(const float*, std::uint32_
             effect->reset();
         }
         offline->set_track_regions(slot, engine_regions(track), plugins.effects, plugins.instrument,
-                                   plugins.latency);
+                                   plugins.latency, track.volume_curve);
         offline->set_track_gain(slot, track.gain);
         offline->set_track_pan(slot, track.pan);
         offline->set_track_mute(slot, silenced(track));

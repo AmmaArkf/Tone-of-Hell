@@ -1,5 +1,6 @@
 add_executable(toh_tests
     test_main.cpp
+    test_automation.cpp
     test_engine.cpp
     test_join.cpp
     test_latency.cpp

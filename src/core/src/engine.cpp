@@ -92,7 +92,8 @@ bool Engine::push_content(std::uint32_t track, std::unique_ptr<TrackContent> con
 
 bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
                                const std::vector<std::shared_ptr<AudioEffect>>& effects,
-                               std::shared_ptr<AudioEffect> instrument, std::int64_t latency) {
+                               std::shared_ptr<AudioEffect> instrument, std::int64_t latency,
+                               std::vector<CurvePoint> volume) {
     if (track >= kMaxTracks) {
         return false;
     }
@@ -104,6 +105,9 @@ bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& r
     auto content = std::make_unique<TrackContent>();
     content->instrument = std::move(instrument);
     content->latency = std::clamp<std::int64_t>(latency, 0, static_cast<std::int64_t>(sample_rate_) * 2);
+    std::stable_sort(volume.begin(), volume.end(),
+                     [](const CurvePoint& a, const CurvePoint& b) { return a.frame < b.frame; });
+    content->volume = std::move(volume);
     for (const auto& effect : effects) {
         if (effect) {
             content->effects.push_back(effect);
@@ -1270,6 +1274,11 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 }
             }
 
+            // Volume automation: the gain of the curve where the playhead is, times the fader.
+            const std::vector<CurvePoint>* const curve =
+                track.content->volume.empty() ? nullptr : &track.content->volume;
+            float automation = curve != nullptr ? track.automation : 1.0f;
+
             float* destination = master;
             if (track.bus >= 0) {
                 const auto bus = static_cast<std::size_t>(track.bus);
@@ -1288,15 +1297,19 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 }
                 const float* src = scratch + static_cast<std::size_t>(i) * channels;
                 float* dst = destination + static_cast<std::size_t>(i) * channels;
+                if (curve != nullptr && frame_pos_[i] >= 0) {
+                    automation = curve_at(*curve, frame_pos_[i]);
+                    track.automation = automation;
+                }
                 if (stereo) {
-                    const float left = src[0] * track.current_left;
-                    const float right = src[1] * track.current_right;
+                    const float left = src[0] * track.current_left * automation;
+                    const float right = src[1] * track.current_right * automation;
                     dst[0] += left;
                     dst[1] += right;
                     peak = std::max(peak, std::max(std::fabs(left), std::fabs(right)));
                 } else {
                     for (std::size_t c = 0; c < channels; ++c) {
-                        const float value = src[c] * track.current_left;
+                        const float value = src[c] * track.current_left * automation;
                         dst[c] += value;
                         peak = std::max(peak, std::fabs(value));
                     }

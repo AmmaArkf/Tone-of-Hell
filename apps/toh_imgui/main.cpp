@@ -189,6 +189,10 @@ struct UiState {
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
+    bool automation_mode = false;       // the lanes show and edit the volume automation
+    bool auto_drag = false;             // a point of it is being dragged
+    std::size_t auto_track = 0;
+    std::size_t auto_point = 0;
     // Plugins: the ones found on this computer, and their open windows.
     std::vector<toh::plugins::PluginInfo> plugin_list;
     std::vector<std::string> plugin_problems;
@@ -3081,6 +3085,13 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
                              "Click to switch them off."
                            : "Scissors off. Click to switch them on, then click a region to cut it."));
     ImGui::SameLine();
+    if (toggle_button(T_("Automation"), ui.automation_mode, ImVec4(0.85f, 0.55f, 0.15f, 1.0f), false)) {
+        ui.automation_mode = !ui.automation_mode;
+        ui.auto_drag = false;
+    }
+    tooltip(T_("Volume automation: the lanes show a line for the volume of each track along the song.\n"
+               "Click to add a point, drag to move it, right-click to remove it. Switch off to edit regions again."));
+    ImGui::SameLine();
     if (toggle_button(T_("Piano keys"), ui.musical_keyboard, ImVec4(0.55f, 0.35f, 0.80f, 1.0f), false)) {
         ui.musical_keyboard = !ui.musical_keyboard;
     }
@@ -3347,6 +3358,111 @@ std::size_t lane_under(const UiState& ui, float y, std::size_t count) {
         }
     }
     return count;
+}
+
+// ---- Volume automation ---------------------------------------------------------------------
+
+// The curve goes from 0 % at the bottom of the lane to 200 % at the top.
+float automation_y(float value, float top, float height) { return top + height * (1.0f - value / 2.0f); }
+
+// The mouse on a lane in automation mode: a click adds a point, dragging moves one, a
+// right-click removes one. Call right after the lane's button.
+void edit_automation(Session& session, UiState& ui, std::size_t track_index, const ImVec2& origin,
+                     float row_height, bool hovered) {
+    const ImGuiIO& io = ImGui::GetIO();
+    std::vector<toh::core::CurvePoint> points = session.tracks()[track_index].volume_curve;
+    const float value = std::clamp(2.0f * (1.0f - (io.MousePos.y - origin.y) / row_height), 0.0f, 2.0f);
+    std::int64_t frame = std::max<std::int64_t>(x_to_frame(session, ui.view, io.MousePos.x), 0);
+    if (ui.settings.magnet && !io.KeyAlt) {
+        frame = session.snap_frame(frame);
+    }
+    std::size_t near = points.size();
+    const float reach = 0.5f * ImGui::GetFontSize();
+    for (std::size_t p = 0; p < points.size(); ++p) {
+        if (std::fabs(frame_to_x(session, ui.view, points[p].frame) - io.MousePos.x) <= reach &&
+            std::fabs(automation_y(points[p].value, origin.y, row_height) - io.MousePos.y) <= reach) {
+            near = p;
+        }
+    }
+    if (hovered) {
+        ImGui::SetMouseCursor(near < points.size() ? ImGuiMouseCursor_ResizeAll : ImGuiMouseCursor_Hand);
+    }
+    if (ImGui::IsItemActivated() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ui.focus_track = track_index;
+        if (near >= points.size()) {  // a new point under the mouse
+            toh::core::CurvePoint point;
+            point.frame = frame;
+            point.value = value;
+            near = 0;
+            while (near < points.size() && points[near].frame <= frame) {
+                ++near;
+            }
+            points.insert(points.begin() + static_cast<std::ptrdiff_t>(near), point);
+            session.set_track_volume_curve(track_index, points);
+        }
+        ui.auto_drag = true;
+        ui.auto_track = track_index;
+        ui.auto_point = near;
+    } else if (ui.auto_drag && ui.auto_track == track_index && ImGui::IsItemActive() &&
+               ui.auto_point < points.size() && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) {
+        // The point stays between its neighbours.
+        const std::int64_t low = ui.auto_point > 0 ? points[ui.auto_point - 1].frame : 0;
+        const std::int64_t high = ui.auto_point + 1 < points.size() ? points[ui.auto_point + 1].frame
+                                                                    : std::numeric_limits<std::int64_t>::max();
+        points[ui.auto_point].frame = std::clamp(frame, low, high);
+        // Near 100 % the value sticks to it (Alt: free).
+        points[ui.auto_point].value = !io.KeyAlt && std::fabs(value - 1.0f) < 0.03f ? 1.0f : value;
+        session.set_track_volume_curve(track_index, points);
+    }
+    if (ui.auto_drag && ui.auto_track == track_index && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        ui.auto_drag = false;
+    }
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && near < points.size()) {
+        points.erase(points.begin() + static_cast<std::ptrdiff_t>(near));
+        session.set_track_volume_curve(track_index, points);
+    }
+}
+
+void draw_automation(const Session& session, const UiState& ui, std::size_t track_index, const ImVec2& origin,
+                     float width, float row_height, bool hovered) {
+    const auto& points = session.tracks()[track_index].volume_curve;
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const ImU32 line = IM_COL32(255, 170, 60, 255);
+    const float left = origin.x;
+    const float right = origin.x + width;
+    d->AddRectFilled(origin, ImVec2(right, origin.y + row_height), IM_COL32(0, 0, 0, 90));
+    const float unity = automation_y(1.0f, origin.y, row_height);
+    d->AddLine(ImVec2(left, unity), ImVec2(right, unity), IM_COL32(255, 255, 255, 50));
+    if (points.empty()) {
+        d->AddLine(ImVec2(left, unity), ImVec2(right, unity), IM_COL32(255, 170, 60, 140), 1.5f);
+        if (hovered) {
+            d->AddText(ImVec2(left + 8.0f, origin.y + 4.0f), IM_COL32(255, 210, 150, 230),
+                       T_("Click to add a volume point. Drag to move it, right-click to remove it."));
+        }
+        return;
+    }
+    ImVec2 previous(left, automation_y(points.front().value, origin.y, row_height));
+    for (const toh::core::CurvePoint& point : points) {
+        const ImVec2 at(frame_to_x(session, ui.view, point.frame), automation_y(point.value, origin.y, row_height));
+        d->AddLine(previous, at, line, 2.0f);
+        previous = at;
+    }
+    d->AddLine(previous, ImVec2(right, previous.y), line, 2.0f);
+    const ImGuiIO& io = ImGui::GetIO();
+    for (std::size_t p = 0; p < points.size(); ++p) {
+        const ImVec2 at(frame_to_x(session, ui.view, points[p].frame),
+                        automation_y(points[p].value, origin.y, row_height));
+        const bool dragged = ui.auto_drag && ui.auto_track == track_index && ui.auto_point == p;
+        const bool under = hovered && std::fabs(at.x - io.MousePos.x) <= 0.5f * ImGui::GetFontSize() &&
+                           std::fabs(at.y - io.MousePos.y) <= 0.5f * ImGui::GetFontSize();
+        d->AddCircleFilled(at, dragged || under ? 5.5f : 4.0f, dragged || under ? IM_COL32(255, 235, 200, 255) : line);
+        if (dragged || under) {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%d%%", static_cast<int>(std::lround(points[p].value * 100.0f)));
+            d->AddText(ImVec2(at.x + 8.0f, std::max(at.y - ImGui::GetFontSize() - 2.0f, origin.y)),
+                       IM_COL32(255, 235, 200, 255), text);
+        }
+    }
 }
 
 // The strip along the top of a region that shows its name; dragging it moves the region.
@@ -3693,9 +3809,12 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         ui.lane_spans.resize(track_index + 1);
     }
     ui.lane_spans[track_index] = {origin.y, origin.y + row_height};
+    if (ui.automation_mode) {
+        edit_automation(session, ui, track_index, origin, row_height, hovered);
+    }
 
     Hit hit;
-    if (hovered && ui.drag == DragKind::None) {
+    if (hovered && ui.drag == DragKind::None && !ui.automation_mode) {
         hit = hit_test(session, view, track, io.MousePos, origin.y);
         if (ui.cut_tool) {
             if (hit.kind != DragKind::None) {
@@ -3725,7 +3844,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         }
         session.split_region(track_index, hit.region, frame);
         ui.selected = false;
-    } else if (ImGui::IsItemActivated()) {
+    } else if (ImGui::IsItemActivated() && !ui.automation_mode) {
         ui.drag_track = track_index;
         ui.drag_owner = track_index;
         ui.focus_track = track_index;
@@ -3756,7 +3875,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         ui.selected_track = track_index;
         ui.selected_region = hit.region;
         ImGui::OpenPopup("region menu");
-    } else if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    } else if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) && !ui.automation_mode) {
         ui.open_track_menu = true;  // empty part of the lane
     }
     if (ImGui::BeginPopup("region menu")) {
@@ -4114,6 +4233,9 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     if (ui.cut_tool && hovered && hit.kind != DragKind::None) {
         const float x = std::floor(io.MousePos.x) + 0.5f;
         draw_list->AddLine(ImVec2(x, origin.y), ImVec2(x, corner.y), IM_COL32(255, 90, 80, 230), 2.0f);
+    }
+    if (ui.automation_mode) {
+        draw_automation(session, ui, track_index, origin, width, row_height, hovered);
     }
     // Where a dragged edge sticks, across every lane.
     if (ui.drag != DragKind::None && ui.magnet_frame >= 0) {
