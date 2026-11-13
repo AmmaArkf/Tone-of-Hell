@@ -105,6 +105,63 @@ TEST_CASE("Regions on one track are mixed where they overlap") {
     CHECK(engine.length_frames() == 1600);
 }
 
+TEST_CASE("Regions can play their audio faster or slower") {
+    Session session;
+    REQUIRE(session.add_track("ramp", ramp_clip(10000, 2, 0.0001f)));
+    REQUIRE(session.set_region_fades(0, 0, 100, 100));
+    REQUIRE(session.set_region_speed(0, 0, 2.0));
+    {
+        const auto& region = session.tracks()[0].regions[0];
+        CHECK(region.rate == 2.0);
+        CHECK(region.length == 5000);
+        CHECK(region.fade_in == 50);
+        CHECK(region.fade_out == 50);
+        CHECK(session.length_frames() == 5000);
+    }
+    REQUIRE(session.set_region_fades(0, 0, 0, 0));
+
+    // Played back, the ramp rises twice as fast.
+    session.play();
+    std::vector<float> out(2 * 1000);
+    session.engine().render(out.data(), 1000);
+    REQUIRE(out[2 * 300] != 0.0f);
+    CHECK(out[2 * 600] / out[2 * 300] == doctest::Approx(2.0f).epsilon(0.01));
+    session.stop();
+
+    // Cutting, trimming and the limits all count in frames of the timeline.
+    REQUIRE(session.split_region(0, 0, 1000));
+    {
+        const auto& second = session.tracks()[0].regions[1];
+        CHECK(second.offset == 2000);
+        CHECK(second.length == 4000);
+        CHECK(second.rate == 2.0);
+    }
+    REQUIRE(session.trim_region_start(0, 1, 1100));
+    CHECK(session.tracks()[0].regions[1].offset == 2200);
+    CHECK(session.tracks()[0].regions[1].length == 3900);
+    REQUIRE(session.trim_region_end(0, 1, 999999));
+    CHECK(session.tracks()[0].regions[1].end() == 5000);  // the source ends there
+
+    // Joining plays each part at its own speed into the new audio.
+    REQUIRE(session.set_region_speed(0, 0, 1.0));  // the first part: as recorded, 2000 frames
+    REQUIRE(session.move_region(0, 1, 2000));      // the second part right after it
+    std::size_t joined = 0;
+    REQUIRE(session.join_regions(0, {0, 1}, &joined));
+    const auto& region = session.tracks()[0].regions[joined];
+    CHECK(region.rate == 1.0);
+    float value[2] = {};
+    REQUIRE(toh::core::read_clip_frames(*region.source->clip, region.offset + 500, 1, value) == 1);
+    CHECK(value[0] == doctest::Approx(500 * 0.0001f));
+    const std::int64_t second_start = 2000;
+    REQUIRE(toh::core::read_clip_frames(*region.source->clip,
+                                        region.offset + (second_start - region.start) + 50, 1,
+                                        value) == 1);
+    CHECK(value[0] == doctest::Approx((2200 + 100) * 0.0001f).epsilon(0.001));
+
+    CHECK_FALSE(session.set_region_speed(0, 0, 10.0));
+    CHECK_FALSE(session.set_region_speed(0, 9, 1.5));
+}
+
 TEST_CASE("Fade shapes") {
     using toh::core::FadeShape;
     using toh::core::fade_curve;

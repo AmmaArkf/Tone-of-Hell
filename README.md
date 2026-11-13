@@ -4,7 +4,24 @@
 
 An open digital audio workstation (DAW) written in C++: recording, a multitrack mixer, MIDI and hosting of third-party plugins. The source code is open to everyone, and the project is developed together with its community.
 
-> **Status: early development.** Planning and the first stage (the audio engine) are in progress. There is nothing to download yet, but ideas, questions and proposals are welcome right now. See [ROADMAP.md](ROADMAP.md) for the detailed plan.
+> **Status: pre-release 0.1.** The core (level 0) works: you can record, arrange, mix, export and save projects. MIDI, plugins and effects come next. Expect rough edges and keep copies of projects that matter. See [ROADMAP.md](ROADMAP.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for every change.
+
+## Download
+
+Ready-made builds for Windows and Linux are on the [Releases](https://github.com/AmmaArkf/Tone-of-Hell/releases) page (open "Assets" under a release).
+
+- **Windows:** unpack the zip and start `Tone of Hell.exe`. The program is not signed yet, so Windows SmartScreen may warn the first time ("More info" > "Run anyway").
+- **Linux:** unpack the archive and start `./tone-of-hell`.
+
+## What it can do now
+
+- **Tracks and mixer:** volume, pan, mute, solo and level meters; names and pictures for tracks; play all tracks or only the selected ones.
+- **Regions on a timeline:** move (also to other tracks), trim, cut (with the scissors or at the playhead), join, fades with a curve of your choice, a magnet that snaps edges to each other, a speed of their own for every region.
+- **Recording** from any input with input gain, monitoring, latency correction and a live waveform; a take goes straight to disk.
+- **Playback:** loop, reverse, a metronome with any time signature, a playback speed from 25 % to 400 %; audio is streamed from disk in 1 MB pages, so long files do not fill the memory.
+- **Import** of WAV, FLAC and MP3; **export** to WAV (16-bit, 24-bit, 32-bit float) and MP3 (CBR or VBR).
+- **Projects** in one file (`.tohp`, a zip archive with all the audio and pictures), undo and redo, a question about unsaved changes.
+- **Interface** in English and Russian, shortcuts that you can change, full screen, a log file for every session to help find errors.
 
 ## Goals
 
@@ -30,24 +47,30 @@ The status of every stage is tracked in [ROADMAP.md](ROADMAP.md). In short:
 
 | Level | What it includes | Status |
 | --- | --- | --- |
-| 0. Core | Audio engine, transport, tracks, regions, mixer, recording, import and export, projects, undo/redo | Planned |
-| 1. Working minimum | MIDI and piano roll, CLAP/VST3 plugins, automation, tempo map, basic effects and instruments | Planned |
+| 0. Core | Audio engine, transport, tracks, regions, mixer, recording, import and export, projects, undo/redo | Pre-release 0.1 (autosave still to come) |
+| 1. Working minimum | MIDI and piano roll, CLAP/VST3 plugins, automation, tempo map, basic effects and instruments | Next |
 | 2. Advanced | Comping, time-stretch, groups, sidechain, controllers, score editor, clip grid | Idea |
 | 3. Distinctive | ML features, sound library, surround sound, mastering assistant | Idea |
 
 ## Building
 
-Instructions will appear together with the first code (stage 1). Planned requirements:
+See [docs/BUILDING.md](docs/BUILDING.md). In short, you need:
 
 - a compiler with C++17 support or newer (MSVC, GCC, Clang);
 - CMake 3.21 or newer;
-- Git.
+- Git, and an internet connection for the first configure (it downloads SDL and LAME and checks their checksums).
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build -C Release
+```
 
 ## How to help
 
 You can help without writing any code. Pick what suits you:
 
-- **Found a bug?** Open an issue with the "Report a bug" template in the Issues tab.
+- **Found a bug?** Open an issue with the "Report a bug" template in the Issues tab. Attach the log of the session (Help > Open the logs folder in the program).
 - **Have an idea, or want to automate a chore?** Use the "Suggest an idea or an automation" template.
 - **Want to propose a plugin, an effect, an instrument or support for a format?** Use the "Suggest a plugin or an integration" template.
 - **Have a question, or want to discuss something?** Open the Discussions tab.
@@ -65,7 +88,7 @@ Taking part in the project means agreeing to the [Code of Conduct](CODE_OF_CONDU
 
 ## License
 
-The project is released under the MIT license, see [LICENSE](LICENSE).
+The project is released under the MIT license, see [LICENSE](LICENSE). Third-party code and its licenses are listed in [third_party/README.md](third_party/README.md).
 
 ---
 
@@ -75,7 +98,24 @@ The project is released under the MIT license, see [LICENSE](LICENSE).
 
 Открытая цифровая звуковая рабочая станция (DAW) на C++: запись, многодорожечный микшер, MIDI и подключение сторонних плагинов. Исходный код открыт для всех, а проект развивается вместе с сообществом.
 
-> **Статус: ранняя разработка.** Идут планирование и первый этап (аудиодвижок). Скачивать пока нечего, но идеи, вопросы и предложения приветствуются уже сейчас. Подробный план в [ROADMAP.md](ROADMAP.md).
+> **Статус: пре-релиз 0.1.** Ядро (уровень 0) работает: можно записывать, собирать аранжировку, сводить, экспортировать и сохранять проекты. Дальше MIDI, плагины и эффекты. Возможны шероховатости, поэтому храните копии важных проектов. План в [ROADMAP.md](ROADMAP.md), все изменения в [CHANGELOG.md](CHANGELOG.md).
+
+### Скачать
+
+Готовые сборки для Windows и Linux лежат на странице [Releases](https://github.com/AmmaArkf/Tone-of-Hell/releases) (раздел «Assets» под релизом).
+
+- **Windows:** распакуйте zip и запустите `Tone of Hell.exe`. Программа пока не подписана, поэтому SmartScreen при первом запуске может предупредить («Подробнее» > «Выполнить в любом случае»).
+- **Linux:** распакуйте архив и запустите `./tone-of-hell`.
+
+### Что уже умеет
+
+- **Дорожки и микшер:** громкость, панорама, mute, solo и индикаторы уровня; названия и картинки дорожек; воспроизведение всех дорожек или только выделенных.
+- **Регионы на таймлайне:** перемещение (и на другие дорожки), обрезка, разрезание (ножницами или по линии воспроизведения), склейка, фейды с выбором формы кривой, магнит для прилипания краёв, своя скорость у каждого региона.
+- **Запись** с любого входа: чувствительность входа, мониторинг, коррекция задержки, волна прямо во время записи; дубль сразу пишется на диск.
+- **Воспроизведение:** цикл, реверс, метроном с любым размером, скорость от 25 % до 400 %; звук читается с диска кусками по 1 МБ, поэтому длинные файлы не занимают память.
+- **Импорт** WAV, FLAC и MP3; **экспорт** в WAV (16 бит, 24 бита, 32 бита float) и MP3 (постоянный или переменный битрейт).
+- **Проекты** в одном файле (`.tohp`, zip-архив со всем звуком и картинками), отмена и повтор действий, вопрос о несохранённых изменениях.
+- **Интерфейс** на русском и английском, настраиваемые горячие клавиши, полноэкранный режим, лог каждого сеанса для поиска ошибок.
 
 ### Цели
 
@@ -101,24 +141,30 @@ The project is released under the MIT license, see [LICENSE](LICENSE).
 
 | Уровень | Что входит | Статус |
 | --- | --- | --- |
-| 0. Ядро | Аудиодвижок, транспорт, дорожки, регионы, микшер, запись, импорт и экспорт, проекты, отмена и повтор | Запланировано |
-| 1. Рабочий минимум | MIDI и пиано-ролл, плагины CLAP/VST3, автоматизация, карта темпа, базовые эффекты и инструменты | Запланировано |
+| 0. Ядро | Аудиодвижок, транспорт, дорожки, регионы, микшер, запись, импорт и экспорт, проекты, отмена и повтор | Пре-релиз 0.1 (осталось автосохранение) |
+| 1. Рабочий минимум | MIDI и пиано-ролл, плагины CLAP/VST3, автоматизация, карта темпа, базовые эффекты и инструменты | Следующий |
 | 2. Расширенный | Компинг, растяжение времени, группы, сайдчейн, контроллеры, нотный редактор, сетка клипов | Идея |
 | 3. Особенный | Функции на основе машинного обучения, библиотека звуков, объёмный звук, помощник по мастерингу | Идея |
 
 ### Сборка
 
-Инструкция появится вместе с первым кодом (этап 1). Планируемые требования:
+Подробно в [docs/BUILDING.md](docs/BUILDING.md) (на английском). Коротко, нужны:
 
 - компилятор с поддержкой C++17 или новее (MSVC, GCC, Clang);
 - CMake 3.21 или новее;
-- Git.
+- Git и интернет при первой настройке (скачиваются SDL и LAME с проверкой контрольных сумм).
+
+```
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build --config Release
+ctest --test-dir build -C Release
+```
 
 ### Как помочь
 
 Помочь можно и без написания кода. Выберите, что вам подходит (названия шаблонов остаются английскими, как в самих формах):
 
-- **Нашли ошибку?** Откройте issue по шаблону "Report a bug" на вкладке Issues.
+- **Нашли ошибку?** Откройте issue по шаблону "Report a bug" на вкладке Issues. Приложите лог сеанса (в программе: Справка > Открыть папку с логами).
 - **Есть идея или хотите автоматизировать рутину?** Используйте шаблон "Suggest an idea or an automation".
 - **Хотите предложить плагин, эффект, инструмент или поддержку формата?** Используйте шаблон "Suggest a plugin or an integration".
 - **Есть вопрос или хотите что-то обсудить?** Откройте вкладку Discussions.
@@ -136,4 +182,4 @@ The project is released under the MIT license, see [LICENSE](LICENSE).
 
 ### Лицензия
 
-Проект выпущен под лицензией MIT, см. [LICENSE](LICENSE).
+Проект выпущен под лицензией MIT, см. [LICENSE](LICENSE). Сторонний код и его лицензии перечислены в [third_party/README.md](third_party/README.md).

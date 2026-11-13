@@ -45,6 +45,7 @@ std::vector<core::Region> engine_regions(const TrackInfo& track) {
         region.fade_in = info.fade_in;
         region.fade_out = info.fade_out;
         region.fade_shape = info.fade_shape;
+        region.rate = info.rate;
         regions.push_back(std::move(region));
     }
     return regions;
@@ -259,7 +260,8 @@ void Session::update_streaming() {
     for (const TrackInfo& track : tracks_) {
         for (const RegionInfo& info : track.regions) {
             if (info.source && info.source->clip && info.source->clip->disk) {
-                regions.push_back({info.source->clip->disk, info.start, info.offset, info.length});
+                regions.push_back(
+                    {info.source->clip->disk, info.start, info.offset, info.length, info.rate});
             }
         }
     }
@@ -298,7 +300,9 @@ void Session::prefetch_regions(const std::vector<StreamRegion>& regions, std::in
         std::vector<std::int64_t>& pages = wanted[region.file.get()];
         const auto want = [&](std::int64_t timeline_frame) {
             if (timeline_frame >= region.start && timeline_frame < region.start + region.length) {
-                pages.push_back((region.offset + timeline_frame - region.start) / page_frames);
+                const auto into = static_cast<double>(timeline_frame - region.start);
+                pages.push_back(
+                    (region.offset + static_cast<std::int64_t>(into * region.rate)) / page_frames);
             }
         };
         for (std::int64_t k = 0; k < 5; ++k) {
@@ -491,6 +495,7 @@ void Session::sync_track_regions(std::size_t index) {
         region.fade_in = info.fade_in;
         region.fade_out = info.fade_out;
         region.fade_shape = info.fade_shape;
+        region.rate = info.rate;
         regions.push_back(std::move(region));
     }
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions);
@@ -699,12 +704,15 @@ bool Session::trim_region_start(std::size_t track, std::size_t region, std::int6
         return false;
     }
     // Not before the start of the source or of the timeline, and at least one frame must stay.
-    const std::int64_t earliest = std::max<std::int64_t>(info->start - info->offset, 0);
+    // The source moves `rate` frames for every frame on the timeline.
+    const auto source_before = static_cast<std::int64_t>(static_cast<double>(info->offset) / info->rate);
+    const std::int64_t earliest = std::max<std::int64_t>(info->start - source_before, 0);
     const std::int64_t latest = info->end() - 1;
     const std::int64_t new_start = std::clamp(start, earliest, latest);
     const std::int64_t delta = new_start - info->start;
     info->start = new_start;
-    info->offset += delta;
+    info->offset = std::max<std::int64_t>(
+        info->offset + std::llround(static_cast<double>(delta) * info->rate), 0);
     info->length -= delta;
     limit_fades(*info);
     sync_track_regions(track);
@@ -717,8 +725,9 @@ bool Session::trim_region_end(std::size_t track, std::size_t region, std::int64_
     if (info == nullptr) {
         return false;
     }
-    const std::int64_t available = info->source->clip->frames() - info->offset;
-    info->length = std::clamp<std::int64_t>(end - info->start, 1, available);
+    const auto available = static_cast<std::int64_t>(
+        static_cast<double>(info->source->clip->frames() - info->offset) / info->rate);
+    info->length = std::clamp<std::int64_t>(end - info->start, 1, std::max<std::int64_t>(available, 1));
     limit_fades(*info);
     sync_track_regions(track);
     update_length();
@@ -748,6 +757,29 @@ bool Session::set_region_fade_shape(std::size_t track, std::size_t region, core:
     return true;
 }
 
+bool Session::set_region_speed(std::size_t track, std::size_t region, double speed) {
+    RegionInfo* info = find_region(track, region);
+    if (info == nullptr || !(speed >= core::Engine::kMinSpeed && speed <= core::Engine::kMaxSpeed)) {
+        return false;
+    }
+    // The same audio at another speed: the length on the timeline changes instead.
+    const double audio = static_cast<double>(info->length) * info->rate;
+    const std::int64_t available = info->source->clip->frames() - info->offset;
+    std::int64_t length = std::max<std::int64_t>(std::llround(audio / speed), 1);
+    while (length > 1 && core::clip_frames_used(length, speed) > available) {
+        --length;
+    }
+    const double scale = static_cast<double>(length) / static_cast<double>(info->length);
+    info->fade_in = std::llround(static_cast<double>(info->fade_in) * scale);
+    info->fade_out = std::llround(static_cast<double>(info->fade_out) * scale);
+    info->length = length;
+    info->rate = speed;
+    limit_fades(*info);
+    sync_track_regions(track);
+    update_length();
+    return true;
+}
+
 bool Session::split_region(std::size_t track, std::size_t region, std::int64_t frame) {
     RegionInfo* info = find_region(track, region);
     if (info == nullptr || frame <= info->start || frame >= info->end()) {
@@ -755,7 +787,8 @@ bool Session::split_region(std::size_t track, std::size_t region, std::int64_t f
     }
     RegionInfo second = *info;
     second.start = frame;
-    second.offset = info->offset + (frame - info->start);
+    second.offset =
+        info->offset + std::llround(static_cast<double>(frame - info->start) * info->rate);
     second.length = info->end() - frame;
     second.fade_in = 0;
     limit_fades(second);  // keeps the original fade-out, shortened if needed
@@ -808,7 +841,8 @@ bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
     }
     const std::int64_t block = 65536;
     std::vector<float> mix(static_cast<std::size_t>(block) * channels);
-    std::vector<float> piece(static_cast<std::size_t>(block) * channels);
+    // A region may play its source up to four times as fast: room for that, plus one frame.
+    std::vector<float> piece(static_cast<std::size_t>(block * 4 + 2) * channels);
     for (std::int64_t at = begin; at < begin + length; at += block) {
         const std::int64_t count = std::min(block, begin + length - at);
         std::fill(mix.begin(), mix.end(), 0.0f);
@@ -822,11 +856,29 @@ bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
             // The same fade shapes as the engine uses; the outer fades are kept, not applied.
             const std::int64_t fade_in = &region == first ? 0 : region.fade_in;
             const std::int64_t fade_out = &region == last ? 0 : region.fade_out;
+            // The source frames this part plays (rate frames per timeline frame), plus one more
+            // to blend with.
+            const auto source_at = [&region](std::int64_t f) {
+                return static_cast<double>(region.offset) + static_cast<double>(f) * region.rate;
+            };
+            const std::int64_t source_end = region.offset + region.source_frames();
+            const auto first_source = static_cast<std::int64_t>(source_at(from - region.start));
+            const std::int64_t last_source = std::min(
+                static_cast<std::int64_t>(source_at(to - 1 - region.start)) + 1, source_end - 1);
             const std::size_t got = core::read_clip_frames(
-                *region.source->clip, region.offset + (from - region.start),
-                static_cast<std::size_t>(to - from), piece.data());
-            for (std::size_t k = 0; k < got; ++k) {
-                const std::int64_t f = from - region.start + static_cast<std::int64_t>(k);
+                *region.source->clip, first_source,
+                static_cast<std::size_t>(std::max<std::int64_t>(last_source - first_source + 1, 1)),
+                piece.data());
+            if (got == 0) {
+                continue;
+            }
+            for (std::int64_t t = from; t < to; ++t) {
+                const std::int64_t f = t - region.start;
+                const double position = source_at(f) - static_cast<double>(first_source);
+                const auto at_piece = std::min(static_cast<std::size_t>(position), got - 1);
+                const auto frac = static_cast<float>(position - static_cast<double>(at_piece));
+                const std::size_t next = std::min(at_piece + 1, got - 1);
+                const std::size_t k = static_cast<std::size_t>(t - from);
                 float gain = 1.0f;
                 if (f < fade_in) {
                     gain = core::fade_curve(region.fade_shape, (static_cast<float>(f) + 0.5f) /
@@ -839,9 +891,10 @@ bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
                                                  static_cast<float>(fade_out));
                 }
                 float* dst = mix.data() + static_cast<std::size_t>(from - at + static_cast<std::int64_t>(k)) * channels;
-                const float* src = piece.data() + k * channels;
+                const float* src = piece.data() + at_piece * channels;
+                const float* src_next = piece.data() + next * channels;
                 for (std::size_t c = 0; c < channels; ++c) {
-                    dst[c] += src[c] * gain;
+                    dst[c] += (src[c] + (src_next[c] - src[c]) * frac) * gain;
                 }
             }
         }
@@ -1267,6 +1320,7 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
             out << "fade_in=" << region.fade_in << "\n";
             out << "fade_out=" << region.fade_out << "\n";
             out << "fade_shape=" << static_cast<int>(region.fade_shape) << "\n";
+            out << "rate=" << region.rate << "\n";
         }
     }
     return out.str();
@@ -1437,6 +1491,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         std::int64_t fade_in = 0;
         std::int64_t fade_out = 0;
         long long fade_shape = static_cast<long long>(core::FadeShape::Curve);
+        double rate = 1.0;
     };
     struct TrackEntry {
         std::string name;
@@ -1549,6 +1604,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     region.fade_out = integer;
                 } else if (key == "fade_shape") {
                     region.fade_shape = integer;
+                } else if (key == "rate") {
+                    region.rate = real;
                 }
                 break;
             }
@@ -1648,13 +1705,16 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             }
             const auto& source = loaded[static_cast<std::size_t>(region.source)];
             if (region.start < 0 || region.offset < 0 || region.length <= 0 ||
-                region.offset + region.length > source->clip->frames()) {
+                !(region.rate >= core::Engine::kMinSpeed && region.rate <= core::Engine::kMaxSpeed) ||
+                region.offset + core::clip_frames_used(region.length, region.rate) >
+                    source->clip->frames()) {
                 continue;  // does not fit its audio: left out
             }
             RegionInfo info;
             info.source = source;
             info.start = region.start;
             info.offset = region.offset;
+            info.rate = region.rate;
             info.length = region.length;
             info.fade_in = region.fade_in;
             info.fade_out = region.fade_out;
@@ -1762,7 +1822,8 @@ std::string Session::edit_text() const {
         for (const RegionInfo& region : track.regions) {
             out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
                 << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"
-                << region.fade_out << "|" << static_cast<int>(region.fade_shape) << "\n";
+                << region.fade_out << "|" << static_cast<int>(region.fade_shape) << "|"
+                << region.rate << "\n";
         }
     }
     return out.str();

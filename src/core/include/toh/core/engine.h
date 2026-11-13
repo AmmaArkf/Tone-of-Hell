@@ -6,6 +6,8 @@
 #include <memory>
 #include <vector>
 
+#include <cmath>
+
 #include "toh/core/clip.h"
 #include "toh/core/spsc_queue.h"
 #include "toh/core/spsc_ring.h"
@@ -42,7 +44,16 @@ struct Region {
     std::int64_t fade_in = 0;   ///< Length of the fade at its beginning, in frames.
     std::int64_t fade_out = 0;  ///< Length of the fade at its end, in frames.
     FadeShape fade_shape = FadeShape::Linear;
+    /// How fast the region plays its clip (1 = as recorded, 2 = twice as fast and an octave
+    /// higher, like a tape). `length` counts timeline frames; the clip frames used are
+    /// clip_frames_used().
+    double rate = 1.0;
 };
+
+/// How many frames of its clip a region plays.
+inline std::int64_t clip_frames_used(std::int64_t length, double rate) noexcept {
+    return static_cast<std::int64_t>(std::ceil(static_cast<double>(length) * rate - 1e-9));
+}
 
 /// The audio engine: a transport (play, pause, stop, seek, loop) and a mixer.
 ///

@@ -83,6 +83,7 @@ TEST_CASE("A saved project opens again exactly as it was") {
         }
         REQUIRE(session.set_track_icon(1, "file:" + (folder / "picture.png").u8string()));
         REQUIRE(session.set_track_gain(1, 0.5f));
+        REQUIRE(session.set_region_speed(1, 0, 1.5));
         REQUIRE(session.set_track_pan(1, -0.25f));
         REQUIRE(session.set_track_mute(2, true));
         toh::app::MetronomeSettings metronome = session.metronome();
@@ -134,6 +135,8 @@ TEST_CASE("A saved project opens again exactly as it was") {
     }
     CHECK(tracks[1].gain == doctest::Approx(0.5f));
     CHECK(tracks[1].pan == doctest::Approx(-0.25f));
+    CHECK(tracks[1].regions[0].rate == doctest::Approx(1.5));
+    CHECK(tracks[1].regions[0].length == 1333);
     CHECK(tracks[2].mute);
     CHECK(tracks[2].regions.empty());
     CHECK(opened.metronome().bpm == doctest::Approx(97.5));

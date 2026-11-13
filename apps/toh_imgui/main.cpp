@@ -2495,6 +2495,16 @@ Hit hit_test(const Session& session, const View& view, const TrackInfo& track, c
     return Hit();
 }
 
+// The name written on a region, with its speed when that is not normal.
+std::string region_title(const RegionInfo& region) {
+    if (region.rate == 1.0) {
+        return region.source->name;
+    }
+    char speed[32];
+    std::snprintf(speed, sizeof(speed), "  x%.2f", region.rate);
+    return region.source->name + speed;
+}
+
 void draw_region(const Session& session, const View& view, const TrackInfo& track,
                  const RegionInfo& region, bool selected, bool show_handles, float top,
                  float height) {
@@ -2519,12 +2529,14 @@ void draw_region(const Session& session, const View& view, const TrackInfo& trac
     const int first_column = static_cast<int>(std::floor(std::max(x0, left_edge)));
     const int last_column = static_cast<int>(std::ceil(std::min(x1, right_edge)));
     const std::int64_t source_first = region.offset;
-    const std::int64_t source_last = region.offset + region.length - 1;
+    const std::int64_t source_last = region.offset + region.source_frames() - 1;
+    const auto to_source = [&region](std::int64_t timeline_frame) {
+        return region.offset + static_cast<std::int64_t>(
+                                   static_cast<double>(timeline_frame - region.start) * region.rate);
+    };
     for (int column = first_column; column < last_column; ++column) {
-        std::int64_t first = x_to_frame(session, view, static_cast<float>(column)) - region.start +
-                             region.offset;
-        std::int64_t last = x_to_frame(session, view, static_cast<float>(column + 1)) - 1 -
-                            region.start + region.offset;
+        std::int64_t first = to_source(x_to_frame(session, view, static_cast<float>(column)));
+        std::int64_t last = to_source(x_to_frame(session, view, static_cast<float>(column + 1)) - 1);
         first = std::max(first, source_first);
         last = std::min(std::max(last, first), source_last);
         float low_value = 0.0f;
@@ -2583,7 +2595,7 @@ void draw_region(const Session& session, const View& view, const TrackInfo& trac
     const float room = high.x - text_x - 6.0f;
     if (room > 3.0f * ImGui::GetFontSize()) {
         draw_list->AddText(ImVec2(text_x, low.y + 2.0f), IM_COL32(225, 232, 245, 210),
-                           fit_text(region.source->name, room).c_str());
+                           fit_text(region_title(region), room).c_str());
     }
 }
 
@@ -2676,6 +2688,30 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         if (ImGui::MenuItem(T_("Remove fades"), nullptr, false,
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
+        }
+        if (ImGui::BeginMenu(T_("Region speed"), region != nullptr)) {
+            float percent = static_cast<float>(region->rate * 100.0);
+            ImGui::SetNextItemWidth(14.0f * ImGui::GetFontSize());
+            if (ImGui::SliderFloat("##region speed", &percent, 25.0f, 400.0f, T_("Speed: %.0f%%"),
+                                   ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) {
+                session.set_region_speed(ui.selected_track, ui.selected_region,
+                                         std::round(percent) / 100.0);
+            }
+            if (double_clicked()) {
+                session.set_region_speed(ui.selected_track, ui.selected_region, 1.0);
+            }
+            ImGui::Separator();
+            static const int presets[] = {50, 75, 100, 125, 150, 200};
+            for (const int preset : presets) {
+                char label[32];
+                std::snprintf(label, sizeof(label), "%d%%", preset);
+                if (ImGui::MenuItem(label, nullptr, std::lround(region->rate * 100.0) == preset)) {
+                    session.set_region_speed(ui.selected_track, ui.selected_region, preset / 100.0);
+                }
+            }
+            ImGui::TextDisabled("%s", T_("The region gets shorter or longer and the pitch follows,\n"
+                                         "like on a tape. Every region has its own speed."));
+            ImGui::EndMenu();
         }
         if (ImGui::BeginMenu(T_("Fade shape"), region != nullptr)) {
             static const struct {

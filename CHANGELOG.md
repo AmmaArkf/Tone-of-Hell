@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.1.6
+
+- Every region has a speed of its own (right-click a region > Region speed, 25 % to 400 %), also parts of one recording. Like a tape, the region gets shorter or longer and the pitch follows; its name shows the speed. Cutting, trimming, joining, projects and undo keep it. The playback speed of the whole project stays separate.
+
 ## 0.1.5
 
 - Fades are curved by default: the level rises slowly, then faster (and a fade-out falls fast, then slowly), which sounds even to the ear. The right-click menu of a region chooses the shape: curve, straight line or S-curve. The waveform shows the curve, and projects keep the shape.

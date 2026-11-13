@@ -103,7 +103,8 @@ bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& r
         if (!region.clip || region.clip->channels != channels_ ||
             region.clip->sample_rate != sample_rate_ || region.start < 0 ||
             region.start > kMaxStart || region.offset < 0 || region.length <= 0 ||
-            region.offset > region.clip->frames() - region.length) {
+            !(region.rate >= kMinSpeed && region.rate <= kMaxSpeed) ||
+            region.offset > region.clip->frames() - clip_frames_used(region.length, region.rate)) {
             return false;
         }
         Region copy = region;
@@ -803,6 +804,8 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 }
                 const float* clip_samples = region.clip->samples.data();
                 PagedFile* const disk = region.clip->disk.get();
+                const std::int64_t source_end =
+                    region.offset + clip_frames_used(region.length, region.rate);
                 std::array<float, 16> from_disk{};
                 std::array<float, 16> from_disk_next{};
                 for (std::uint32_t i = 0; i < frames; ++i) {
@@ -823,11 +826,20 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                                                   (static_cast<float>(remaining) + 0.5f) /
                                                       static_cast<float>(region.fade_out));
                     }
+                    // Where in the clip this frame is: a region may play its clip faster or
+                    // slower (rate), and the playhead may be between two frames.
+                    const double source_pos =
+                        static_cast<double>(region.offset) +
+                        (static_cast<double>(into) + static_cast<double>(frame_frac_[i])) * region.rate;
+                    const std::int64_t source_frame =
+                        std::min(static_cast<std::int64_t>(source_pos), source_end - 1);
+                    const float frac =
+                        static_cast<float>(source_pos - static_cast<double>(source_frame));
                     const float* src = nullptr;
                     if (disk != nullptr) {
                         // From disk: the page must be in memory already, unless this engine
                         // renders offline and may wait for it.
-                        const std::int64_t frame = region.offset + into;
+                        const std::int64_t frame = source_frame;
                         const bool read =
                             channels <= from_disk.size() &&
                             (blocking_reads_ ? disk->read_frame_blocking(frame, from_disk.data())
@@ -838,14 +850,13 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                         }
                         src = from_disk.data();
                     } else {
-                        src = clip_samples + static_cast<std::size_t>(region.offset + into) * channels;
+                        src = clip_samples + static_cast<std::size_t>(source_frame) * channels;
                     }
                     // Between two frames (playback faster or slower than normal): blend them.
-                    const float frac = frame_frac_[i];
                     const float* next = nullptr;
-                    if (frac > 0.0f && into + 1 < region.length) {
+                    if (frac > 0.0f && source_frame + 1 < source_end) {
                         if (disk != nullptr) {
-                            const std::int64_t frame = region.offset + into + 1;
+                            const std::int64_t frame = source_frame + 1;
                             const bool read =
                                 blocking_reads_
                                     ? disk->read_frame_blocking(frame, from_disk_next.data())

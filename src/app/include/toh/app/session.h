@@ -100,8 +100,12 @@ struct RegionInfo {
     std::int64_t fade_in = 0;
     std::int64_t fade_out = 0;
     core::FadeShape fade_shape = core::FadeShape::Curve;
+    /// How fast the region plays its source (1 = as recorded); see core::Region::rate.
+    double rate = 1.0;
 
     std::int64_t end() const noexcept { return start + length; }
+    /// The source frames the region plays, from `offset` on.
+    std::int64_t source_frames() const noexcept { return core::clip_frames_used(length, rate); }
 };
 
 /// What a user interface needs to know about one track.
@@ -215,6 +219,9 @@ public:
     bool set_region_fades(std::size_t track, std::size_t region, std::int64_t fade_in,
                           std::int64_t fade_out);
     bool set_region_fade_shape(std::size_t track, std::size_t region, core::FadeShape shape);
+    /// Plays a region faster or slower (0.25 to 4), like a tape: it keeps the same audio, gets
+    /// shorter or longer on the timeline, and the pitch follows. Its fades are scaled along.
+    bool set_region_speed(std::size_t track, std::size_t region, double speed);
     /// Cuts a region in two at a timeline frame. The second part is added at the end of the
     /// track's region list. Returns false when `frame` is not inside the region.
     bool split_region(std::size_t track, std::size_t region, std::int64_t frame);
@@ -436,6 +443,7 @@ private:
         std::int64_t start = 0;
         std::int64_t offset = 0;
         std::int64_t length = 0;
+        double rate = 1.0;
     };
     std::filesystem::path new_cache_file(const char* kind, const char* extension = ".f32");
     void update_streaming();
