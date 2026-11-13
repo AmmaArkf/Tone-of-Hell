@@ -2,6 +2,14 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.12
+
+- Instrument plugins: a CLAP synthesizer can play the note regions of a track. Choose it with "Instrument plugins" in the menu of a note region, or add a track with "New instrument plugin track" (right-click the track area). Its window opens at once; the FX menu shows it above the effects.
+- The notes reach the plugin where the playhead passes them, to the frame. A seek, a loop or playing backwards ends the notes that were sounding, and so does stopping.
+- Keys played live (MIDI keyboard, piano keys) go to the instrument plugin of the track as well, also while playback is stopped.
+- The instrument plugin and its state are saved inside the project.
+- A fourth example plugin: Simple Synth, a small synthesizer (attack, release, brightness, volume).
+
 ## 0.2.11
 
 - Plugins (stage 7 begins): every track has an FX button with a chain of CLAP effects. The sound passes them from top to bottom before the fader; they run also after the regions end, so echoes ring out. Effects can be switched off, moved up and down and removed; each change is one undo step.

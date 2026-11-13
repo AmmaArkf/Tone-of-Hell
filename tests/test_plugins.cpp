@@ -41,16 +41,17 @@ float played_sample(Session& session) {
 TEST_CASE("The example plugins are found in their file") {
     std::string error;
     const auto infos = toh::plugins::read_clap_file(kExamples, &error);
-    REQUIRE_MESSAGE(infos.size() == 3, error);
+    REQUIRE_MESSAGE(infos.size() == 4, error);
     CHECK(infos[0].name == "Echo");
     CHECK(infos[1].name == "Tremolo");
     CHECK(infos[2].name == "Gain");
+    CHECK(infos[3].name == "Simple Synth");
     for (const auto& info : infos) {
-        CHECK_FALSE(info.instrument);
+        CHECK(info.instrument == (info.name == "Simple Synth"));
         CHECK(info.vendor == "Tone of Hell");
     }
     const auto found = toh::plugins::scan_clap_folders({kExamples.parent_path()});
-    CHECK(found.size() >= 3);
+    CHECK(found.size() >= 4);
 }
 
 TEST_CASE("A CLAP effect changes the sound and keeps its state") {
@@ -81,6 +82,53 @@ TEST_CASE("A CLAP effect changes the sound and keeps its state") {
 
     CHECK(ClapPlugin::create(kExamples, "org.toneofhell.nothing", 48000.0, 2, &error) == nullptr);
     CHECK_FALSE(error.empty());
+}
+
+TEST_CASE("An instrument plugin plays the notes of its track, live keys too") {
+    Session session;
+    session.add_instrument_track("Synth", toh::core::Instrument::Keys, 0, 48000);
+    REQUIRE(session.set_region_notes(0, 0, {toh::core::Note{0, 24000, 69, 1.0f}}));
+    std::string error;
+    REQUIRE_MESSAGE(session.set_track_plugin_instrument(0, kExamples, "org.toneofhell.synth", &error), error);
+    REQUIRE(session.tracks()[0].plugin_instrument.plugin != nullptr);
+    CHECK(session.tracks()[0].plugin_instrument.plugin->is_instrument());
+
+    const auto loudest = [&session](int blocks) {
+        std::vector<float> out(2 * 512);
+        float peak = 0.0f;
+        for (int b = 0; b < blocks; ++b) {
+            session.engine().render(out.data(), 512);
+            for (const float sample : out) {
+                peak = std::max(peak, std::fabs(sample));
+            }
+        }
+        return peak;
+    };
+    session.play();
+    CHECK(loudest(8) > 0.05f);  // the note of the region
+    session.stop();
+    loudest(40);                 // stopped: the note ends and fades out
+    CHECK(loudest(4) < 0.001f);
+
+    // A key played live sounds while playback is stopped, and ends with the key.
+    session.set_live_track(0);
+    REQUIRE(session.note_on(60, 0.9f));
+    CHECK(loudest(8) > 0.05f);
+    session.note_off(60);
+    loudest(40);
+    CHECK(loudest(4) < 0.001f);
+
+    const auto folder = std::filesystem::temp_directory_path() / "toh_instrument_test";
+    std::filesystem::create_directories(folder);
+    const auto file = folder / "synth.tohp";
+    session.tracks()[0].plugin_instrument.plugin->set_param(3, -12.0);
+    session.tracks()[0].plugin_instrument.plugin->idle();
+    REQUIRE_MESSAGE(session.save_project(file, &error), error);
+    Session reopened;
+    REQUIRE_MESSAGE(reopened.open_project(file, &error), error);
+    REQUIRE(reopened.tracks()[0].plugin_instrument.plugin != nullptr);
+    CHECK(reopened.tracks()[0].plugin_instrument.name == "Simple Synth");
+    std::filesystem::remove_all(folder);
 }
 
 TEST_CASE("A track plays through its effects, and they are saved with the project") {

@@ -89,16 +89,18 @@ bool Engine::push_content(std::uint32_t track, std::unique_ptr<TrackContent> con
 }
 
 bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
-                               const std::vector<std::shared_ptr<AudioEffect>>& effects) {
+                               const std::vector<std::shared_ptr<AudioEffect>>& effects,
+                               std::shared_ptr<AudioEffect> instrument) {
     if (track >= kMaxTracks) {
         return false;
     }
-    if (regions.empty() && effects.empty()) {
+    if (regions.empty() && effects.empty() && !instrument) {
         return push_content(track, nullptr, false);
     }
 
     constexpr std::int64_t kMaxStart = std::int64_t{1} << 40;  // far beyond any real project
     auto content = std::make_unique<TrackContent>();
+    content->instrument = std::move(instrument);
     for (const auto& effect : effects) {
         if (effect) {
             content->effects.push_back(effect);
@@ -337,6 +339,94 @@ bool Engine::live_note_off(int pitch) {
 }
 
 bool Engine::live_all_notes_off() { return commands_.try_push(Command(CommandType::LiveAllOff)); }
+
+bool Engine::live_plugin_note(std::shared_ptr<AudioEffect> instrument, bool on, int pitch, float velocity) {
+    if (!instrument || pitch < 0 || pitch > 127) {
+        return false;
+    }
+    Command command(CommandType::LivePluginNote);
+    command.effect = instrument.get();
+    command.flag = on;
+    command.index = pitch;
+    command.value = std::clamp(velocity, 0.0f, 1.0f);
+    if (std::find(live_instruments_.begin(), live_instruments_.end(), instrument) == live_instruments_.end()) {
+        live_instruments_.push_back(std::move(instrument));
+    }
+    return commands_.try_push(command);
+}
+
+// Instrument plugins sound also while playback is stopped: keys played live, and the release
+// of the notes that were playing.
+void Engine::render_stopped_instruments(float* out, std::uint32_t frames) noexcept {
+    const std::size_t channels = channels_;
+    const std::size_t samples = static_cast<std::size_t>(frames) * channels;
+    for (Track& track : tracks_) {
+        if (track.content == nullptr || !track.content->instrument) {
+            continue;
+        }
+        AudioEffect& instrument = *track.content->instrument;
+        if (track.notes_on) {
+            instrument.add_note(0, false, -1, 0.0f);  // playback stopped: the notes end
+            track.notes_on = false;
+        }
+        track.last_position = -1;
+        float* scratch = track_mix_.data();
+        std::fill(scratch, scratch + samples, 0.0f);
+        instrument.process(scratch, frames, static_cast<std::uint32_t>(channels));
+        for (const auto& effect : track.content->effects) {
+            if (effect->enabled()) {
+                effect->process(scratch, frames, static_cast<std::uint32_t>(channels));
+            }
+        }
+        for (std::uint32_t i = 0; i < frames; ++i) {
+            const float* src = scratch + static_cast<std::size_t>(i) * channels;
+            float* dst = out + static_cast<std::size_t>(i) * channels;
+            if (channels == 2) {
+                dst[0] += src[0] * track.target_left * gain_;
+                dst[1] += src[1] * track.target_right * gain_;
+            } else {
+                for (std::size_t c = 0; c < channels; ++c) {
+                    dst[c] += src[c] * track.target_left * gain_;
+                }
+            }
+        }
+    }
+}
+
+// The notes of a region that start or end in this block, as events for an instrument plugin.
+// A note starts where the playhead passes its beginning (note_prev_ < start <= position).
+void Engine::schedule_notes(Track& track, const Region& region, const NoteData& notes,
+                            AudioEffect& instrument, std::uint32_t frames, std::int64_t lowest,
+                            std::int64_t highest) noexcept {
+    const std::int64_t begin = region.start;
+    const std::int64_t end = region.start + region.length;
+    for (const Note& note : notes.notes) {
+        const std::int64_t on_at = begin + (note.start - region.offset);
+        if (on_at > highest || on_at >= end) {
+            break;  // the notes are sorted by start
+        }
+        const std::int64_t off_at = std::min(end, on_at + note.length);
+        const bool starts = on_at >= begin && on_at > lowest;
+        const bool ends = off_at > lowest && off_at <= highest;
+        if (!starts && !ends) {
+            continue;
+        }
+        for (std::uint32_t i = 0; i < frames; ++i) {
+            const std::int64_t position = frame_pos_[i];
+            const std::int64_t previous = note_prev_[i];
+            if (position < 0) {
+                continue;
+            }
+            if (starts && previous < on_at && on_at <= position) {
+                instrument.add_note(i, true, note.pitch, note.velocity);
+                track.notes_on = true;
+            }
+            if (ends && previous < off_at && off_at <= position) {
+                instrument.add_note(i, false, note.pitch, 0.0f);
+            }
+        }
+    }
+}
 
 void Engine::render_live(float* out, std::uint32_t frames) noexcept {
     const SoundFont* const font = soundfont_.load(std::memory_order_acquire);
@@ -669,6 +759,11 @@ void Engine::apply(const Command& command) noexcept {
                 }
             }
             break;
+        case CommandType::LivePluginNote:
+            if (command.effect != nullptr) {
+                command.effect->add_note(0, command.flag, command.index, command.value);
+            }
+            break;
         case CommandType::LiveAllOff:
             for (LiveVoice& voice : live_) {
                 if (voice.active && !voice.released) {
@@ -895,6 +990,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
         }
         master_meter_ = decayed_meter(master_meter_, decay, 0.0f);
         master_peak_.store(master_meter_, std::memory_order_relaxed);
+        render_stopped_instruments(out, frames);
         render_live(out, frames);
         process_input(in, out, frames);
         return;
@@ -926,6 +1022,33 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
             float* scratch = track_mix_.data();
             bool any_region = false;
             std::uint64_t misses = 0;
+            // An instrument plugin gets the notes as events. Where the playhead jumps (a seek,
+            // a loop, playing backwards), the notes that were sounding end.
+            AudioEffect* const instrument = track.content->instrument.get();
+            std::int64_t lowest_previous = block_high;
+            if (instrument != nullptr) {
+                constexpr std::int64_t kMaxStep = 16;  // more than the fastest playback moves
+                std::int64_t previous = track.last_position;
+                for (std::uint32_t i = 0; i < frames; ++i) {
+                    const std::int64_t position = frame_pos_[i];
+                    if (position < 0) {
+                        note_prev_[i] = position;
+                        continue;
+                    }
+                    if (previous < 0 || position < previous || position - previous > kMaxStep) {
+                        if (previous >= 0 && track.notes_on) {
+                            instrument->add_note(i, false, -1, 0.0f);
+                            track.notes_on = false;
+                        }
+                        note_prev_[i] = position - 1;
+                    } else {
+                        note_prev_[i] = previous;
+                    }
+                    lowest_previous = std::min(lowest_previous, note_prev_[i]);
+                    previous = position;
+                }
+                track.last_position = previous;
+            }
             for (const Region& region : track.content->regions) {
                 const std::int64_t begin = region.start;
                 const std::int64_t end = region.start + region.length;
@@ -944,6 +1067,11 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 std::array<float, 16> from_disk_next{};
                 // Note regions: the notes that sound somewhere in this block.
                 const NoteData* const note_data = region.clip->notes.get();
+                if (note_data != nullptr && instrument != nullptr) {
+                    schedule_notes(track, region, *note_data, *instrument, frames, lowest_previous,
+                                   block_high);
+                    continue;
+                }
                 std::array<std::uint32_t, 64> active{};
                 std::size_t active_count = 0;
                 // With a program and a SoundFont, recorded instruments play the notes.
@@ -1092,6 +1220,13 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 disk_misses_.fetch_add(misses, std::memory_order_relaxed);
             }
 
+            if (instrument != nullptr) {
+                if (!any_region) {
+                    std::fill(scratch, scratch + samples, 0.0f);
+                    any_region = true;
+                }
+                instrument->process(scratch, frames, static_cast<std::uint32_t>(channels));
+            }
             // The insert effects, in order, before the fader. They run also where no region
             // plays, so that echoes and reverbs ring out.
             if (!track.content->effects.empty()) {

@@ -177,6 +177,13 @@ struct ParamChange {
     double value = 0.0;
 };
 
+struct PendingNote {
+    std::uint32_t frame = 0;
+    bool on = false;
+    std::int16_t key = -1;
+    float velocity = 0.0f;
+};
+
 #ifdef _WIN32
 std::filesystem::path environment_path(const wchar_t* name) {
     std::vector<wchar_t> buffer(32768);
@@ -224,6 +231,10 @@ struct ClapPlugin::Impl {
     std::atomic<std::uint64_t> consumed{0};  // audio thread: changes given to the plugin so far
     std::map<std::uint32_t, std::pair<double, std::uint64_t>> requested;  // value, change number
     std::array<clap_event_param_value_t, 256> events{};
+    std::array<PendingNote, 512> pending{};  // notes for the next block (audio thread)
+    std::uint32_t pending_count = 0;
+    std::array<clap_event_note_t, 512> note_events{};
+    std::array<const clap_event_header_t*, 768> order{};  // every event of the block, by time
     std::uint32_t event_count = 0;
     std::int64_t steady_time = 0;
 };
@@ -294,7 +305,7 @@ std::uint32_t events_size(const clap_input_events_t* list) {
 
 const clap_event_header_t* events_get(const clap_input_events_t* list, std::uint32_t index) {
     const auto* s = static_cast<const ClapPlugin::Impl*>(list->ctx);
-    return index < s->event_count ? &s->events[index].header : nullptr;
+    return index < s->event_count ? s->order[index] : nullptr;
 }
 
 bool events_push(const clap_output_events_t*, const clap_event_header_t*) { return true; }
@@ -545,8 +556,10 @@ void ClapPlugin::process(float* interleaved, std::uint32_t frames, std::uint32_t
     s.event_count = 0;
     ParamChange change;
     std::uint64_t popped = 0;
-    while (s.event_count < s.events.size() && s.changes.try_pop(change)) {
-        clap_event_param_value_t& event = s.events[s.event_count++];
+    std::uint32_t param_count = 0;
+    while (param_count < s.events.size() && s.changes.try_pop(change)) {
+        clap_event_param_value_t& event = s.events[param_count++];
+        s.order[s.event_count++] = &event.header;
         event = clap_event_param_value_t{};
         event.header.size = static_cast<std::uint32_t>(sizeof(clap_event_param_value_t));
         event.header.time = 0;
@@ -565,6 +578,33 @@ void ClapPlugin::process(float* interleaved, std::uint32_t frames, std::uint32_t
     if (popped > 0) {
         s.consumed.fetch_add(popped, std::memory_order_release);
     }
+    // Notes, sorted by their frame (the engine adds them track by track, region by region).
+    for (std::uint32_t i = 1; i < s.pending_count; ++i) {
+        const PendingNote note = s.pending[i];
+        std::uint32_t j = i;
+        while (j > 0 && s.pending[j - 1].frame > note.frame) {
+            s.pending[j] = s.pending[j - 1];
+            --j;
+        }
+        s.pending[j] = note;
+    }
+    for (std::uint32_t i = 0; i < s.pending_count; ++i) {
+        const PendingNote& note = s.pending[i];
+        clap_event_note_t& event = s.note_events[i];
+        event = clap_event_note_t{};
+        event.header.size = static_cast<std::uint32_t>(sizeof(clap_event_note_t));
+        event.header.time = frames > 0 ? std::min(note.frame, frames - 1) : 0;
+        event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        event.header.type = note.on ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF;
+        event.header.flags = 0;
+        event.note_id = -1;
+        event.port_index = note.key < 0 ? -1 : 0;  // -1: every port, channel and key
+        event.channel = note.key < 0 ? -1 : 0;
+        event.key = note.key;
+        event.velocity = static_cast<double>(note.velocity);
+        s.order[s.event_count++] = &event.header;
+    }
+    s.pending_count = 0;
 
     const clap_input_events_t in_events{&s, &events_size, &events_get};
     const clap_output_events_t out_events{nullptr, &events_push};
@@ -608,6 +648,20 @@ void ClapPlugin::process(float* interleaved, std::uint32_t frames, std::uint32_t
         done += count;
     }
 }
+
+void ClapPlugin::add_note(std::uint32_t frame, bool on, int pitch, float velocity) noexcept {
+    Impl& s = *impl_;
+    if (s.pending_count >= s.pending.size() || pitch > 127 || (on && pitch < 0)) {
+        return;
+    }
+    PendingNote& note = s.pending[s.pending_count++];
+    note.frame = frame;
+    note.on = on;
+    note.key = static_cast<std::int16_t>(std::max(pitch, -1));
+    note.velocity = velocity;
+}
+
+bool ClapPlugin::is_instrument() const noexcept { return impl_->info.instrument || impl_->in_channels == 0; }
 
 const std::vector<ClapPlugin::Param>& ClapPlugin::params() const noexcept { return impl_->param_list; }
 

@@ -57,6 +57,9 @@ public:
     const PluginInfo& info() const noexcept;
 
     void process(float* interleaved, std::uint32_t frames, std::uint32_t channels) noexcept override;
+    void add_note(std::uint32_t frame, bool on, int pitch, float velocity) noexcept override;
+    /// True for a plugin that makes its sound from notes: it says so, or it has no audio input.
+    bool is_instrument() const noexcept;
 
     // ---- Parameters ----------------------------------------------------------------------
     const std::vector<Param>& params() const noexcept;

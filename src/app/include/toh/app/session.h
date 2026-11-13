@@ -136,6 +136,8 @@ struct TrackInfo {
     std::shared_ptr<const core::SamplerSound> sampler;
     /// Insert effects, in the order the sound passes them (before the fader).
     std::vector<EffectSlot> effects;
+    /// An instrument plugin that plays the note regions (before everything else), if any.
+    EffectSlot plugin_instrument;
     std::vector<RegionInfo> regions;  // in the order they were created
     float gain = 1.0f;
     float pan = 0.0f;
@@ -243,6 +245,10 @@ public:
     bool remove_effect(std::size_t track, std::size_t slot);
     bool move_effect(std::size_t track, std::size_t slot, std::size_t to);
     bool set_effect_enabled(std::size_t track, std::size_t slot, bool enabled);
+    /// Makes the CLAP plugin `id` of a .clap file the instrument of a track.
+    bool set_track_plugin_instrument(std::size_t track, const std::filesystem::path& file,
+                                     const std::string& id, std::string* error = nullptr);
+    bool clear_track_plugin_instrument(std::size_t track);
     /// What could not be restored when the last project was opened (missing plugins).
     const std::vector<std::string>& open_warnings() const noexcept { return open_warnings_; }
 
@@ -623,6 +629,8 @@ private:
     std::size_t live_track_ = kNewTrack;
     std::string pending_label_;  // the name of the next undo step, if an edit gave one
     std::vector<std::string> open_warnings_;
+    // The instrument plugin each live key went to, so that its end goes there too.
+    std::array<std::shared_ptr<plugins::ClapPlugin>, 128> live_plugin_keys_{};
     bool notes_recording_ = false;
     bool notes_seen_playing_ = false;
     std::int64_t notes_record_start_ = 0;

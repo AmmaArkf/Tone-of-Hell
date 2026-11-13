@@ -1338,6 +1338,9 @@ void add_effect_from_file(Session& session, UiState& ui, const std::string& path
 
 bool plugin_in_session(const Session& session, const toh::plugins::ClapPlugin* plugin) {
     for (const TrackInfo& track : session.tracks()) {
+        if (track.plugin_instrument.plugin.get() == plugin) {
+            return true;
+        }
         for (const toh::app::EffectSlot& slot : track.effects) {
             if (slot.plugin.get() == plugin) {
                 return true;
@@ -1435,6 +1438,48 @@ void close_all_plugin_windows(UiState& ui) {
         close_plugin_window(ui, ui.plugin_windows.size() - 1);
     }
     ui.knob_windows.clear();
+}
+
+// The instrument plugins found, as menu items. Returns the one chosen, if any.
+const toh::plugins::PluginInfo* plugin_instrument_menu(UiState& ui) {
+    if (!ui.plugins_scanned) {
+        scan_plugins(ui);
+    }
+    const toh::plugins::PluginInfo* chosen = nullptr;
+    bool any = false;
+    for (const auto& info : ui.plugin_list) {
+        if (!info.instrument) {
+            continue;
+        }
+        any = true;
+        std::string label = info.name;
+        if (!info.vendor.empty()) {
+            label += "  (" + info.vendor + ")";
+        }
+        label += "##" + info.path.u8string() + "|" + info.id;
+        if (ImGui::MenuItem(label.c_str())) {
+            chosen = &info;
+        }
+        if (!info.description.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("%s", info.description.c_str());
+        }
+    }
+    if (!any) {
+        ImGui::TextDisabled("%s", T_("No CLAP instruments found."));
+    }
+    return chosen;
+}
+
+// Makes a plugin the instrument of a track and opens its window.
+void set_plugin_instrument(Session& session, UiState& ui, std::size_t track,
+                           const toh::plugins::PluginInfo& info) {
+    std::string error;
+    if (session.set_track_plugin_instrument(track, info.path, info.id, &error)) {
+        session.clear_track_sampler(track);
+        open_effect_window(ui, session.tracks()[track].plugin_instrument.plugin);
+    } else {
+        ui.error = std::string(T_("Instrument: ")) + error;
+    }
 }
 
 // A text for an ImGui format string: percent signs doubled.
@@ -1666,6 +1711,7 @@ void handle_path_request(Session& session, UiState& ui) {
     }
     if (kind == PendingPath::Kind::SamplerSound) {
         if (session.set_track_sampler(ui.sampler_track, std::filesystem::u8path(path), &error)) {
+            session.clear_track_plugin_instrument(ui.sampler_track);  // the sound plays now
             const auto& sound = session.tracks()[ui.sampler_track].sampler;
             if (sound && sound->detected >= 0.0) {
                 ui.notice = std::string(T_("Sampler: the note of the sound is ")) +
@@ -3746,6 +3792,14 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                 session.set_track_program(ui.selected_track, program);
                 session.set_track_instrument(ui.selected_track, instrument);
                 session.clear_track_sampler(ui.selected_track);  // the chosen sound plays now
+                session.clear_track_plugin_instrument(ui.selected_track);
+            }
+            if (ImGui::BeginMenu(T_("Instrument plugins"))) {
+                if (const auto* info = plugin_instrument_menu(ui)) {
+                    const toh::plugins::PluginInfo chosen = *info;
+                    set_plugin_instrument(session, ui, ui.selected_track, chosen);
+                }
+                ImGui::EndMenu();
             }
             ImGui::Separator();
             ImGui::TextDisabled("%s", T_("Double-click in the region: add or remove a note"));
@@ -3754,6 +3808,11 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         if (region != nullptr && region->has_notes() && ImGui::BeginMenu(T_("Sampler"))) {
             sampler_menu(session, ui, ui.selected_track);
             ImGui::EndMenu();
+        }
+        if (region != nullptr && ui.selected_track < session.tracks().size() &&
+            session.tracks()[ui.selected_track].plugin_instrument.plugin &&
+            ImGui::MenuItem(T_("Open the instrument plugin"))) {
+            open_effect_window(ui, session.tracks()[ui.selected_track].plugin_instrument.plugin);
         }
         if (ImGui::BeginMenu(T_("Region speed"), region != nullptr && !region->has_notes())) {
             float percent = static_cast<float>(region->rate * 100.0);
@@ -4071,6 +4130,19 @@ void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
         return;
     }
     ImGui::TextDisabled("%s", T_("Effects of the track: the sound passes them from top to bottom."));
+    const auto& instrument_slot = session.tracks()[track].plugin_instrument;
+    if (instrument_slot.plugin) {
+        ImGui::Text(T_("Instrument: %s"), instrument_slot.name.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(with_id(T_("Open"), "instrument open").c_str())) {
+            open_effect_window(ui, instrument_slot.plugin);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(with_id(T_("Remove"), "instrument remove").c_str())) {
+            session.clear_track_plugin_instrument(track);
+        }
+        ImGui::Separator();
+    }
     const auto& effects = session.tracks()[track].effects;
     if (effects.empty()) {
         ImGui::TextUnformatted(T_("No effects yet."));
@@ -4155,7 +4227,8 @@ void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
             ImGui::TextDisabled(T_("%d files could not be loaded (see the log)."),
                                 static_cast<int>(ui.plugin_problems.size()));
         }
-        ImGui::TextDisabled("%s", T_("Instrument plugins come in a later version."));
+        ImGui::TextDisabled("%s", T_("Instrument plugins: in the menu of a note region (Instrument),\n"
+                                     "or right-click the track area: New instrument plugin track."));
         ImGui::EndMenu();
     }
     ImGui::EndPopup();
@@ -4960,6 +5033,18 @@ void draw_tracks(Session& session, UiState& ui) {
             toh::core::Instrument instrument = toh::core::Instrument::Keys;
             if (instrument_menu(session, -2, toh::core::Instrument::Keys, program, instrument)) {
                 add_instrument_track(session, ui, instrument, program);
+            }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu(T_("New instrument plugin track"))) {
+            if (const auto* info = plugin_instrument_menu(ui)) {
+                const toh::plugins::PluginInfo chosen = *info;
+                const std::size_t before = session.tracks().size();
+                add_instrument_track(session, ui, toh::core::Instrument::Keys, -1);
+                if (session.tracks().size() > before) {
+                    session.set_track_name(before, chosen.name);
+                    set_plugin_instrument(session, ui, before, chosen);
+                }
             }
             ImGui::EndMenu();
         }

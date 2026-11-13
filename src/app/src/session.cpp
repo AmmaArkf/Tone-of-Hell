@@ -112,6 +112,11 @@ bool region_part(const RegionInfo& region, std::int64_t begin, std::int64_t end,
     return true;
 }
 
+// Where the state of a track's instrument plugin is kept inside a project.
+std::string instrument_state_entry(std::size_t track) {
+    return "plugins/instrument-" + std::to_string(track + 1) + ".bin";
+}
+
 // Where the state of an effect is kept inside a project.
 std::string effect_state_entry(std::size_t track, std::size_t slot) {
     return "plugins/state-" + std::to_string(track + 1) + "-" + std::to_string(slot + 1) + ".bin";
@@ -438,6 +443,9 @@ void Session::update() {
 
     // Plugins get the time they asked for on the main thread.
     for (const TrackInfo& track : tracks_) {
+        if (track.plugin_instrument.plugin) {
+            track.plugin_instrument.plugin->idle();
+        }
         for (const EffectSlot& slot : track.effects) {
             if (slot.plugin) {
                 slot.plugin->idle();
@@ -695,6 +703,36 @@ bool Session::set_effect_enabled(std::size_t track, std::size_t slot, bool enabl
     return true;
 }
 
+bool Session::set_track_plugin_instrument(std::size_t track, const std::filesystem::path& file,
+                                          const std::string& id, std::string* error) {
+    if (track >= tracks_.size()) {
+        set_error(error, "the track does not exist");
+        return false;
+    }
+    auto plugin = plugins::ClapPlugin::create(file, id, static_cast<double>(config_.sample_rate),
+                                              config_.channels, error);
+    if (!plugin) {
+        return false;
+    }
+    EffectSlot slot;
+    slot.name = plugin->info().name;
+    slot.plugin = std::move(plugin);
+    tracks_[track].plugin_instrument = std::move(slot);
+    sync_track_regions(track);
+    pending_label_ = "Instrument plugin";
+    return true;
+}
+
+bool Session::clear_track_plugin_instrument(std::size_t track) {
+    if (track >= tracks_.size() || !tracks_[track].plugin_instrument.plugin) {
+        return false;
+    }
+    tracks_[track].plugin_instrument = EffectSlot();
+    sync_track_regions(track);
+    pending_label_ = "Instrument plugin";
+    return true;
+}
+
 bool Session::is_instrument_track(std::size_t index) const noexcept {
     if (index >= tracks_.size()) {
         return false;
@@ -714,12 +752,24 @@ bool Session::note_on(int pitch, float velocity) {
     int program = -1;
     core::Instrument instrument = core::Instrument::Keys;
     std::shared_ptr<const core::SamplerSound> sampler;
+    std::shared_ptr<plugins::ClapPlugin> plugin;
     if (live_track_ < tracks_.size()) {
         program = tracks_[live_track_].program;
         instrument = tracks_[live_track_].instrument;
         sampler = tracks_[live_track_].sampler;
+        plugin = tracks_[live_track_].plugin_instrument.plugin;
     }
-    engine_.live_note_on(pitch, velocity, program, instrument, std::move(sampler));
+    auto& held = live_plugin_keys_[static_cast<std::size_t>(pitch)];
+    if (held) {
+        engine_.live_plugin_note(held, false, pitch, 0.0f);  // the same key again
+        held.reset();
+    }
+    if (plugin) {
+        engine_.live_plugin_note(plugin, true, pitch, velocity);
+        held = std::move(plugin);
+    } else {
+        engine_.live_note_on(pitch, velocity, program, instrument, std::move(sampler));
+    }
     if (notes_recording_) {
         const auto key = static_cast<std::size_t>(pitch);
         if (open_note_start_[key] >= 0) {
@@ -737,6 +787,10 @@ void Session::note_off(int pitch) {
     }
     engine_.live_note_off(pitch);
     const auto key = static_cast<std::size_t>(pitch);
+    if (live_plugin_keys_[key]) {
+        engine_.live_plugin_note(live_plugin_keys_[key], false, pitch, 0.0f);
+        live_plugin_keys_[key].reset();
+    }
     if (notes_recording_ && open_note_start_[key] >= 0) {
         core::Note note;
         note.start = open_note_start_[key];
@@ -848,7 +902,8 @@ void Session::sync_track_regions(std::size_t index) {
             effects.push_back(slot.plugin);
         }
     }
-    engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, effects);
+    engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, effects,
+                              tracks_[index].plugin_instrument.plugin);
     update_streaming();
 }
 
@@ -1874,6 +1929,14 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
         out << "icon=" << one_line(icon) << "\n";
         out << "instrument=" << static_cast<int>(track.instrument) << "\n";
         out << "program=" << track.program << "\n";
+        if (track.plugin_instrument.plugin) {
+            const auto& info = track.plugin_instrument.plugin->info();
+            const auto index = static_cast<std::size_t>(&track - tracks_.data());
+            out << "plugin_instrument_path=" << one_line(info.path.u8string()) << "\n";
+            out << "plugin_instrument_id=" << one_line(info.id) << "\n";
+            out << "plugin_instrument_name=" << one_line(track.plugin_instrument.name) << "\n";
+            out << "plugin_instrument_state=" << instrument_state_entry(index) << "\n";
+        }
         if (track.sampler) {
             out << "sampler_name=" << one_line(track.sampler->name) << "\n";
             out << "sampler_rate=" << track.sampler->sample_rate << "\n";
@@ -2025,7 +2088,16 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
             ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), samples.data(),
                                        samples.size() * sizeof(float), MZ_DEFAULT_LEVEL) != 0;
         }
-        // The states of the effects, as the plugins write them.
+        // The states of the instrument plugins and effects, as the plugins write them.
+        for (std::size_t t = 0; ok && t < tracks_.size(); ++t) {
+            const auto& instrument = tracks_[t].plugin_instrument.plugin;
+            std::vector<char> instrument_state;
+            if (instrument && instrument->save_state(instrument_state)) {
+                const std::string entry = instrument_state_entry(t);
+                ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), instrument_state.data(),
+                                           instrument_state.size(), MZ_DEFAULT_LEVEL) != 0;
+            }
+        }
         for (std::size_t t = 0; ok && t < tracks_.size(); ++t) {
             for (std::size_t e = 0; ok && e < tracks_[t].effects.size(); ++e) {
                 const auto& plugin = tracks_[t].effects[e].plugin;
@@ -2181,6 +2253,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         double sampler_root = -1.0;
         std::vector<RegionEntry> regions;
         std::vector<EffectEntry> effects;
+        EffectEntry plugin_instrument;
     };
     std::vector<SourceEntry> sources;
     std::vector<TrackEntry> tracks;
@@ -2281,6 +2354,14 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().instrument = integer;
                 } else if (key == "program") {
                     tracks.back().program = integer;
+                } else if (key == "plugin_instrument_path") {
+                    tracks.back().plugin_instrument.path = value;
+                } else if (key == "plugin_instrument_id") {
+                    tracks.back().plugin_instrument.id = value;
+                } else if (key == "plugin_instrument_name") {
+                    tracks.back().plugin_instrument.name = value;
+                } else if (key == "plugin_instrument_state") {
+                    tracks.back().plugin_instrument.state = value;
                 } else if (key == "sampler_name") {
                     tracks.back().sampler = true;
                     tracks.back().sampler_name = value;
@@ -2520,7 +2601,38 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             limit_fades(info);
             track.regions.push_back(std::move(info));
         }
-        // Effects: the plugins are loaded again and get back their state.
+        // Plugins: they are loaded again and get back their state.
+        const auto load_plugin = [&](const EffectEntry& effect) -> std::shared_ptr<plugins::ClapPlugin> {
+            std::string problem;
+            auto plugin = plugins::ClapPlugin::create(std::filesystem::u8path(effect.path), effect.id,
+                                                      static_cast<double>(config_.sample_rate),
+                                                      config_.channels, &problem);
+            if (!plugin) {
+                open_warnings_.push_back((effect.name.empty() ? effect.id : effect.name) + ": " + problem);
+                return nullptr;
+            }
+            const int index = effect.state.empty()
+                                  ? -1
+                                  : mz_zip_reader_locate_file(&zip.zip, effect.state.c_str(), nullptr, 0);
+            if (index >= 0) {
+                std::size_t bytes = 0;
+                void* data = mz_zip_reader_extract_to_heap(&zip.zip, static_cast<mz_uint>(index), &bytes, 0);
+                if (data != nullptr) {
+                    const std::vector<char> state(static_cast<const char*>(data),
+                                                  static_cast<const char*>(data) + bytes);
+                    mz_free(data);
+                    plugin->load_state(state);
+                }
+            }
+            return plugin;
+        };
+        if (!entry.plugin_instrument.path.empty()) {
+            if (auto plugin = load_plugin(entry.plugin_instrument)) {
+                track.plugin_instrument.name =
+                    entry.plugin_instrument.name.empty() ? plugin->info().name : entry.plugin_instrument.name;
+                track.plugin_instrument.plugin = std::move(plugin);
+            }
+        }
         for (const EffectEntry& effect : entry.effects) {
             if (track.effects.size() >= kMaxEffects) {
                 break;
@@ -2658,6 +2770,7 @@ std::string Session::edit_text() const {
             out << "E|" << static_cast<const void*>(slot.plugin.get()) << "|" << (slot.enabled ? 1 : 0)
                 << "\n";
         }
+        out << "I|" << static_cast<const void*>(track.plugin_instrument.plugin.get()) << "\n";
         for (const RegionInfo& region : track.regions) {
             out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
                 << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"

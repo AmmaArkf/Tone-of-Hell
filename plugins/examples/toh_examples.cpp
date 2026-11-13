@@ -1,4 +1,4 @@
-// Example CLAP plugins that come with Tone of Hell: Echo, Tremolo and Gain.
+// Example CLAP plugins that come with Tone of Hell: Echo, Tremolo, Gain and Simple Synth.
 //
 // They are small on purpose: they show what a CLAP effect needs (a factory, audio ports,
 // parameters and a saved state), they give a new user a few effects to try, and the tests use
@@ -35,6 +35,10 @@ const ParamDef kTremoloParams[] = {{0, "Rate", 0.1, 20.0, 5.0, "Hz"},
                                    {1, "Depth", 0.0, 100.0, 60.0, "%"}};
 const ParamDef kGainParams[] = {{0, "Gain", -24.0, 24.0, 0.0, "dB"},
                                 {1, "Pan", -100.0, 100.0, 0.0, "%"}};
+const ParamDef kSynthParams[] = {{0, "Attack", 1.0, 2000.0, 8.0, "ms"},
+                                 {1, "Release", 10.0, 4000.0, 300.0, "ms"},
+                                 {2, "Brightness", 0.0, 100.0, 35.0, "%"},
+                                 {3, "Volume", -36.0, 6.0, -6.0, "dB"}};
 
 const char* const kEchoFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_DELAY,
                                      CLAP_PLUGIN_FEATURE_STEREO, nullptr};
@@ -42,6 +46,8 @@ const char* const kTremoloFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_P
                                         CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const char* const kGainFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY,
                                      CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+const char* const kSynthFeatures[] = {CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER,
+                                      CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 
 const clap_plugin_descriptor_t kEcho = {
     CLAP_VERSION_INIT, "org.toneofhell.echo", "Echo", "Tone of Hell",
@@ -55,8 +61,23 @@ const clap_plugin_descriptor_t kGain = {
     CLAP_VERSION_INIT, "org.toneofhell.gain", "Gain", "Tone of Hell",
     "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
     "Louder or quieter, and to the left or right.", kGainFeatures};
+const clap_plugin_descriptor_t kSynth = {
+    CLAP_VERSION_INIT, "org.toneofhell.synth", "Simple Synth", "Tone of Hell",
+    "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
+    "A small synthesizer: a soft sine that turns brighter towards a saw wave.", kSynthFeatures};
 
-enum class Kind { Echo, Tremolo, Gain };
+enum class Kind { Echo, Tremolo, Gain, Synth };
+
+// One playing note of the synthesizer.
+struct Voice {
+    bool active = false;
+    bool releasing = false;
+    int key = -1;
+    double phase = 0.0;  // 0 to 2 pi
+    double step = 0.0;   // phase per frame
+    double level = 0.0;  // the envelope, 0 to 1
+    float velocity = 0.0f;
+};
 
 struct Example {
     clap_plugin_t plugin{};
@@ -69,6 +90,7 @@ struct Example {
     std::size_t delay_frames = 0;
     std::size_t write = 0;
     double phase = 0.0;
+    std::array<Voice, 16> voices{};
 };
 
 Example& self(const clap_plugin_t* plugin) { return *static_cast<Example*>(plugin->plugin_data); }
@@ -120,10 +142,120 @@ void plugin_reset(const clap_plugin_t* plugin) {
     Example& e = self(plugin);
     std::fill(e.delay.begin(), e.delay.end(), 0.0f);
     e.phase = 0.0;
+    for (Voice& voice : e.voices) {
+        voice = Voice{};
+    }
+}
+
+// A note starts or ends, or a parameter changes, for the synthesizer.
+void synth_event(Example& e, const clap_event_header_t* header) {
+    if (header == nullptr || header->space_id != CLAP_CORE_EVENT_SPACE_ID) {
+        return;
+    }
+    if (header->type == CLAP_EVENT_NOTE_ON) {
+        const auto* note = reinterpret_cast<const clap_event_note_t*>(header);
+        if (note->key < 0 || note->key > 127) {
+            return;
+        }
+        Voice* target = nullptr;
+        for (Voice& voice : e.voices) {
+            if (!voice.active) {
+                target = &voice;
+                break;
+            }
+        }
+        if (target == nullptr) {  // all busy: one that is fading out, or the first
+            target = &e.voices[0];
+            for (Voice& voice : e.voices) {
+                if (voice.releasing) {
+                    target = &voice;
+                    break;
+                }
+            }
+        }
+        *target = Voice{};
+        target->active = true;
+        target->key = note->key;
+        target->velocity = static_cast<float>(std::clamp(note->velocity, 0.0, 1.0));
+        target->step = 2.0 * kPi * 440.0 * std::pow(2.0, (note->key - 69) / 12.0) / e.rate;
+    } else if (header->type == CLAP_EVENT_NOTE_OFF || header->type == CLAP_EVENT_NOTE_CHOKE) {
+        const auto* note = reinterpret_cast<const clap_event_note_t*>(header);
+        for (Voice& voice : e.voices) {
+            if (voice.active && (note->key < 0 || voice.key == note->key)) {
+                voice.releasing = true;
+            }
+        }
+    } else if (header->type == CLAP_EVENT_PARAM_VALUE) {
+        const auto* event = reinterpret_cast<const clap_event_param_value_t*>(header);
+        if (event->param_id < e.count) {
+            const ParamDef& def = e.defs[event->param_id];
+            e.values[event->param_id].store(std::clamp(event->value, def.min, def.max));
+        }
+    }
+}
+
+clap_process_status synth_process(Example& e, const clap_process_t* process) {
+    if (process->audio_outputs_count < 1) {
+        return CLAP_PROCESS_ERROR;
+    }
+    const clap_audio_buffer_t& out = process->audio_outputs[0];
+    if (out.channel_count == 0 || out.data32 == nullptr) {
+        return CLAP_PROCESS_ERROR;
+    }
+    const clap_input_events_t* events = process->in_events;
+    const std::uint32_t event_count = events != nullptr ? events->size(events) : 0;
+    std::uint32_t next = 0;
+    const double attack = std::max(e.values[0].load() / 1000.0 * e.rate, 1.0);
+    const double release = std::max(e.values[1].load() / 1000.0 * e.rate, 1.0);
+    const double bright = e.values[2].load() / 100.0;
+    const double volume = 0.3 * std::pow(10.0, e.values[3].load() / 20.0);
+    for (std::uint32_t i = 0; i < process->frames_count; ++i) {
+        while (next < event_count) {
+            const clap_event_header_t* header = events->get(events, next);
+            if (header != nullptr && header->time > i) {
+                break;
+            }
+            synth_event(e, header);
+            ++next;
+        }
+        double sum = 0.0;
+        for (Voice& voice : e.voices) {
+            if (!voice.active) {
+                continue;
+            }
+            if (voice.releasing) {
+                voice.level -= 1.0 / release;
+                if (voice.level <= 0.0) {
+                    voice.active = false;
+                    continue;
+                }
+            } else {
+                voice.level = std::min(1.0, voice.level + 1.0 / attack);
+            }
+            const double sine = std::sin(voice.phase);
+            const double saw = 1.0 - voice.phase / kPi;
+            sum += ((1.0 - bright) * sine + bright * saw) * voice.level * voice.velocity;
+            voice.phase += voice.step;
+            if (voice.phase >= 2.0 * kPi) {
+                voice.phase -= 2.0 * kPi;
+            }
+        }
+        const auto sample = static_cast<float>(sum * volume);
+        for (std::uint32_t c = 0; c < out.channel_count; ++c) {
+            out.data32[c][i] = sample;
+        }
+    }
+    for (; next < event_count; ++next) {
+        synth_event(e, events->get(events, next));
+    }
+    return CLAP_PROCESS_CONTINUE;
 }
 
 clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_process_t* process) {
     Example& e = self(plugin);
+    if (e.kind == Kind::Synth) {
+        return synth_process(e, process);
+    }
     apply_events(e, process->in_events);
     if (process->audio_inputs_count < 1 || process->audio_outputs_count < 1) {
         return CLAP_PROCESS_ERROR;
@@ -174,6 +306,8 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
             }
             break;
         }
+        case Kind::Synth:
+            break;
         case Kind::Gain: {
             const double gain = std::pow(10.0, e.values[0].load() / 20.0);
             const double pan = e.values[1].load() / 100.0;
@@ -188,12 +322,14 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
     return CLAP_PROCESS_CONTINUE;
 }
 
-// ---- Audio ports: one stereo input and one stereo output ---------------------------------------
+// ---- Audio ports: one stereo input (not for the synthesizer) and one stereo output -------------
 
-std::uint32_t ports_count(const clap_plugin_t*, bool) { return 1; }
+std::uint32_t ports_count(const clap_plugin_t* plugin, bool is_input) {
+    return is_input && self(plugin).kind == Kind::Synth ? 0 : 1;
+}
 
-bool ports_get(const clap_plugin_t*, std::uint32_t index, bool is_input, clap_audio_port_info_t* info) {
-    if (index != 0) {
+bool ports_get(const clap_plugin_t* plugin, std::uint32_t index, bool is_input, clap_audio_port_info_t* info) {
+    if (index >= ports_count(plugin, is_input)) {
         return false;
     }
     *info = clap_audio_port_info_t{};
@@ -207,6 +343,24 @@ bool ports_get(const clap_plugin_t*, std::uint32_t index, bool is_input, clap_au
 }
 
 const clap_plugin_audio_ports_t kPorts = {ports_count, ports_get};
+
+// ---- Note ports: the synthesizer takes notes ------------------------------------------------------
+
+std::uint32_t note_ports_count(const clap_plugin_t*, bool is_input) { return is_input ? 1 : 0; }
+
+bool note_ports_get(const clap_plugin_t*, std::uint32_t index, bool is_input, clap_note_port_info_t* info) {
+    if (!is_input || index != 0) {
+        return false;
+    }
+    *info = clap_note_port_info_t{};
+    info->id = 0;
+    info->supported_dialects = CLAP_NOTE_DIALECT_CLAP;
+    info->preferred_dialect = CLAP_NOTE_DIALECT_CLAP;
+    std::snprintf(info->name, sizeof(info->name), "%s", "Notes");
+    return true;
+}
+
+const clap_plugin_note_ports_t kNotePorts = {note_ports_count, note_ports_get};
 
 // ---- Parameters ----------------------------------------------------------------------------------
 
@@ -305,7 +459,7 @@ bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
 
 const clap_plugin_state_t kState = {state_save, state_load};
 
-const void* plugin_extension(const clap_plugin_t*, const char* id) {
+const void* plugin_extension(const clap_plugin_t* plugin, const char* id) {
     if (std::strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) {
         return &kPorts;
     }
@@ -315,6 +469,9 @@ const void* plugin_extension(const clap_plugin_t*, const char* id) {
     if (std::strcmp(id, CLAP_EXT_STATE) == 0) {
         return &kState;
     }
+    if (std::strcmp(id, CLAP_EXT_NOTE_PORTS) == 0 && self(plugin).kind == Kind::Synth) {
+        return &kNotePorts;
+    }
     return nullptr;
 }
 
@@ -322,8 +479,8 @@ void plugin_on_main_thread(const clap_plugin_t*) {}
 
 // ---- The factory -----------------------------------------------------------------------------------
 
-const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain};
-constexpr std::uint32_t kPluginCount = 3;
+const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain, &kSynth};
+constexpr std::uint32_t kPluginCount = 4;
 
 std::uint32_t factory_count(const clap_plugin_factory_t*) { return kPluginCount; }
 
@@ -351,6 +508,11 @@ const clap_plugin_t* factory_create(const clap_plugin_factory_t*, const clap_hos
         e->defs = kGainParams;
         e->count = 2;
         e->plugin.desc = &kGain;
+    } else if (std::strcmp(id, kSynth.id) == 0) {
+        e->kind = Kind::Synth;
+        e->defs = kSynthParams;
+        e->count = 4;
+        e->plugin.desc = &kSynth;
     } else {
         delete e;
         return nullptr;

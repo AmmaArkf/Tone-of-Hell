@@ -104,8 +104,12 @@ public:
     /// length > 0 and offset + length <= clip frames. Fades longer than the region are
     /// shortened. Regions that overlap are mixed together. An empty list empties the track.
     /// `effects` are the insert effects of the track, in the order the sound passes them.
+    /// `instrument` (a plugin) plays the note regions of the track instead, before the effects.
     bool set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
-                           const std::vector<std::shared_ptr<AudioEffect>>& effects = {});
+                           const std::vector<std::shared_ptr<AudioEffect>>& effects = {},
+                           std::shared_ptr<AudioEffect> instrument = nullptr);
+    /// A note played live on an instrument plugin (it must be the instrument of a track).
+    bool live_plugin_note(std::shared_ptr<AudioEffect> instrument, bool on, int pitch, float velocity);
     /// Puts one whole clip at the start of a track, stops playback and returns to the start.
     bool set_track_clip(std::uint32_t track, std::shared_ptr<const ClipData> clip);
     /// Removes the clip from a track, stops playback and returns to the start.
@@ -273,6 +277,7 @@ private:
     struct TrackContent {
         std::vector<Region> regions;
         std::vector<std::shared_ptr<AudioEffect>> effects;
+        std::shared_ptr<AudioEffect> instrument;
         std::int64_t end = 0;  // end of the last region
     };
 
@@ -299,7 +304,8 @@ private:
         StopRecording,
         LiveNoteOn,
         LiveNoteOff,
-        LiveAllOff
+        LiveAllOff,
+        LivePluginNote
     };
 
     // Messages from the control thread to the audio thread. Must stay trivially copyable.
@@ -317,6 +323,7 @@ private:
         double number = 0.0;
         const TrackContent* content = nullptr;
         const SamplerSound* sampler = nullptr;
+        AudioEffect* effect = nullptr;
     };
 
     enum class State : std::uint8_t { Stopped, Playing, FadingOut };
@@ -336,6 +343,8 @@ private:
         float current_left = 1.0f;  // smoothed towards the target
         float current_right = 1.0f;
         float meter = 0.0f;
+        std::int64_t last_position = -1;  // for an instrument plugin: where the last block ended
+        bool notes_on = false;            // notes were started on it and not all ended
     };
 
     struct Bus {
@@ -357,6 +366,10 @@ private:
     void mix_block(const float* in, float* out, std::uint32_t frames, bool audible) noexcept;
     void process_input(const float* in, float* out, std::uint32_t frames) noexcept;
     void render_live(float* out, std::uint32_t frames) noexcept;
+    void render_stopped_instruments(float* out, std::uint32_t frames) noexcept;
+    void schedule_notes(Track& track, const Region& region, const NoteData& notes, AudioEffect& instrument,
+                        std::uint32_t frames, std::int64_t lowest, std::int64_t highest) noexcept;
+    std::vector<std::shared_ptr<AudioEffect>> live_instruments_;  // kept alive for live notes
 
     // Notes from a keyboard (audio thread only).
     struct LiveVoice {
@@ -428,6 +441,7 @@ private:
     std::vector<float> frame_frac_;  // for every output frame: the part of the next frame
     std::vector<float> master_mix_;
     std::vector<float> track_mix_;
+    std::array<std::int64_t, kBlockFrames> note_prev_{};  // per frame: the position before it
     std::vector<float> bus_mix_;
 
     // Copies of the audio-thread state for other threads to read.
