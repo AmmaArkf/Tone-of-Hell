@@ -102,7 +102,7 @@ void SDLCALL export_dialog_callback(void* user_data, const char* const* file_lis
 
 // A path chosen in a project or folder dialog, waiting for the main loop.
 struct PendingPath {
-    enum class Kind { SaveProject, OpenProject, ProjectsFolder, SoundFont };
+    enum class Kind { SaveProject, OpenProject, ProjectsFolder, SoundFont, ImportMidi, ExportMidi };
     std::mutex mutex;
     bool ready = false;
     Kind kind = Kind::SaveProject;
@@ -1200,6 +1200,15 @@ void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
         static const SDL_DialogFileFilter sf_filters[] = {{"SoundFont", "sf2"}};
         SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, sf_filters, 1,
                                nullptr, false);
+    } else if (kind == PendingPath::Kind::ImportMidi) {
+        static const SDL_DialogFileFilter midi_filters[] = {{"MIDI file", "mid;midi"}};
+        SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, midi_filters, 1,
+                               nullptr, false);
+    } else if (kind == PendingPath::Kind::ExportMidi) {
+        static const SDL_DialogFileFilter midi_filters[] = {{"MIDI file", "mid"}};
+        const std::string midi_location = (projects_folder(ui) / "Song.mid").u8string();
+        SDL_ShowSaveFileDialog(&path_dialog_callback, &ui.path_request, ui.window, midi_filters, 1,
+                               midi_location.c_str());
     } else {
         SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, filters, 1,
                                location.c_str(), false);
@@ -1283,6 +1292,27 @@ void handle_path_request(Session& session, UiState& ui) {
         ui.settings.soundfont_path = path;
         ui.settings_changed = true;
         load_soundfont(session, ui, std::filesystem::u8path(path));
+        return;
+    }
+    if (kind == PendingPath::Kind::ImportMidi) {
+        if (session.import_midi(std::filesystem::u8path(path), &error)) {
+            ui.notice = std::string(T_("Imported: ")) + path;
+            fit_view(session, ui.view);
+        } else {
+            ui.error = std::string(T_("MIDI: ")) + error;
+        }
+        return;
+    }
+    if (kind == PendingPath::Kind::ExportMidi) {
+        std::filesystem::path file = std::filesystem::u8path(path);
+        if (file.extension() != ".mid" && file.extension() != ".midi") {
+            file += ".mid";
+        }
+        if (session.export_midi(file, &error)) {
+            ui.notice = std::string(T_("Exported: ")) + file.u8string();
+        } else {
+            ui.error = std::string(T_("MIDI: ")) + error;
+        }
         return;
     }
     if (kind == PendingPath::Kind::ProjectsFolder) {
@@ -1390,6 +1420,24 @@ void log_events(Session& session, UiState& ui) {
         toh::app::logging::warning("Recording lost " + std::to_string(dropped - ui.logged_dropped) +
                                    " input frames (the disk or the program was too slow)");
         ui.logged_dropped = dropped;
+    }
+}
+
+bool is_midi_file(const std::string& path) {
+    std::string extension = std::filesystem::u8path(path).extension().u8string();
+    for (char& c : extension) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return extension == ".mid" || extension == ".midi";
+}
+
+void import_midi_file(Session& session, UiState& ui, const std::string& path) {
+    std::string error;
+    if (session.import_midi(std::filesystem::u8path(path), &error)) {
+        ui.notice = std::string(T_("Imported: ")) + path;
+        fit_view(session, ui.view);
+    } else {
+        ui.error = std::string(T_("MIDI: ")) + error;
     }
 }
 
@@ -1992,6 +2040,9 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         if (ImGui::MenuItem(T_("Add audio files..."), key_label(ui, Action::AddFiles))) {
             open_file_dialog(pending, window);
         }
+        if (ImGui::MenuItem(T_("Import a MIDI file..."))) {
+            open_path_dialog(session, ui, PendingPath::Kind::ImportMidi);
+        }
         if (ImGui::BeginMenu(T_("Export audio"), session.length_frames() > 0)) {
             if (ImGui::MenuItem(T_("WAV, 16-bit..."))) {
                 open_export_dialog(exports, window, toh::audio::SampleFormat::Int16);
@@ -2011,6 +2062,10 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
             }
             if (ImGui::MenuItem(T_("MP3, variable bit rate (best quality)..."))) {
                 open_export_dialog(exports, window, toh::audio::SampleFormat::Int24, 0);
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem(T_("MIDI file (the notes)..."))) {
+                open_path_dialog(session, ui, PendingPath::Kind::ExportMidi);
             }
             ImGui::EndMenu();
         }
@@ -4208,6 +4263,8 @@ int main(int argc, char* argv[]) {
                     if (is_picture_file(event.drop.data)) {
                         ui.dropped_picture = event.drop.data;
                         ui.dropped_y = event.drop.y;
+                    } else if (is_midi_file(event.drop.data)) {
+                        import_midi_file(session, ui, event.drop.data);
                     } else {
                         pending.add(event.drop.data);
                     }

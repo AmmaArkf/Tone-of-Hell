@@ -16,6 +16,7 @@
 
 #include "toh/audio/clip_loader.h"
 #include "toh/audio/mp3_writer.h"
+#include "toh/app/midi_file.h"
 
 #include "miniz.h"
 
@@ -2174,6 +2175,94 @@ void Session::clear_engine_slot(std::size_t slot) {
     engine_.set_track_pan(index, 0.0f);
     engine_.set_track_mute(index, false);
     engine_.set_track_solo(index, false);
+}
+
+// ---- MIDI files --------------------------------------------------------------------------
+
+bool Session::import_midi(const std::filesystem::path& path, std::string* error) {
+    MidiSong song;
+    if (!read_midi_file(path, config_.sample_rate, song, error)) {
+        return false;
+    }
+    MetronomeSettings metronome = metronome_;
+    metronome.bpm = std::clamp(song.bpm, 20.0, 400.0);
+    metronome.beats_per_bar = song.beats_per_bar;
+    metronome.beat_unit = song.beat_unit;
+    set_metronome(metronome);  // ignored if the file's values do not fit
+
+    // One second more than the last note, so its release is heard too.
+    const std::int64_t length = song.frames + static_cast<std::int64_t>(config_.sample_rate);
+    std::size_t added = 0;
+    for (const MidiPart& part : song.parts) {
+        std::string name = part.name;
+        if (name.empty()) {
+            name = path.stem().u8string() + " " + std::to_string(part.channel + 1);
+        }
+        const std::size_t index =
+            add_instrument_track(name, core::Instrument::Keys, 0, length, part.program);
+        if (index >= tracks_.size()) {
+            break;  // the track limit is reached
+        }
+        set_region_notes(index, 0, part.notes);
+        ++added;
+    }
+    if (added == 0) {
+        set_error(error, "no track could be added (the track limit is reached)");
+        return false;
+    }
+    return true;
+}
+
+bool Session::export_midi(const std::filesystem::path& path, std::string* error) const {
+    MidiSong song;
+    song.bpm = metronome_.bpm;
+    song.beats_per_bar = metronome_.beats_per_bar;
+    song.beat_unit = metronome_.beat_unit;
+    int next_channel = 0;
+    for (const TrackInfo& track : tracks_) {
+        MidiPart part;
+        part.name = track.name;
+        for (const RegionInfo& region : track.regions) {
+            if (!region.has_notes()) {
+                continue;
+            }
+            // The notes that the region plays, where they sound on the timeline.
+            for (const core::Note& note : region.source->clip->notes->notes) {
+                if (note.start < region.offset || note.start >= region.end() - region.start + region.offset) {
+                    continue;
+                }
+                core::Note placed = note;
+                placed.start = region.start + (note.start - region.offset);
+                placed.length = std::min(note.length, region.end() - placed.start);
+                part.notes.push_back(placed);
+            }
+        }
+        if (part.notes.empty()) {
+            continue;
+        }
+        std::stable_sort(part.notes.begin(), part.notes.end(),
+                         [](const core::Note& a, const core::Note& b) { return a.start < b.start; });
+        if (track.program == core::SoundFont::kDrums) {
+            part.channel = 9;
+            part.program = 0;
+        } else {
+            if (next_channel == 9) {
+                ++next_channel;  // channel 10 is for drums
+            }
+            part.channel = next_channel % 16;
+            next_channel = (next_channel + 1) % 16;
+            // The simple synthesizers become the General MIDI sounds closest to them.
+            static const int closest[] = {4, 16, 89, 24};  // keys, organ, pad, pluck
+            part.program = track.program >= 0 ? track.program
+                                              : closest[static_cast<int>(track.instrument)];
+        }
+        song.parts.push_back(std::move(part));
+    }
+    if (song.parts.empty()) {
+        set_error(error, "there are no notes to export");
+        return false;
+    }
+    return write_midi_file(path, song, config_.sample_rate, error);
 }
 
 // ---- Export ------------------------------------------------------------------------------

@@ -368,6 +368,16 @@ public:
     /// Forgets every step (done by open_project() and new_project()).
     void clear_history();
 
+    // ---- MIDI files ----------------------------------------------------------------------
+
+    /// Reads a Standard MIDI File: every channel of every track becomes an instrument track
+    /// with its General MIDI program (drums for channel 10), and the project takes the tempo
+    /// and time signature of the file.
+    bool import_midi(const std::filesystem::path& path, std::string* error = nullptr);
+    /// Writes the notes of all note regions to a Standard MIDI File, one track per track of
+    /// the project, at the tempo of the project.
+    bool export_midi(const std::filesystem::path& path, std::string* error = nullptr) const;
+
     // ---- Export --------------------------------------------------------------------------
 
     /// Writes the whole project to a WAV file as it sounds (faders, pan, mute, solo and the

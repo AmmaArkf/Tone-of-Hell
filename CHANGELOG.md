@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.4
+
+- MIDI files: File > Import a MIDI file... (or drop a .mid onto the window). Every channel of every track becomes an instrument track with its General MIDI sound (channel 10 plays the drums), and the project takes the tempo and time signature of the file; tempo changes inside the file are followed.
+- File > Export audio > MIDI file (the notes) writes the notes of all note regions, one track per track, at the tempo of the project. The simple synthesizers become the closest General MIDI sounds.
+
 ## 0.2.3
 
 - Recorded instruments: instrument tracks can now be played by real recorded sounds from a SoundFont (.sf2). The program comes with FluidR3 GM by Frank Wen (MIT license): the 128 General MIDI instruments (pianos, organs, guitars, strings, brass, synthesizers ...) and a drum kit. It is downloaded while building and lies in "sounds" next to the program.

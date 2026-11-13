@@ -9,6 +9,7 @@ add_library(toh_app STATIC
     src/build_info.cpp
     src/i18n.cpp
     src/log.cpp
+    src/midi_file.cpp
     src/session.cpp
     src/settings.cpp)
 

@@ -2,6 +2,7 @@ add_executable(toh_tests
     test_main.cpp
     test_engine.cpp
     test_join.cpp
+    test_midi.cpp
     test_mixer.cpp
     test_mp3.cpp
     test_notes.cpp
