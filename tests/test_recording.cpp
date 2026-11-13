@@ -240,7 +240,9 @@ TEST_CASE("Session turns a take into a region at the right place") {
     CHECK(first.length <= 4800 + 300);
     CHECK(session.length_frames() == first.length);
     for (std::size_t i = 0; i < 4800; i += 97) {
-        CHECK(first.source->clip->samples[2 * i] == FakeCard::input_value(static_cast<std::int64_t>(i)));
+        float value[2] = {};
+        REQUIRE(toh::core::read_clip_frames(*first.source->clip, static_cast<std::int64_t>(i), 1, value) == 1);
+        CHECK(value[0] == FakeCard::input_value(static_cast<std::int64_t>(i)));
     }
 
     // Played back, the take sits exactly where it was recorded.

@@ -1,8 +1,28 @@
 #include "toh/core/clip.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace toh::core {
+
+std::size_t read_clip_frames(const ClipData& clip, std::int64_t first, std::size_t count,
+                             float* out) {
+    if (first < 0 || clip.channels == 0) {
+        return 0;
+    }
+    if (clip.disk != nullptr) {
+        return clip.disk->read_blocking(first, count, out);
+    }
+    const std::int64_t frames = clip.frames();
+    if (first >= frames) {
+        return 0;
+    }
+    const auto n = static_cast<std::size_t>(
+        std::min<std::int64_t>(static_cast<std::int64_t>(count), frames - first));
+    std::copy_n(clip.samples.data() + static_cast<std::size_t>(first) * clip.channels,
+                n * clip.channels, out);
+    return n;
+}
 
 std::shared_ptr<const ClipData> make_sine_clip(double frequency_hz, double seconds,
                                                std::uint32_t sample_rate, std::uint32_t channels,

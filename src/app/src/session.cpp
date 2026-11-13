@@ -1,7 +1,10 @@
 #include "toh/app/session.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <map>
+#include <system_error>
 #include <utility>
 
 #include "toh/audio/clip_loader.h"
@@ -54,6 +57,22 @@ Overview make_overview(const core::ClipData& clip, std::uint32_t frames_per_buck
     const std::size_t channels = clip.channels;
     const auto frames = static_cast<std::size_t>(clip.frames());
     if (channels == 0 || frames == 0) {
+        return overview;
+    }
+    if (clip.disk != nullptr) {
+        // Read the file block by block.
+        const std::size_t block = 65536;
+        std::vector<float> buffer(block * channels);
+        std::size_t fill = 0;
+        std::int64_t at = 0;
+        for (;;) {
+            const std::size_t got = core::read_clip_frames(clip, at, block, buffer.data());
+            if (got == 0) {
+                break;
+            }
+            extend_overview(overview, fill, buffer.data(), got, channels);
+            at += static_cast<std::int64_t>(got);
+        }
         return overview;
     }
 
@@ -115,6 +134,22 @@ bool Source::range(std::int64_t first_frame, std::int64_t last_frame, float& low
         return false;
     }
     const std::size_t channels = clip->channels;
+    if (clip->disk != nullptr) {
+        thread_local std::vector<float> buffer;
+        const auto count = static_cast<std::size_t>(last - first + 1);
+        buffer.resize(count * channels);
+        const std::size_t got = core::read_clip_frames(*clip, first, count, buffer.data());
+        if (got == 0) {
+            return false;
+        }
+        low = buffer[0];
+        high = low;
+        for (std::size_t i = 1; i < got * channels; ++i) {
+            low = std::min(low, buffer[i]);
+            high = std::max(high, buffer[i]);
+        }
+        return true;
+    }
     const std::size_t begin = static_cast<std::size_t>(first) * channels;
     const std::size_t end = static_cast<std::size_t>(last + 1) * channels;
     low = clip->samples[begin];
@@ -132,10 +167,166 @@ Session::Session(const audio::DeviceConfig& config)
     : config_(config),
       engine_(config.sample_rate, config.channels),
       // A first guess for the way through the sound card: one buffer out and one buffer in.
-      record_offset_(2 * static_cast<std::int64_t>(config.buffer_frames)) {}
+      record_offset_(2 * static_cast<std::int64_t>(config.buffer_frames)) {
+    loader_ = std::thread([this] { loader_main(); });
+}
 
 Session::~Session() {
     stop_audio();  // the audio callback must not run while the engine is destroyed
+    {
+        const std::lock_guard<std::mutex> lock(loader_mutex_);
+        loader_stop_ = true;
+    }
+    loader_cv_.notify_one();
+    if (loader_.joinable()) {
+        loader_.join();
+    }
+
+    // Let go of every cache file, then remove the cache folder.
+    take_writer_.discard();
+    for (std::size_t i = 0; i < tracks_.size(); ++i) {
+        engine_.set_track_regions(static_cast<std::uint32_t>(i), {});
+    }
+    engine_.render(nullptr, 0);
+    engine_.collect_retired();
+    tracks_.clear();
+    loader_regions_.clear();
+    if (!cache_folder_.empty()) {
+        std::error_code code;
+        std::filesystem::remove_all(cache_folder_, code);
+    }
+}
+
+// ---- Cache files -------------------------------------------------------------------------
+
+const std::filesystem::path& Session::cache_folder() {
+    if (!cache_folder_.empty()) {
+        return cache_folder_;
+    }
+    std::error_code code;
+    const std::filesystem::path base = std::filesystem::temp_directory_path(code) / "Tone of Hell";
+    if (code) {
+        return cache_folder_;
+    }
+    // Folders left behind by sessions that could not clean up (a crash) go after a week.
+    const auto old = std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 7);
+    for (std::filesystem::directory_iterator it(base, code), end; !code && it != end;
+         it.increment(code)) {
+        const std::string name = it->path().filename().u8string();
+        std::error_code time_code;
+        if (name.rfind("session-", 0) == 0 && it->last_write_time(time_code) < old && !time_code) {
+            std::error_code remove_code;
+            std::filesystem::remove_all(it->path(), remove_code);
+        }
+    }
+    const auto stamp = std::chrono::system_clock::now().time_since_epoch().count();
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        const std::filesystem::path candidate =
+            base / ("session-" + std::to_string(stamp) + "-" + std::to_string(attempt));
+        std::error_code create_code;
+        if (std::filesystem::create_directories(candidate, create_code) && !create_code) {
+            cache_folder_ = candidate;
+            break;
+        }
+    }
+    return cache_folder_;
+}
+
+std::filesystem::path Session::new_cache_file(const char* kind) {
+    const std::filesystem::path& folder = cache_folder();
+    if (folder.empty()) {
+        return {};
+    }
+    return folder / (std::string(kind) + "-" + std::to_string(++cache_count_) + ".f32");
+}
+
+// ---- Playing from disk -------------------------------------------------------------------
+
+void Session::update_streaming() {
+    std::vector<StreamRegion> regions;
+    for (const TrackInfo& track : tracks_) {
+        for (const RegionInfo& info : track.regions) {
+            if (info.source && info.source->clip && info.source->clip->disk) {
+                regions.push_back({info.source->clip->disk, info.start, info.offset, info.length});
+            }
+        }
+    }
+    {
+        const std::lock_guard<std::mutex> lock(loader_mutex_);
+        loader_regions_ = std::move(regions);
+        loader_reverse_ = reverse_;
+        loader_loop_ = loop_;
+        loader_wake_ = true;
+    }
+    loader_cv_.notify_one();
+}
+
+void Session::prefetch_now(std::int64_t position) {
+    std::vector<StreamRegion> regions;
+    bool reverse = false;
+    bool loop = false;
+    {
+        const std::lock_guard<std::mutex> lock(loader_mutex_);
+        regions = loader_regions_;
+        reverse = loader_reverse_;
+        loop = loader_loop_;
+    }
+    prefetch_regions(regions, position, reverse, loop);
+}
+
+// Which pages every file needs, most urgent first: the page at the playhead, the pages ahead
+// of it in the direction of playback, one behind, and the start of the loop.
+void Session::prefetch_regions(const std::vector<StreamRegion>& regions, std::int64_t position,
+                               bool reverse, bool loop) {
+    std::map<core::PagedFile*, std::vector<std::int64_t>> wanted;
+    for (const StreamRegion& region : regions) {
+        const std::int64_t page_frames = region.file->frames_per_page();
+        const std::int64_t step = std::max<std::int64_t>(page_frames / 2, 1);
+        const std::int64_t direction = reverse ? -1 : 1;
+        std::vector<std::int64_t>& pages = wanted[region.file.get()];
+        const auto want = [&](std::int64_t timeline_frame) {
+            if (timeline_frame >= region.start && timeline_frame < region.start + region.length) {
+                pages.push_back((region.offset + timeline_frame - region.start) / page_frames);
+            }
+        };
+        for (std::int64_t k = 0; k < 5; ++k) {
+            want(position + direction * k * step);
+        }
+        want(position - direction * step);
+        if (loop) {
+            for (std::int64_t k = 0; k < 3; ++k) {
+                want(k * step);
+            }
+        }
+    }
+    const std::lock_guard<std::mutex> lock(prefetch_mutex_);
+    for (const auto& entry : wanted) {
+        if (!entry.second.empty()) {
+            entry.first->prefetch(entry.second);
+        }
+    }
+}
+
+void Session::loader_main() {
+    std::unique_lock<std::mutex> lock(loader_mutex_);
+    while (!loader_stop_) {
+        loader_cv_.wait_for(lock, std::chrono::milliseconds(15),
+                            [this] { return loader_stop_ || loader_wake_; });
+        if (loader_stop_) {
+            break;
+        }
+        loader_wake_ = false;
+        const std::vector<StreamRegion> regions = loader_regions_;
+        const bool reverse = loader_reverse_;
+        const bool loop = loader_loop_;
+        const std::int64_t hint = loader_hint_;
+        loader_hint_ = -1;
+        lock.unlock();
+        if (!regions.empty()) {
+            prefetch_regions(regions, hint >= 0 ? hint : engine_.position_frames(), reverse, loop);
+        }
+        lock.lock();
+    }
 }
 
 bool Session::start_audio(std::string* error) {
@@ -168,15 +359,40 @@ bool Session::add_track_from_file(const std::filesystem::path& path, std::string
         set_error(error, "the track limit is reached");
         return false;
     }
-    auto clip = audio::load_clip(path, config_.sample_rate, config_.channels, error);
+    CacheWriter writer;
+    const std::filesystem::path cache = new_cache_file("import");
+    if (cache.empty() || !writer.open(cache, config_.channels, config_.sample_rate)) {
+        set_error(error, "cannot create a cache file in the folder for temporary files");
+        return false;
+    }
+    const std::int64_t frames = audio::decode_stream(
+        path, config_.sample_rate, config_.channels,
+        [&writer](const float* data, std::size_t count) { return writer.write(data, count); },
+        error);
+    if (frames < 0) {
+        writer.discard();
+        return false;
+    }
+    if (writer.failed()) {
+        writer.discard();
+        set_error(error, "cannot write the cache file (is the disk full?)");
+        return false;
+    }
+    if (frames == 0) {
+        writer.discard();
+        set_error(error, "the file contains no audio");
+        return false;
+    }
+    Overview overview;
+    auto clip = writer.finish(&overview, error);
     if (!clip) {
         return false;
     }
-    return add_track(path.filename().u8string(), std::move(clip), error);
+    return add_track(path.filename().u8string(), std::move(clip), error, &overview);
 }
 
 bool Session::add_track(std::string name, std::shared_ptr<const core::ClipData> clip,
-                        std::string* error) {
+                        std::string* error, Overview* overview) {
     if (tracks_.size() >= core::Engine::kMaxTracks) {
         set_error(error, "the track limit is reached");
         return false;
@@ -191,7 +407,7 @@ bool Session::add_track(std::string name, std::shared_ptr<const core::ClipData> 
     if (clip->frames() > 0) {
         auto source = std::make_shared<Source>();
         source->name = std::move(name);
-        source->overview = make_overview(*clip);
+        source->overview = overview != nullptr ? std::move(*overview) : make_overview(*clip);
         source->clip = std::move(clip);
 
         RegionInfo region;
@@ -250,6 +466,7 @@ void Session::sync_track_regions(std::size_t index) {
         regions.push_back(std::move(region));
     }
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions);
+    update_streaming();
 }
 
 // Copies tracks_[first..] into the engine's track slots and empties the slot after the last one.
@@ -519,38 +736,63 @@ bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
         return false;
     }
 
+    // The joined audio is mixed block by block into a new cache file.
     const std::size_t channels = config_.channels;
-    auto clip = std::make_shared<core::ClipData>();
-    clip->channels = config_.channels;
-    clip->sample_rate = config_.sample_rate;
-    clip->samples.assign(static_cast<std::size_t>(length) * channels, 0.0f);
-    for (const std::size_t index : regions) {
-        const RegionInfo& region = list[index];
-        // The same fade shapes as the engine uses; the outer fades are kept, not applied.
-        const std::int64_t fade_in = &region == first ? 0 : region.fade_in;
-        const std::int64_t fade_out = &region == last ? 0 : region.fade_out;
-        const float* src =
-            region.source->clip->samples.data() + static_cast<std::size_t>(region.offset) * channels;
-        float* dst = clip->samples.data() + static_cast<std::size_t>(region.start - begin) * channels;
-        for (std::int64_t f = 0; f < region.length; ++f) {
-            float gain = 1.0f;
-            if (f < fade_in) {
-                gain = (static_cast<float>(f) + 0.5f) / static_cast<float>(fade_in);
+    CacheWriter writer;
+    const std::filesystem::path cache = new_cache_file("joined");
+    if (cache.empty() || !writer.open(cache, config_.channels, config_.sample_rate)) {
+        return false;
+    }
+    const std::int64_t block = 65536;
+    std::vector<float> mix(static_cast<std::size_t>(block) * channels);
+    std::vector<float> piece(static_cast<std::size_t>(block) * channels);
+    for (std::int64_t at = begin; at < begin + length; at += block) {
+        const std::int64_t count = std::min(block, begin + length - at);
+        std::fill(mix.begin(), mix.end(), 0.0f);
+        for (const std::size_t index : regions) {
+            const RegionInfo& region = list[index];
+            const std::int64_t from = std::max(at, region.start);
+            const std::int64_t to = std::min(at + count, region.end());
+            if (from >= to) {
+                continue;
             }
-            const std::int64_t remaining = region.length - 1 - f;
-            if (remaining < fade_out) {
-                gain *= (static_cast<float>(remaining) + 0.5f) / static_cast<float>(fade_out);
-            }
-            const std::size_t at = static_cast<std::size_t>(f) * channels;
-            for (std::size_t c = 0; c < channels; ++c) {
-                dst[at + c] += src[at + c] * gain;
+            // The same fade shapes as the engine uses; the outer fades are kept, not applied.
+            const std::int64_t fade_in = &region == first ? 0 : region.fade_in;
+            const std::int64_t fade_out = &region == last ? 0 : region.fade_out;
+            const std::size_t got = core::read_clip_frames(
+                *region.source->clip, region.offset + (from - region.start),
+                static_cast<std::size_t>(to - from), piece.data());
+            for (std::size_t k = 0; k < got; ++k) {
+                const std::int64_t f = from - region.start + static_cast<std::int64_t>(k);
+                float gain = 1.0f;
+                if (f < fade_in) {
+                    gain = (static_cast<float>(f) + 0.5f) / static_cast<float>(fade_in);
+                }
+                const std::int64_t remaining = region.length - 1 - f;
+                if (remaining < fade_out) {
+                    gain *= (static_cast<float>(remaining) + 0.5f) / static_cast<float>(fade_out);
+                }
+                float* dst = mix.data() + static_cast<std::size_t>(from - at + static_cast<std::int64_t>(k)) * channels;
+                const float* src = piece.data() + k * channels;
+                for (std::size_t c = 0; c < channels; ++c) {
+                    dst[c] += src[c] * gain;
+                }
             }
         }
+        if (!writer.write(mix.data(), static_cast<std::size_t>(count))) {
+            writer.discard();
+            return false;
+        }
+    }
+    Overview overview;
+    auto clip = writer.finish(&overview);
+    if (!clip) {
+        return false;
     }
 
     auto source = std::make_shared<Source>();
     source->name = first->source->name;
-    source->overview = make_overview(*clip);
+    source->overview = std::move(overview);
     source->clip = std::move(clip);
 
     RegionInfo merged;
@@ -637,16 +879,23 @@ void Session::set_record_offset_frames(std::int64_t frames) noexcept {
     record_offset_ = std::clamp(frames, -limit, limit);
 }
 
-std::int64_t Session::recorded_frames() const noexcept {
-    return static_cast<std::int64_t>(take_.size() / config_.channels);
-}
+std::int64_t Session::recorded_frames() const noexcept { return take_writer_.frames(); }
 
 bool Session::start_recording(std::size_t track) {
     if (recording_) {
         return false;
     }
+    // The take goes straight to a cache file. Input left over from an earlier take is thrown
+    // away first, while no file is open.
+    take_writer_.discard();
+    drain_recording();
+    const std::filesystem::path cache = new_cache_file("take");
+    if (cache.empty() || !take_writer_.open(cache, config_.channels, config_.sample_rate)) {
+        return false;
+    }
     if (track >= tracks_.size()) {
         if (tracks_.size() >= core::Engine::kMaxTracks) {
+            take_writer_.discard();
             return false;
         }
         TrackInfo info;
@@ -656,19 +905,12 @@ bool Session::start_recording(std::size_t track) {
         track = tracks_.size() - 1;
     }
 
-    take_.clear();
-    drain_recording();  // throw away input left over from an earlier take
-    take_.clear();
-    take_overview_ = Overview();
-    take_bucket_fill_ = 0;
-    take_clipped_ = false;
-
     record_track_ = track;
     record_seen_ = false;
     stop_requested_ = false;
     recording_ = true;
     engine_.start_recording();
-    engine_.play();
+    play();
     return true;
 }
 
@@ -691,16 +933,16 @@ void Session::drain_recording() {
         if (frames == 0) {
             break;
         }
-        take_.insert(take_.end(), drain_buffer_.begin(),
-                     drain_buffer_.begin() + static_cast<std::ptrdiff_t>(frames * channels));
-        extend_take_overview(drain_buffer_.data(), frames);
+        take_writer_.write(drain_buffer_.data(), frames);  // ignored when no take is open
     }
 }
 
-// Adds recorded frames to the waveform of the running take and notes overloads.
-void Session::extend_take_overview(const float* interleaved, std::size_t frames) {
-    const std::size_t channels = config_.channels;
-    const std::size_t bucket = take_overview_.frames_per_bucket;
+// ---- Overviews and cache files -----------------------------------------------------------
+
+bool extend_overview(Overview& overview, std::size_t& fill, const float* interleaved,
+                     std::size_t frames, std::size_t channels) {
+    bool clipped = false;
+    const std::size_t bucket = overview.frames_per_bucket;
     for (std::size_t i = 0; i < frames; ++i) {
         const float* frame = interleaved + i * channels;
         float low = frame[0];
@@ -710,19 +952,98 @@ void Session::extend_take_overview(const float* interleaved, std::size_t frames)
             high = std::max(high, frame[c]);
         }
         if (high >= 0.999f || low <= -0.999f) {
-            take_clipped_ = true;
+            clipped = true;
         }
-        if (take_bucket_fill_ == 0) {
-            take_overview_.minimum.push_back(low);
-            take_overview_.maximum.push_back(high);
+        if (fill == 0) {
+            overview.minimum.push_back(low);
+            overview.maximum.push_back(high);
         } else {
-            take_overview_.minimum.back() = std::min(take_overview_.minimum.back(), low);
-            take_overview_.maximum.back() = std::max(take_overview_.maximum.back(), high);
+            overview.minimum.back() = std::min(overview.minimum.back(), low);
+            overview.maximum.back() = std::max(overview.maximum.back(), high);
         }
-        if (++take_bucket_fill_ == bucket) {
-            take_bucket_fill_ = 0;
+        if (++fill == bucket) {
+            fill = 0;
         }
     }
+    return clipped;
+}
+
+CacheWriter::~CacheWriter() { discard(); }
+
+bool CacheWriter::open(const std::filesystem::path& path, std::uint32_t channels,
+                       std::uint32_t sample_rate) {
+    discard();
+    if (channels == 0) {
+        return false;
+    }
+    file_ = core::open_file(path, "wb");
+    if (file_ == nullptr) {
+        return false;
+    }
+    path_ = path;
+    channels_ = channels;
+    sample_rate_ = sample_rate;
+    return true;
+}
+
+bool CacheWriter::write(const float* interleaved, std::size_t frames) {
+    if (file_ == nullptr || failed_) {
+        return false;
+    }
+    if (frames == 0) {
+        return true;
+    }
+    if (std::fwrite(interleaved, sizeof(float) * channels_, frames, file_) != frames) {
+        failed_ = true;
+        return false;
+    }
+    frames_ += static_cast<std::int64_t>(frames);
+    if (extend_overview(overview_, fill_, interleaved, frames, channels_)) {
+        clipped_ = true;
+    }
+    return true;
+}
+
+std::shared_ptr<const core::ClipData> CacheWriter::finish(Overview* overview, std::string* error) {
+    if (file_ == nullptr) {
+        set_error(error, "nothing was written");
+        return nullptr;
+    }
+    const bool closed = std::fclose(file_) == 0;
+    file_ = nullptr;
+    std::shared_ptr<const core::ClipData> result;
+    if (!closed || failed_) {
+        set_error(error, "cannot write the cache file (is the disk full?)");
+        std::error_code code;
+        std::filesystem::remove(path_, code);
+    } else if (auto disk = core::PagedFile::open(path_, channels_, error)) {
+        auto clip = std::make_shared<core::ClipData>();
+        clip->channels = channels_;
+        clip->sample_rate = sample_rate_;
+        clip->disk = std::move(disk);
+        result = std::move(clip);
+        if (overview != nullptr) {
+            *overview = std::move(overview_);
+        }
+    }
+    path_.clear();
+    discard();  // resets the rest
+    return result;
+}
+
+void CacheWriter::discard() {
+    if (file_ != nullptr) {
+        std::fclose(file_);
+        file_ = nullptr;
+        std::error_code code;
+        std::filesystem::remove(path_, code);
+    }
+    path_.clear();
+    frames_ = 0;
+    overview_ = Overview();
+    fill_ = 0;
+    clipped_ = false;
+    failed_ = false;
 }
 
 // Turns the finished take into a region on the recorded track.
@@ -731,21 +1052,20 @@ void Session::finish_take() {
     recording_ = false;
 
     const std::int64_t start = engine_.record_start_frame();
-    const std::size_t channels = config_.channels;
-    if (take_.size() < channels || start < 0 || record_track_ >= tracks_.size()) {
-        take_.clear();
+    if (take_writer_.frames() < 1 || start < 0 || record_track_ >= tracks_.size()) {
+        take_writer_.discard();
         return;  // nothing was recorded, or the track was removed meanwhile
     }
 
-    auto clip = std::make_shared<core::ClipData>();
-    clip->channels = config_.channels;
-    clip->sample_rate = config_.sample_rate;
-    clip->samples = std::move(take_);
-    take_.clear();
+    Overview overview;
+    auto clip = take_writer_.finish(&overview);
+    if (!clip) {
+        return;
+    }
 
     auto source = std::make_shared<Source>();
     source->name = "Take " + std::to_string(++take_count_);
-    source->overview = make_overview(*clip);
+    source->overview = std::move(overview);
     source->clip = std::move(clip);
 
     RegionInfo region;
@@ -818,6 +1138,7 @@ bool Session::render_project(const std::function<bool(const float*, std::uint32_
         offline->set_track_solo(slot, track.solo);
     }
     offline->set_gain(master_gain_);
+    offline->set_blocking_reads(true);  // an export may wait for the disk
     offline->play(false);  // no fade-in: the file starts exactly like the project
 
     const std::uint32_t block = 4096;
@@ -882,7 +1203,12 @@ bool Session::set_master_gain(float linear) {
     return true;
 }
 
-void Session::play() { engine_.play(); }
+void Session::play() {
+    if (!engine_.is_playing()) {
+        prefetch_now(engine_.position_frames());  // the first pages are there from the start
+    }
+    engine_.play();
+}
 
 void Session::pause() { engine_.pause(); }
 
@@ -890,31 +1216,43 @@ void Session::toggle_play() {
     if (engine_.is_playing()) {
         engine_.pause();
     } else {
-        engine_.play();
+        play();
     }
 }
 
 void Session::stop() { engine_.stop(); }
 
 void Session::seek_frames(std::int64_t frame) {
-    engine_.seek(std::clamp<std::int64_t>(frame, 0, length_frames_));
+    const std::int64_t target = std::clamp<std::int64_t>(frame, 0, length_frames_);
+    engine_.seek(target);
+    if (engine_.is_playing()) {
+        prefetch_now(target);  // a jump during playback should not leave a gap
+    }
+    {
+        const std::lock_guard<std::mutex> lock(loader_mutex_);
+        loader_hint_ = target;
+        loader_wake_ = true;
+    }
+    loader_cv_.notify_one();
 }
 
 void Session::set_loop(bool enabled) {
     if (engine_.set_loop(enabled)) {
         loop_ = enabled;
+        update_streaming();
     }
 }
 
 void Session::set_reverse(bool reverse) {
     if (engine_.set_reverse(reverse)) {
         reverse_ = reverse;
+        update_streaming();
     }
 }
 
 void Session::toggle_reverse() {
     set_reverse(!reverse_);
-    engine_.play();  // no effect when it is already playing
+    play();  // no effect when it is already playing
 }
 
 bool Session::set_metronome(const MetronomeSettings& settings) {

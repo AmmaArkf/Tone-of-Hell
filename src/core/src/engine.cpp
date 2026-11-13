@@ -762,6 +762,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
             // Collect the track's regions (with their fades) in a scratch buffer first.
             float* scratch = track_mix_.data();
             bool any_region = false;
+            std::uint64_t misses = 0;
             for (const Region& region : track.content->regions) {
                 const std::int64_t begin = region.start;
                 const std::int64_t end = region.start + region.length;
@@ -773,6 +774,8 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                     any_region = true;
                 }
                 const float* clip_samples = region.clip->samples.data();
+                PagedFile* const disk = region.clip->disk.get();
+                std::array<float, 16> from_disk{};
                 for (std::uint32_t i = 0; i < frames; ++i) {
                     const std::int64_t position = frame_pos_[i];
                     if (position < begin || position >= end) {
@@ -789,13 +792,32 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                         region_fade *= (static_cast<float>(remaining) + 0.5f) /
                                        static_cast<float>(region.fade_out);
                     }
-                    const float* src =
-                        clip_samples + static_cast<std::size_t>(region.offset + into) * channels;
+                    const float* src = nullptr;
+                    if (disk != nullptr) {
+                        // From disk: the page must be in memory already, unless this engine
+                        // renders offline and may wait for it.
+                        const std::int64_t frame = region.offset + into;
+                        const bool read =
+                            channels <= from_disk.size() &&
+                            (blocking_reads_ ? disk->read_frame_blocking(frame, from_disk.data())
+                                             : disk->read_frame(frame, from_disk.data()));
+                        if (!read) {
+                            ++misses;
+                            continue;
+                        }
+                        src = from_disk.data();
+                    } else {
+                        src = clip_samples + static_cast<std::size_t>(region.offset + into) * channels;
+                    }
                     float* dst = scratch + static_cast<std::size_t>(i) * channels;
                     for (std::size_t c = 0; c < channels; ++c) {
                         dst[c] += src[c] * region_fade;
                     }
                 }
+            }
+
+            if (misses != 0) {
+                disk_misses_.fetch_add(misses, std::memory_order_relaxed);
             }
 
             float* destination = master;

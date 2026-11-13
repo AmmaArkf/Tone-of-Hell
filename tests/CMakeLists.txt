@@ -9,6 +9,7 @@ add_executable(toh_tests
     test_session.cpp
     test_settings.cpp
     test_spsc_queue.cpp
+    test_streaming.cpp
     test_transport.cpp)
 
 target_include_directories(toh_tests SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/doctest)

@@ -28,7 +28,9 @@ std::shared_ptr<ClipData> counting_clip(std::size_t frames) {
 }
 
 float joined_sample(const RegionInfo& region, std::int64_t frame) {
-    return region.source->clip->samples[static_cast<std::size_t>(region.offset + frame) * 2];
+    float value[2] = {};
+    toh::core::read_clip_frames(*region.source->clip, region.offset + frame, 1, value);
+    return value[0];
 }
 
 }  // namespace

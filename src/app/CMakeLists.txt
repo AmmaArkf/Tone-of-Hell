@@ -6,7 +6,7 @@ add_library(toh_app STATIC
 
 target_include_directories(toh_app PUBLIC include)
 target_link_libraries(toh_app
-    PUBLIC toh_core toh_audio
+    PUBLIC toh_core toh_audio Threads::Threads
     PRIVATE toh_warnings)
 
 # Build information shown in the user interfaces. The commit is read when CMake configures the

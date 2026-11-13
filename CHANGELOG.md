@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.14
+
+- Audio is played from disk instead of being held in memory. Imported files, recordings and joined regions are written to a cache folder and read in pages of 1 MB: at most six pages per file are in memory, loaded by a separate thread ahead of the playhead (backwards too, and at the loop start). Exports read the disk directly.
+- Imported files no longer have a 30-minute limit.
+- Until projects can be saved, the cache folder lies in the system's folder for temporary files ("Tone of Hell/session-..."). It is removed when the program closes; folders left behind after a crash are removed a week later.
+
 ## 0.0.13
 
 - Regions no longer jump to the grid: they follow the mouse smoothly. The grid is only drawn.

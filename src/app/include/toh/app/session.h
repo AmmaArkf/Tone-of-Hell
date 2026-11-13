@@ -1,11 +1,15 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "toh/audio/audio_device.h"
@@ -29,6 +33,50 @@ struct Overview {
 
 /// Builds the waveform overview of a clip.
 Overview make_overview(const core::ClipData& clip, std::uint32_t frames_per_bucket = 256);
+
+/// Adds frames to a growing overview. `fill` counts the frames already in its last bucket
+/// (0 for a new overview). Returns true when a sample reached full scale.
+bool extend_overview(Overview& overview, std::size_t& fill, const float* interleaved,
+                     std::size_t frames, std::size_t channels);
+
+/// Writes audio to a cache file of raw float samples and builds its overview on the way. The
+/// finished file is played from disk in pages of 1 MB (see core::PagedFile).
+class CacheWriter {
+public:
+    CacheWriter() = default;
+    ~CacheWriter();
+    CacheWriter(const CacheWriter&) = delete;
+    CacheWriter& operator=(const CacheWriter&) = delete;
+
+    /// Creates the file (replacing an earlier one that was not finished).
+    bool open(const std::filesystem::path& path, std::uint32_t channels,
+              std::uint32_t sample_rate);
+    bool is_open() const noexcept { return file_ != nullptr; }
+    /// Appends interleaved frames. Returns false when nothing is open or the disk refused
+    /// them (for example because it is full).
+    bool write(const float* interleaved, std::size_t frames);
+    std::int64_t frames() const noexcept { return frames_; }
+    const Overview& overview() const noexcept { return overview_; }
+    bool clipped() const noexcept { return clipped_; }
+    bool failed() const noexcept { return failed_; }
+    /// Closes the file and opens it for playing. Moves the overview to `overview` (if given).
+    /// Returns null on failure. Either way the writer is empty afterwards.
+    std::shared_ptr<const core::ClipData> finish(Overview* overview = nullptr,
+                                                 std::string* error = nullptr);
+    /// Closes and deletes an unfinished file.
+    void discard();
+
+private:
+    std::FILE* file_ = nullptr;
+    std::filesystem::path path_;
+    std::uint32_t channels_ = 0;
+    std::uint32_t sample_rate_ = 0;
+    std::int64_t frames_ = 0;
+    Overview overview_;
+    std::size_t fill_ = 0;
+    bool clipped_ = false;
+    bool failed_ = false;
+};
 
 /// An audio file (or generated sound) that regions refer to. Never changes once created.
 struct Source {
@@ -105,12 +153,22 @@ public:
 
     // ---- Tracks --------------------------------------------------------------------------
 
-    /// Loads a file onto a new track, as one region at the start of the timeline. This call
-    /// blocks while the file is read.
+    /// Loads a file onto a new track, as one region at the start of the timeline. The file is
+    /// decoded into the cache folder and later played from there in pages of 1 MB, so it does
+    /// not have to fit in memory. This call blocks while the file is decoded.
     bool add_track_from_file(const std::filesystem::path& path, std::string* error = nullptr);
     /// Adds a track with an already loaded clip (used for test tones and by tests).
+    /// `overview` may hand over a waveform overview that is already built (it is moved from).
     bool add_track(std::string name, std::shared_ptr<const core::ClipData> clip,
-                   std::string* error = nullptr);
+                   std::string* error = nullptr, Overview* overview = nullptr);
+
+    /// The folder for the cache files of this session (imported files, recordings, joined
+    /// regions), created when it is first needed and removed with the session. Until projects
+    /// can be saved it lies in the system's folder for temporary files. Empty if it cannot be
+    /// created.
+    const std::filesystem::path& cache_folder();
+    /// Frames that were wanted from disk before they were loaded (heard as silence).
+    std::uint64_t disk_misses() const noexcept { return engine_.disk_misses(); }
     bool remove_track(std::size_t index);
     /// Adds a track without any audio, for example to record onto. Returns its index, or
     /// tracks().size() when the track limit is reached.
@@ -221,9 +279,9 @@ public:
     std::int64_t recorded_frames() const noexcept;
     /// Waveform of the running take, growing while it is recorded. Frame 0 is the first frame
     /// of the take.
-    const Overview& take_overview() const noexcept { return take_overview_; }
+    const Overview& take_overview() const noexcept { return take_writer_.overview(); }
     /// True when the running take reached full scale: the input was overloaded.
-    bool take_clipped() const noexcept { return take_clipped_; }
+    bool take_clipped() const noexcept { return take_writer_.clipped(); }
 
     // ---- Export --------------------------------------------------------------------------
 
@@ -286,7 +344,24 @@ private:
     /// returns false as soon as `sink` returns false.
     bool render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const;
     void finish_take();
-    void extend_take_overview(const float* interleaved, std::size_t frames);
+
+    // ---- Playing from disk ---------------------------------------------------------------
+    // A loader thread keeps the pages around the playhead in memory for every region whose
+    // clip is on disk. It works on a copy of those regions, sent by update_streaming().
+
+    struct StreamRegion {
+        std::shared_ptr<core::PagedFile> file;
+        std::int64_t start = 0;
+        std::int64_t offset = 0;
+        std::int64_t length = 0;
+    };
+    std::filesystem::path new_cache_file(const char* kind);
+    void update_streaming();
+    /// Loads the pages around `position` now, on the calling thread.
+    void prefetch_now(std::int64_t position);
+    void prefetch_regions(const std::vector<StreamRegion>& regions, std::int64_t position,
+                          bool reverse, bool loop);
+    void loader_main();
 
     audio::DeviceConfig config_;
     core::Engine engine_;
@@ -308,12 +383,23 @@ private:
     bool stop_requested_ = false;
     std::size_t record_track_ = kNewTrack;
     std::int64_t record_offset_ = 0;
-    std::vector<float> take_;          // the input recorded so far
+    CacheWriter take_writer_;  // the input recorded so far, written to the cache folder
     std::vector<float> drain_buffer_;
-    Overview take_overview_;
-    std::size_t take_bucket_fill_ = 0;  // frames already in the last bucket of take_overview_
-    bool take_clipped_ = false;
     int take_count_ = 0;
+
+    std::filesystem::path cache_folder_;
+    int cache_count_ = 0;
+
+    std::mutex loader_mutex_;  // guards the loader_ members below
+    std::condition_variable loader_cv_;
+    std::vector<StreamRegion> loader_regions_;
+    bool loader_reverse_ = false;
+    bool loader_loop_ = false;
+    bool loader_wake_ = false;
+    bool loader_stop_ = false;
+    std::int64_t loader_hint_ = -1;  // a position just jumped to, not yet seen by the engine
+    std::mutex prefetch_mutex_;      // one thread at a time fills the pages
+    std::thread loader_;             // last: started when everything else exists
 };
 
 }  // namespace toh::app

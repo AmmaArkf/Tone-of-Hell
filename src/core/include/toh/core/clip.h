@@ -5,22 +5,34 @@
 #include <memory>
 #include <vector>
 
+#include "toh/core/paged_file.h"
+
 namespace toh::core {
 
-/// A block of audio held completely in memory: interleaved 32-bit float samples.
+/// A block of audio: interleaved 32-bit float samples, either held in memory (`samples`) or
+/// kept in a cache file on disk that is read in pages of 1 MB (`disk`, with `samples` empty).
 ///
 /// A clip is immutable once it has been handed to the engine, so the audio thread can read it
 /// without any locking.
 struct ClipData {
     std::vector<float> samples;
+    std::shared_ptr<PagedFile> disk;
     std::uint32_t channels = 0;
     std::uint32_t sample_rate = 0;
 
     /// Number of frames (one frame holds one sample for every channel).
     std::int64_t frames() const noexcept {
+        if (disk != nullptr) {
+            return disk->frames();
+        }
         return channels == 0 ? 0 : static_cast<std::int64_t>(samples.size() / channels);
     }
 };
+
+/// Copies up to `count` frames starting at `first` to `out`, from memory or from the disk.
+/// For normal threads only (it may wait for the disk). Returns the number of frames copied.
+std::size_t read_clip_frames(const ClipData& clip, std::int64_t first, std::size_t count,
+                             float* out);
 
 /// Generates a sine tone. When `seconds * frequency_hz` is a whole number the clip loops
 /// without a click. Not real-time safe (it allocates).

@@ -186,6 +186,16 @@ public:
     void render(const float* in, float* out, std::uint32_t frames) noexcept;
     void render(float* out, std::uint32_t frames) noexcept { render(nullptr, out, frames); }
 
+    /// Makes clips on disk wait for the disk instead of playing silence for frames that are
+    /// not loaded yet. Only for engines that render offline (exports), never for a live one.
+    /// Set it before the first render().
+    void set_blocking_reads(bool enabled) noexcept { blocking_reads_ = enabled; }
+    /// Frames that the audio thread wanted from clips on disk before they were loaded (they
+    /// were played as silence). Any thread.
+    std::uint64_t disk_misses() const noexcept {
+        return disk_misses_.load(std::memory_order_relaxed);
+    }
+
 private:
     static constexpr std::uint32_t kBlockFrames = 512;  // internal processing block
 
@@ -335,6 +345,8 @@ private:
     std::atomic<float> input_peak_{0.0f};
     std::atomic<std::int64_t> record_start_{-1};
     std::atomic<std::uint64_t> record_dropped_{0};
+    std::atomic<std::uint64_t> disk_misses_{0};
+    bool blocking_reads_ = false;
 };
 
 }  // namespace toh::core
