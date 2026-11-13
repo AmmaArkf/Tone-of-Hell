@@ -58,6 +58,7 @@ TEST_CASE("Settings survive saving and loading") {
     saved.record_offset_frames = 1234;
     saved.shortcuts[static_cast<std::size_t>(Action::Split)] = "Ctrl+Shift+X";
     saved.play_selected_only = true;
+    saved.magnet = false;
     saved.shortcuts[static_cast<std::size_t>(Action::Record)] = "";
     REQUIRE(saved.save(path));
 
@@ -71,6 +72,7 @@ TEST_CASE("Settings survive saving and loading") {
     CHECK(loaded.record_offset_frames == 1234);
     CHECK(loaded.shortcut(Action::Split) == "Ctrl+Shift+X");
     CHECK(loaded.play_selected_only);
+    CHECK_FALSE(loaded.magnet);
     CHECK(loaded.shortcut(Action::Record).empty());
     CHECK(loaded.shortcut(Action::PlayPause) == "Space");
 

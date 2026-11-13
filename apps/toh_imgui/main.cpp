@@ -148,6 +148,7 @@ struct UiState {
     std::size_t drag_region = 0;
     std::int64_t drag_grab = 0;    // distance from the region start to the grabbed frame
     std::int64_t magnet_frame = -1;  // the edge a dragged region sticks to, or -1
+    bool magnet_end = false;         // true when it is the end of the region that sticks
     float scroll_grab = 0.0f;      // where the timeline scrollbar thumb was grabbed
 
     bool quit = false;             // "Exit" was chosen in the menu
@@ -265,6 +266,41 @@ bool toggle_button(const char* label, bool active, const ImVec4& active_colour,
     const bool clicked = small ? ImGui::SmallButton(label) : ImGui::Button(label);
     if (active) {
         ImGui::PopStyleColor(2);
+    }
+    return clicked;
+}
+
+// The magnet button of the toolbar: a horseshoe magnet, coloured when it is on.
+bool magnet_button(bool on) {
+    const float size = ImGui::GetFrameHeight();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const bool clicked = ImGui::InvisibleButton("magnet", ImVec2(size, size));
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    ImU32 background = ImGui::GetColorU32(hovered ? ImGuiCol_ButtonHovered : ImGuiCol_Button);
+    if (on) {
+        background = hovered ? IM_COL32(70, 110, 180, 255) : IM_COL32(50, 90, 160, 255);
+    }
+    d->AddRectFilled(origin, ImVec2(origin.x + size, origin.y + size), background, style.FrameRounding);
+
+    const float cx = origin.x + size * 0.5f;
+    const float cy = origin.y + size * 0.5f;
+    const float radius = size * 0.24f;
+    const float thick = size * 0.16f;
+    const float top = origin.y + size * 0.2f;
+    const ImU32 body = on ? IM_COL32(225, 60, 60, 255) : IM_COL32(150, 150, 160, 255);
+    const ImU32 tips = on ? IM_COL32(235, 235, 240, 255) : IM_COL32(190, 190, 200, 255);
+    d->PathArcTo(ImVec2(cx, cy), radius, 0.0f, 3.14159265f, 16);
+    d->PathStroke(body, ImDrawFlags_None, thick);
+    d->AddLine(ImVec2(cx - radius, cy), ImVec2(cx - radius, top + thick), body, thick);
+    d->AddLine(ImVec2(cx + radius, cy), ImVec2(cx + radius, top + thick), body, thick);
+    d->AddRectFilled(ImVec2(cx - radius - thick * 0.5f, top), ImVec2(cx - radius + thick * 0.5f, top + thick), tips);
+    d->AddRectFilled(ImVec2(cx + radius - thick * 0.5f, top), ImVec2(cx + radius + thick * 0.5f, top + thick), tips);
+    if (!on) {
+        d->AddLine(ImVec2(origin.x + size * 0.18f, origin.y + size * 0.82f),
+                   ImVec2(origin.x + size * 0.82f, origin.y + size * 0.18f), IM_COL32(230, 90, 80, 230),
+                   2.0f);
     }
     return clicked;
 }
@@ -1263,9 +1299,8 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         }
         ImGui::Separator();
         ImGui::MenuItem(T_("Follow the playhead"), nullptr, &ui.follow);
-        bool snap = session.snap();
-        if (ImGui::MenuItem(T_("Snap to the grid"), nullptr, &snap)) {
-            session.set_snap(snap);
+        if (ImGui::MenuItem(T_("Magnet: stick to region edges"), nullptr, &ui.settings.magnet)) {
+            ui.settings_changed = true;
         }
         if (ImGui::BeginMenu(T_("Grid step"))) {
             static const char* const names[] = {"Bars", "Beats", "1/2 beats", "1/4 beats",
@@ -1350,7 +1385,7 @@ void draw_dialogs(UiState& ui) {
                 {"Wheel, region selected", "Scroll the track list up and down"},
                 {"Drag a region", "Move it; drag an edge to trim it"},
                 {"Drag a top corner square", "Fade in or fade out"},
-                {"Alt while dragging", "Ignore the grid"},
+                {"Alt while dragging", "Do not stick to edges"},
                 {"Right-click a region", "Menu: split, remove fades, remove"},
                 {"Click the ruler or an empty lane", "Move the playhead"},
                 {"Double-click a slider", "Back to its normal value"},
@@ -1585,11 +1620,17 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     tooltip(T_("Every file becomes a new track. You can also drop files onto the window."));
 
     ImGui::SameLine();
-    bool snap = session.snap();
-    if (ImGui::Checkbox(T_("Snap to"), &snap)) {
-        session.set_snap(snap);
+    if (magnet_button(ui.settings.magnet)) {
+        ui.settings.magnet = !ui.settings.magnet;
+        ui.settings_changed = true;
     }
-    tooltip(T_("Moved and trimmed regions jump to the grid. Hold Alt while dragging to switch it off."));
+    tooltip(T_(ui.settings.magnet
+                   ? "Magnet on: dragged regions stick to the edges of other regions.\n"
+                     "Click to switch it off, or hold Alt while dragging."
+                   : "Magnet off: regions move freely. Click to switch it on."));
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(T_("Grid:"));
     ImGui::SameLine();
     static const char* const step_names[] = {"bars", "beats", "1/2 beats", "1/4 beats",
                                              "none (no grid)"};
@@ -1790,11 +1831,23 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
 }
 
 // Edges of other regions (on every track), the playhead and the start of the timeline attract
-// a dragged edge that comes within a few pixels. Returns the nearest such frame, or -1.
+// a dragged edge that comes within `reach` pixels. Returns the nearest such frame, or -1.
+// `held` is the edge it is stuck to already, or -1: that one holds on until the mouse is
+// clearly away from it, so the region does not flicker between nearby edges.
 std::int64_t nearest_magnet(const Session& session, const View& view, std::size_t track_index,
-                            std::size_t region_index, std::int64_t frame, float* distance = nullptr) {
+                            std::size_t region_index, std::int64_t frame, float reach,
+                            std::int64_t held, float* distance = nullptr) {
     const float x = frame_to_x(session, view, frame);
-    float best_distance = 0.6f * ImGui::GetFontSize();
+    if (held >= 0) {
+        const float d = std::fabs(frame_to_x(session, view, held) - x);
+        if (d <= 2.0f * reach) {
+            if (distance != nullptr) {
+                *distance = d;
+            }
+            return held;
+        }
+    }
+    float best_distance = reach;
     std::int64_t best = -1;
     const auto consider = [&](std::int64_t candidate) {
         const float d = std::fabs(frame_to_x(session, view, candidate) - x);
@@ -1804,7 +1857,9 @@ std::int64_t nearest_magnet(const Session& session, const View& view, std::size_
         }
     };
     consider(0);
-    consider(session.position_frames());
+    if (!session.is_playing()) {
+        consider(session.position_frames());  // a moving playhead would make regions twitch
+    }
     for (std::size_t t = 0; t < session.tracks().size(); ++t) {
         const auto& regions = session.tracks()[t].regions;
         for (std::size_t r = 0; r < regions.size(); ++r) {
@@ -2018,24 +2073,26 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     // The drag itself.
     if (dragging_here && ImGui::IsItemActive()) {
         const std::int64_t mouse_frame = x_to_frame(session, view, io.MousePos.x);
-        const auto snapped = [&](std::int64_t frame) {
-            return io.KeyAlt ? frame : session.snap_frame(frame);
-        };
         const bool moved = ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f);
         const bool region_exists = ui.drag_region < track.regions.size();
-        // A dragged edge sticks to a nearby edge first; otherwise it follows the grid.
+        // Regions follow the mouse smoothly; with the magnet on, an edge that comes close to
+        // another edge sticks to it. Alt switches the magnet off while it is held.
+        const bool magnet_on = ui.settings.magnet && !io.KeyAlt;
+        const float reach = 0.5f * ImGui::GetFontSize();
         const auto stuck = [&](std::int64_t frame) {
+            const std::int64_t held = ui.magnet_frame;
             ui.magnet_frame = -1;
-            if (io.KeyAlt) {
+            if (!magnet_on) {
                 return frame;
             }
             const std::int64_t magnet =
-                nearest_magnet(session, view, track_index, ui.drag_region, frame);
+                nearest_magnet(session, view, track_index, ui.drag_region, frame, reach, held);
+            ui.magnet_end = false;
             if (magnet >= 0) {
                 ui.magnet_frame = magnet;
                 return magnet;
             }
-            return session.snap_frame(frame);
+            return frame;
         };
         switch (ui.drag) {
             case DragKind::Seek:
@@ -2045,28 +2102,35 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                 break;
             case DragKind::Move:
                 if (moved && region_exists) {
-                    // Either end of the region may stick; the closer one wins.
+                    // Either end of the region may stick. The end that already sticks keeps
+                    // priority; otherwise the closer one wins.
                     const std::int64_t length = track.regions[ui.drag_region].length;
-                    std::int64_t start = mouse_frame - ui.drag_grab;
-                    float start_distance = 0.0f;
-                    float end_distance = 0.0f;
-                    const std::int64_t to_start =
-                        io.KeyAlt ? -1
-                                  : nearest_magnet(session, view, track_index, ui.drag_region,
-                                                   start, &start_distance);
-                    const std::int64_t to_end =
-                        io.KeyAlt ? -1
-                                  : nearest_magnet(session, view, track_index, ui.drag_region,
-                                                   start + length, &end_distance);
+                    std::int64_t start = std::max<std::int64_t>(mouse_frame - ui.drag_grab, 0);
+                    const std::int64_t held = ui.magnet_frame;
+                    const bool held_end = ui.magnet_end;
                     ui.magnet_frame = -1;
-                    if (to_start >= 0 && (to_end < 0 || start_distance <= end_distance)) {
-                        start = to_start;
-                        ui.magnet_frame = to_start;
-                    } else if (to_end >= 0 && to_end - length >= 0) {
-                        start = to_end - length;
-                        ui.magnet_frame = to_end;
-                    } else {
-                        start = snapped(start);
+                    if (magnet_on) {
+                        float start_distance = 0.0f;
+                        float end_distance = 0.0f;
+                        const std::int64_t to_start =
+                            nearest_magnet(session, view, track_index, ui.drag_region, start, reach,
+                                           held_end ? -1 : held, &start_distance);
+                        const std::int64_t to_end = nearest_magnet(
+                            session, view, track_index, ui.drag_region, start + length, reach,
+                            held_end ? held : -1, &end_distance);
+                        const bool end_fits = to_end >= 0 && to_end - length >= 0;
+                        const bool keep_start = held >= 0 && !held_end && to_start == held;
+                        const bool keep_end = held >= 0 && held_end && to_end == held && end_fits;
+                        if (keep_start ||
+                            (!keep_end && to_start >= 0 && (!end_fits || start_distance <= end_distance))) {
+                            start = to_start;
+                            ui.magnet_frame = to_start;
+                            ui.magnet_end = false;
+                        } else if (end_fits) {
+                            start = to_end - length;
+                            ui.magnet_frame = to_end;
+                            ui.magnet_end = true;
+                        }
                     }
                     session.move_region(track_index, ui.drag_region, start);
                 }

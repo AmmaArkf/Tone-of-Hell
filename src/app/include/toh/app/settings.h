@@ -57,6 +57,8 @@ struct Settings {
     std::int64_t record_offset_frames = -1;
     /// Only the selected tracks play (when any track is selected).
     bool play_selected_only = false;
+    /// Dragged regions and edges stick to the edges of other regions.
+    bool magnet = true;
     std::array<std::string, kActionCount> shortcuts;
 
     const std::string& shortcut(Action action) const noexcept {

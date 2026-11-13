@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.13
+
+- Regions no longer jump to the grid: they follow the mouse smoothly. The grid is only drawn.
+- Sticking to edges is steadier: an edge that sticks holds on until the mouse is clearly away, the moving playhead no longer attracts during playback, and the reach is smaller.
+- A magnet button on the toolbar (and View > Magnet) switches sticking on and off; the choice is remembered. Alt still switches it off while dragging.
+
 ## 0.0.12
 
 - Tracks can be selected: click a track name or the empty part of its header (Ctrl or Shift adds more; Escape clears). A selected track has a blue header.
