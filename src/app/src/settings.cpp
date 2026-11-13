@@ -24,6 +24,7 @@ const ActionInfo kActions[kActionCount] = {
     {Action::ZoomOut, "zoom_out", "Zoom out", ""},
     {Action::ZoomFit, "zoom_fit", "Show the whole project", "F"},
     {Action::NewTrack, "new_track", "New track", "Ctrl+T"},
+    {Action::FullScreen, "full_screen", "Full screen on or off", "F11"},
 };
 
 std::string trimmed(const std::string& text) {
@@ -97,6 +98,11 @@ bool Settings::load(const std::filesystem::path& path) {
             if (end != value.c_str()) {
                 record_offset_frames = number;
             }
+        } else if (key == "start_window") {
+            const int number = std::atoi(value.c_str());
+            if (number >= 0 && number <= 2) {
+                start_window = number;
+            }
         } else if (key == "reverse_starts_playback") {
             reverse_starts_playback = value == "1" || value == "true";
         } else if (key == "reverse_off_at_start") {
@@ -132,6 +138,7 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "record_offset_frames=" << record_offset_frames << "\n";
     file << "play_selected_only=" << (play_selected_only ? 1 : 0) << "\n";
     file << "magnet=" << (magnet ? 1 : 0) << "\n";
+    file << "start_window=" << start_window << "\n";
     file << "reverse_starts_playback=" << (reverse_starts_playback ? 1 : 0) << "\n";
     file << "reverse_off_at_start=" << (reverse_off_at_start ? 1 : 0) << "\n";
     for (std::size_t i = 0; i < kActionCount; ++i) {

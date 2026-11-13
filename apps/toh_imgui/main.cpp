@@ -969,6 +969,9 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
         case Action::NewTrack:
             add_new_track(session, ui, false);
             break;
+        case Action::FullScreen:
+            SDL_SetWindowFullscreen(window, (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) == 0);
+            break;
         case Action::Count:
             break;
     }
@@ -1061,6 +1064,24 @@ void draw_settings_window(Session& session, UiState& ui) {
             }
             ImGui::TextDisabled("%s", T_("Click a track name to select it, Ctrl+click to select several. "
                                          "With nothing selected, every track plays."));
+
+            ImGui::SeparatorText(T_("Window"));
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(T_("When the program starts"));
+            ImGui::SameLine();
+            static const char* const window_modes[] = {"normal window", "maximized window",
+                                                       "full screen"};
+            ImGui::SetNextItemWidth(12.0f * ImGui::GetFontSize());
+            if (ImGui::BeginCombo("##start window", T_(window_modes[ui.settings.start_window]))) {
+                for (int mode = 0; mode < 3; ++mode) {
+                    if (ImGui::Selectable(T_(window_modes[mode]), mode == ui.settings.start_window)) {
+                        ui.settings.start_window = mode;
+                        ui.settings_changed = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::TextDisabled("%s", T_("F11 switches full screen on and off at any time."));
 
             ImGui::SeparatorText(T_("Reverse"));
             if (ImGui::Checkbox(T_("The Reverse button starts playback"),
@@ -1315,6 +1336,10 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         }
         ImGui::Separator();
         ImGui::MenuItem(T_("Follow the playhead"), nullptr, &ui.follow);
+        const bool full_screen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
+        if (ImGui::MenuItem(T_("Full screen"), key_label(ui, Action::FullScreen), full_screen)) {
+            SDL_SetWindowFullscreen(window, !full_screen);
+        }
         if (ImGui::MenuItem(T_("Magnet: stick to region edges"), nullptr, &ui.settings.magnet)) {
             ui.settings_changed = true;
         }
@@ -2760,6 +2785,11 @@ int main(int argc, char* argv[]) {
         }
         ui.window = window;
         ui.renderer = renderer;
+        if (ui.settings.start_window == 2) {
+            SDL_SetWindowFullscreen(window, true);
+        } else if (ui.settings.start_window == 1) {
+            SDL_MaximizeWindow(window);
+        }
         toh::app::set_language(ui.settings.language);
         session.set_devices(ui.settings.output_device, ui.settings.input_device);
         session.set_master_gain(ui.settings.master_gain);

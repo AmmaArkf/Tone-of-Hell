@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.17
+
+- The window can open maximized or in full screen: Edit > Settings > General > Window.
+- F11 (and View > Full screen) switches full screen on and off.
+
 ## 0.0.16
 
 - New option "The Reverse button starts playback" (Edit > Settings > General). Switched off, the button only changes the direction, so reverse can be turned off while stopped without starting playback.

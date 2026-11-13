@@ -28,6 +28,7 @@ enum class Action {
     ZoomOut,
     ZoomFit,
     NewTrack,
+    FullScreen,
     Count
 };
 
@@ -63,6 +64,8 @@ struct Settings {
     bool reverse_starts_playback = true;
     /// Reverse switches itself off when backwards playback reaches the start.
     bool reverse_off_at_start = true;
+    /// How the window opens: 0 as a normal window, 1 maximized, 2 full screen.
+    int start_window = 0;
     std::array<std::string, kActionCount> shortcuts;
 
     const std::string& shortcut(Action action) const noexcept {
