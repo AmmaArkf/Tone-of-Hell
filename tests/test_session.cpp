@@ -117,3 +117,38 @@ TEST_CASE("Session works without a sound device") {
     }
     CHECK(session.master_gain() == 0.5f);
 }
+
+TEST_CASE("Session adds empty tracks that can be recorded onto") {
+    Session session;
+    const std::size_t first = session.add_empty_track("Guitar");
+    const std::size_t second = session.add_empty_track("Voice");
+    CHECK(first == 0);
+    CHECK(second == 1);
+    REQUIRE(session.tracks().size() == 2);
+    CHECK(session.tracks()[1].name == "Voice");
+    CHECK(session.tracks()[1].regions.empty());
+    CHECK(session.length_frames() == 0);
+
+    // Record onto the second track: the take lands there, not on a new track.
+    session.set_record_offset_frames(0);
+    REQUIRE(session.start_recording(second));
+    session.update();
+    std::vector<float> in(2 * 4800, 0.25f);
+    std::vector<float> out(in.size());
+    session.engine().render(in.data(), out.data(), 4800);
+    session.update();
+    session.stop_recording();
+    session.update();
+    session.engine().render(in.data(), out.data(), 1000);
+    session.update();
+    CHECK(session.tracks().size() == 2);
+    CHECK(session.tracks()[0].regions.empty());
+    REQUIRE(session.tracks()[1].regions.size() == 1);
+    CHECK(session.tracks()[1].regions[0].start == 0);
+
+    // The limit is respected.
+    while (session.tracks().size() < toh::core::Engine::kMaxTracks) {
+        session.add_empty_track("more");
+    }
+    CHECK(session.add_empty_track("one too many") == session.tracks().size());
+}

@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.9
+
+- Empty tracks for recording: right-click empty space in the track area (below the tracks, an empty part of a lane or of a track header) and choose "New track" or "New track for recording", which also arms it. The same is in the Edit menu, Ctrl+T adds a track, and an empty project shows a button for it.
+- An empty track says how to record onto it.
+
 ## 0.0.8
 
 - While recording, the take shows its waveform as it grows, so you can see what is being recorded. Parts that reach full scale are drawn red, and the take is marked "Input overloaded".

@@ -137,6 +137,7 @@ struct UiState {
     int capturing = -1;            // the action whose shortcut is being changed, or -1
     toh::audio::DeviceList devices;
     bool devices_listed = false;
+    bool open_track_menu = false;  // open the "add a track" menu in the track area
     bool armed = false;            // a track is chosen to record onto
     std::size_t armed_track = 0;
     bool show_help = false;
@@ -477,6 +478,21 @@ bool capture_chord(Chord& chord) {
     return false;
 }
 
+// Adds an empty track; with `arm` it is also chosen for the next recording.
+void add_new_track(Session& session, UiState& ui, bool arm) {
+    char name[64];
+    std::snprintf(name, sizeof(name), T_("Track %d"), static_cast<int>(session.tracks().size() + 1));
+    const std::size_t index = session.add_empty_track(name);
+    if (index >= session.tracks().size()) {
+        ui.error = T_("The track limit is reached.");
+        return;
+    }
+    if (arm) {
+        ui.armed = true;
+        ui.armed_track = index;
+    }
+}
+
 void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Window* window,
                     Action action) {
     const float centre_x = ui.view.lane_origin_x + ui.view.lane_width * 0.5f;
@@ -527,6 +543,9 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
             break;
         case Action::ZoomFit:
             fit_view(session, ui.view);
+            break;
+        case Action::NewTrack:
+            add_new_track(session, ui, false);
             break;
         case Action::Count:
             break;
@@ -818,6 +837,13 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
             ui.selected = false;
         }
         ImGui::Separator();
+        if (ImGui::MenuItem(T_("New track"), key_label(ui, Action::NewTrack))) {
+            add_new_track(session, ui, false);
+        }
+        if (ImGui::MenuItem(T_("New track for recording"))) {
+            add_new_track(session, ui, true);
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem(T_("Settings..."))) {
             ui.show_settings = true;
         }
@@ -923,6 +949,7 @@ void draw_dialogs(UiState& ui) {
                 {"Right-click a region", "Menu: split, remove fades, remove"},
                 {"Click the ruler or an empty lane", "Move the playhead"},
                 {"Double-click a slider", "Back to its normal value"},
+                {"Right-click empty track space", "Menu: add a track"},
             };
             if (ImGui::BeginTable("shortcuts", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
                 // The keyboard shortcuts as they are set right now, then the fixed mouse actions.
@@ -1517,6 +1544,8 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         ui.selected_track = track_index;
         ui.selected_region = hit.region;
         ImGui::OpenPopup("region menu");
+    } else if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ui.open_track_menu = true;  // empty part of the lane
     }
     if (ImGui::BeginPopup("region menu")) {
         const RegionInfo* region = selected_region(session, ui);
@@ -1607,6 +1636,12 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         draw_region(session, view, track, track.regions[r], selected, selected || under_mouse,
                     origin.y, row_height);
     }
+    if (track.regions.empty() && !(session.is_recording() && session.record_track() == track_index)) {
+        draw_list->AddText(ImVec2(view.lane_origin_x + 8.0f, origin.y + 6.0f),
+                           IM_COL32(150, 150, 160, 210),
+                           T_("Empty track. Arm it with its R button and press Record."));
+    }
+
     // The take that is being recorded onto this track, growing with the playhead.
     if (session.is_recording() && session.record_track() == track_index) {
         const std::int64_t recorded = session.recorded_frames();
@@ -1745,6 +1780,10 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     tooltip(T_("Double-click: back to the centre"));
 
     draw_meter(session.track_peak(i), slider_width, 0.75f * font);
+    if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ui.open_track_menu = true;  // empty part of the track header
+    }
     ImGui::EndChild();
     return remove;
 }
@@ -1837,6 +1876,26 @@ void draw_tracks(Session& session, UiState& ui) {
         ui.drag = DragKind::None;
     }
 
+    // Right-click on empty space (below the tracks, an empty part of a lane or of a track
+    // header): a menu to add tracks.
+    if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ui.open_track_menu = true;
+    }
+    if (ui.open_track_menu) {
+        ImGui::OpenPopup("track area menu");
+        ui.open_track_menu = false;
+    }
+    if (ImGui::BeginPopup("track area menu")) {
+        if (ImGui::MenuItem(T_("New track"), key_label(ui, Action::NewTrack))) {
+            add_new_track(session, ui, false);
+        }
+        if (ImGui::MenuItem(T_("New track for recording"))) {
+            add_new_track(session, ui, true);
+        }
+        ImGui::EndPopup();
+    }
+
     // A click on empty space anywhere in the track area (below the tracks, or on the free part
     // of a track header) clears the selection. Clicks on controls and regions do not.
     if (ui.selected && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
@@ -1847,6 +1906,10 @@ void draw_tracks(Session& session, UiState& ui) {
     if (session.tracks().empty()) {
         ImGui::Spacing();
         ImGui::TextDisabled("%s", T_("Drop audio files here (WAV, FLAC, MP3) or press \"Add files...\"."));
+        ImGui::TextDisabled("%s", T_("To record an instrument or a voice, add a track for recording:"));
+        if (ImGui::Button(T_("New track for recording"))) {
+            add_new_track(session, ui, true);
+        }
     }
 }
 

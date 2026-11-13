@@ -22,6 +22,7 @@ const ActionInfo kActions[kActionCount] = {
     {Action::ZoomIn, "zoom_in", "Zoom in", ""},
     {Action::ZoomOut, "zoom_out", "Zoom out", ""},
     {Action::ZoomFit, "zoom_fit", "Show the whole project", "F"},
+    {Action::NewTrack, "new_track", "New track", "Ctrl+T"},
 };
 
 std::string trimmed(const std::string& text) {

@@ -26,6 +26,7 @@ enum class Action {
     ZoomIn,
     ZoomOut,
     ZoomFit,
+    NewTrack,
     Count
 };
 

@@ -206,6 +206,17 @@ bool Session::add_track(std::string name, std::shared_ptr<const core::ClipData> 
     return true;
 }
 
+std::size_t Session::add_empty_track(std::string name) {
+    if (tracks_.size() >= core::Engine::kMaxTracks) {
+        return tracks_.size();
+    }
+    TrackInfo track;
+    track.name = std::move(name);
+    tracks_.push_back(std::move(track));
+    sync_engine_tracks(tracks_.size() - 1);
+    return tracks_.size() - 1;
+}
+
 bool Session::remove_track(std::size_t index) {
     if (index >= tracks_.size()) {
         return false;

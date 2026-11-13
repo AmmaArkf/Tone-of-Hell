@@ -108,6 +108,9 @@ public:
     bool add_track(std::string name, std::shared_ptr<const core::ClipData> clip,
                    std::string* error = nullptr);
     bool remove_track(std::size_t index);
+    /// Adds a track without any audio, for example to record onto. Returns its index, or
+    /// tracks().size() when the track limit is reached.
+    std::size_t add_empty_track(std::string name);
 
     const std::vector<TrackInfo>& tracks() const noexcept { return tracks_; }
     bool set_track_gain(std::size_t index, float linear);
