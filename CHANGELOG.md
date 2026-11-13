@@ -2,6 +2,19 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.0
+
+Level 0 (the core) is complete: every stage from the audio engine to projects and undo has been checked on a real computer. New since 0.1.0:
+
+- **Undo and redo** (Ctrl+Z, Ctrl+Y): every edit of tracks and regions, a whole drag as one step, up to 200 steps.
+- **Autosave** with recovery after a crash: unsaved changes go to a recovery file every few minutes, and the next start offers to restore them.
+- **Playback speed** from 25 % to 400 % (right-click Play, Ctrl+Up, Ctrl+Down, Ctrl+0), and **a speed of its own for every region**, like a tape.
+- **Curved fades** by default, with a choice of curve, straight line or S-curve per region.
+- **Endless metronome**: with the metronome on, playback goes on past the end of the project.
+- **Track pictures** are saved inside the project, and a PNG or BMP dropped onto a track becomes its picture.
+
+The detailed list follows below (0.1.1 to 0.1.7).
+
 ## 0.1.7
 
 - Autosave: every 3 minutes (1 to 30, Edit > Settings > General > Autosave), unsaved changes go to a recovery file next to the settings. Your project file changes only when you save. If the program closes unexpectedly, the next start offers to restore the project; Ctrl+S then saves it to its own file again. Closing normally or saving removes the recovery file.

@@ -4,7 +4,7 @@
 
 An open digital audio workstation (DAW) written in C++: recording, a multitrack mixer, MIDI and hosting of third-party plugins. The source code is open to everyone, and the project is developed together with its community.
 
-> **Status: pre-release 0.1.** The core (level 0) works: you can record, arrange, mix, export and save projects. MIDI, plugins and effects come next. Expect rough edges and keep copies of projects that matter. See [ROADMAP.md](ROADMAP.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for every change.
+> **Status: pre-release 0.2.** The core (level 0) is complete: you can record, arrange, mix, export and save projects, with undo and autosave. MIDI, plugins and effects come next. Expect rough edges and keep copies of projects that matter. See [ROADMAP.md](ROADMAP.md) for the plan and [CHANGELOG.md](CHANGELOG.md) for every change.
 
 ## Download
 
@@ -47,7 +47,7 @@ The status of every stage is tracked in [ROADMAP.md](ROADMAP.md). In short:
 
 | Level | What it includes | Status |
 | --- | --- | --- |
-| 0. Core | Audio engine, transport, tracks, regions, mixer, recording, import and export, projects, undo/redo | Pre-release 0.1, stabilization next |
+| 0. Core | Audio engine, transport, tracks, regions, mixer, recording, import and export, projects, undo/redo | Done (pre-release 0.2) |
 | 1. Working minimum | MIDI and piano roll, CLAP/VST3 plugins, automation, tempo map, basic effects and instruments | Next |
 | 2. Advanced | Comping, time-stretch, groups, sidechain, controllers, score editor, clip grid | Idea |
 | 3. Distinctive | ML features, sound library, surround sound, mastering assistant | Idea |
@@ -98,7 +98,7 @@ The project is released under the MIT license, see [LICENSE](LICENSE). Third-par
 
 Открытая цифровая звуковая рабочая станция (DAW) на C++: запись, многодорожечный микшер, MIDI и подключение сторонних плагинов. Исходный код открыт для всех, а проект развивается вместе с сообществом.
 
-> **Статус: пре-релиз 0.1.** Ядро (уровень 0) работает: можно записывать, собирать аранжировку, сводить, экспортировать и сохранять проекты. Дальше MIDI, плагины и эффекты. Возможны шероховатости, поэтому храните копии важных проектов. План в [ROADMAP.md](ROADMAP.md), все изменения в [CHANGELOG.md](CHANGELOG.md).
+> **Статус: пре-релиз 0.2.** Ядро (уровень 0) готово: можно записывать, собирать аранжировку, сводить, экспортировать и сохранять проекты, с отменой действий и автосохранением. Дальше MIDI, плагины и эффекты. Возможны шероховатости, поэтому храните копии важных проектов. План в [ROADMAP.md](ROADMAP.md), все изменения в [CHANGELOG.md](CHANGELOG.md).
 
 ### Скачать
 
@@ -141,7 +141,7 @@ The project is released under the MIT license, see [LICENSE](LICENSE). Third-par
 
 | Уровень | Что входит | Статус |
 | --- | --- | --- |
-| 0. Ядро | Аудиодвижок, транспорт, дорожки, регионы, микшер, запись, импорт и экспорт, проекты, отмена и повтор | Пре-релиз 0.1, дальше стабилизация |
+| 0. Ядро | Аудиодвижок, транспорт, дорожки, регионы, микшер, запись, импорт и экспорт, проекты, отмена и повтор | Готово (пре-релиз 0.2) |
 | 1. Рабочий минимум | MIDI и пиано-ролл, плагины CLAP/VST3, автоматизация, карта темпа, базовые эффекты и инструменты | Следующий |
 | 2. Расширенный | Компинг, растяжение времени, группы, сайдчейн, контроллеры, нотный редактор, сетка клипов | Идея |
 | 3. Особенный | Функции на основе машинного обучения, библиотека звуков, объёмный звук, помощник по мастерингу | Идея |
