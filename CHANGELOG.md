@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.16
+
+- Fixed: exported WAV and MP3 files did not pass through the sampler, the effects and the instrument plugins of the tracks, so they sounded different from playback. An export now stops playback, lends the plugins to the export, and gives them back afterwards; echoes and held notes inside them are cleared before and after.
+
 ## 0.2.15
 
 - Two plugins against noise come with the program (FX > Add an effect):

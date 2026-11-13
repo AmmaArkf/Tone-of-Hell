@@ -1131,6 +1131,22 @@ void Vst3Plugin::add_note(std::uint32_t frame, bool on, int pitch, float velocit
     send(on, pitch, velocity);
 }
 
+void Vst3Plugin::reset() noexcept {
+    Impl& s = *impl_;
+    if (!s.active) {
+        return;
+    }
+    // Switching the component off and on again empties its delay lines and ends its notes.
+    if (s.processing) {
+        s.processor->setProcessing(false);
+        s.processing = false;
+    }
+    s.component->setActive(false);
+    s.component->setActive(true);
+    s.in_events.clear();
+    s.held.fill(false);
+}
+
 const std::vector<Plugin::Param>& Vst3Plugin::params() const noexcept { return impl_->param_list; }
 
 double Vst3Plugin::param_value(std::uint32_t id) const {

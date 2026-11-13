@@ -554,7 +554,13 @@ const PluginInfo& ClapPlugin::info() const noexcept { return impl_->info; }
 
 void ClapPlugin::process(float* interleaved, std::uint32_t frames, std::uint32_t channels) noexcept {
     Impl& s = *impl_;
-    t_audio_thread = true;
+    // Whoever processes is the audio thread for the plugin while it does (an export does it on
+    // the main thread).
+    struct AudioThreadMark {
+        bool before = t_audio_thread;
+        AudioThreadMark() { t_audio_thread = true; }
+        ~AudioThreadMark() { t_audio_thread = before; }
+    } mark;
     if (!s.active || channels == 0 || interleaved == nullptr) {
         return;
     }
@@ -672,6 +678,18 @@ void ClapPlugin::add_note(std::uint32_t frame, bool on, int pitch, float velocit
     note.on = on;
     note.key = static_cast<std::int16_t>(std::max(pitch, -1));
     note.velocity = velocity;
+}
+
+void ClapPlugin::reset() noexcept {
+    Impl& s = *impl_;
+    if (!s.active || s.plugin == nullptr) {
+        return;
+    }
+    const bool before = t_audio_thread;
+    t_audio_thread = true;
+    s.plugin->reset(s.plugin);
+    t_audio_thread = before;
+    s.pending_count = 0;
 }
 
 std::uint32_t ClapPlugin::latency() const noexcept { return impl_->latency; }

@@ -110,6 +110,10 @@ public:
     bool set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
                            const std::vector<std::shared_ptr<AudioEffect>>& effects = {},
                            std::shared_ptr<AudioEffect> instrument = nullptr, std::int64_t latency = 0);
+    /// Asks the audio thread to confirm that it has taken in every change made so far:
+    /// synced() returns `token` (or a later one) once it has.
+    bool request_sync(std::int64_t token);
+    std::int64_t synced() const noexcept { return synced_.load(std::memory_order_acquire); }
     /// A note played live on an instrument plugin (it must be the instrument of a track).
     bool live_plugin_note(std::shared_ptr<AudioEffect> instrument, bool on, int pitch, float velocity);
     /// Puts one whole clip at the start of a track, stops playback and returns to the start.
@@ -308,7 +312,8 @@ private:
         LiveNoteOn,
         LiveNoteOff,
         LiveAllOff,
-        LivePluginNote
+        LivePluginNote,
+        Sync
     };
 
     // Messages from the control thread to the audio thread. Must stay trivially copyable.
@@ -373,6 +378,7 @@ private:
     void schedule_notes(Track& track, const Region& region, const NoteData& notes, AudioEffect& instrument,
                         std::uint32_t frames, std::int64_t lowest, std::int64_t highest) noexcept;
     std::vector<std::shared_ptr<AudioEffect>> live_instruments_;  // kept alive for live notes
+    std::atomic<std::int64_t> synced_{0};
 
     // Notes from a keyboard (audio thread only).
     struct LiveVoice {

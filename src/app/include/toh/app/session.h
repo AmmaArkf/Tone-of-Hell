@@ -633,6 +633,7 @@ private:
     std::size_t live_track_ = kNewTrack;
     std::string pending_label_;  // the name of the next undo step, if an edit gave one
     std::vector<std::string> open_warnings_;
+    std::int64_t sync_token_ = 0;
     // The instrument plugin each live key went to, so that its end goes there too.
     std::array<std::shared_ptr<plugins::Plugin>, 128> live_plugin_keys_{};
     bool notes_recording_ = false;

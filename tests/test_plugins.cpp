@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -235,6 +236,19 @@ TEST_CASE("A track plays through its effects, and they are saved with the projec
     const auto& slot = reopened.tracks()[0].effects[0];
     CHECK(slot.enabled);
     CHECK(slot.plugin->param_value(0) == doctest::Approx(6.0206));
+    CHECK(played_sample(reopened) == doctest::Approx(2.0f * dry).epsilon(0.01));
+
+    // An exported file holds the sound with the effects, and playback has them back afterwards.
+    const auto wav = folder / "effects.wav";
+    REQUIRE_MESSAGE(reopened.export_wav(wav, toh::audio::SampleFormat::Int16, &error), error);
+    {
+        std::ifstream in(wav, std::ios::binary);
+        in.seekg(44 + 4 * 1000);  // frame 1000 of 16-bit stereo
+        unsigned char bytes[2] = {};
+        in.read(reinterpret_cast<char*>(bytes), 2);
+        const auto value = static_cast<std::int16_t>(bytes[0] | (bytes[1] << 8));
+        CHECK(static_cast<float>(value) / 32768.0f == doctest::Approx(2.0f * dry).epsilon(0.02));
+    }
     CHECK(played_sample(reopened) == doctest::Approx(2.0f * dry).epsilon(0.01));
 
     REQUIRE(reopened.remove_effect(0, 0));

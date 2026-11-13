@@ -23,6 +23,10 @@ public:
     /// processed. A `pitch` of -1 with `on` false ends every note.
     virtual void add_note(std::uint32_t /*frame*/, bool /*on*/, int /*pitch*/, float /*velocity*/) noexcept {}
 
+    /// Forgets what is still sounding inside (echoes, held notes). Only while nothing
+    /// processes the effect.
+    virtual void reset() noexcept {}
+
     /// A switched off effect is skipped: the sound passes unchanged. Any thread.
     void set_enabled(bool enabled) noexcept { enabled_.store(enabled, std::memory_order_relaxed); }
     bool enabled() const noexcept { return enabled_.load(std::memory_order_relaxed); }

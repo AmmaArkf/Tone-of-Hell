@@ -50,9 +50,36 @@ std::vector<core::Region> engine_regions(const TrackInfo& track) {
         region.rate = info.rate;
         region.instrument = track.instrument;
         region.program = track.program;
+        region.sampler = track.sampler;
         regions.push_back(std::move(region));
     }
     return regions;
+}
+
+// The plugins of a track for an engine: the effects that exist, the instrument, and how many
+// frames those that are on delay the sound.
+struct TrackPlugins {
+    std::vector<std::shared_ptr<core::AudioEffect>> effects;
+    std::shared_ptr<core::AudioEffect> instrument;
+    std::int64_t latency = 0;
+};
+
+TrackPlugins track_plugins(const TrackInfo& track) {
+    TrackPlugins plugins;
+    if (track.plugin_instrument.plugin) {
+        plugins.instrument = track.plugin_instrument.plugin;
+        plugins.latency += track.plugin_instrument.plugin->latency();
+    }
+    for (const EffectSlot& slot : track.effects) {
+        if (slot.plugin) {
+            slot.plugin->set_enabled(slot.enabled);
+            plugins.effects.push_back(slot.plugin);
+            if (slot.enabled) {
+                plugins.latency += slot.plugin->latency();
+            }
+        }
+    }
+    return plugins;
 }
 
 // A source of notes: the notes cleaned up and sorted, `frames` long.
@@ -920,23 +947,9 @@ void Session::sync_track_regions(std::size_t index) {
         region.sampler = tracks_[index].sampler;
         regions.push_back(std::move(region));
     }
-    std::vector<std::shared_ptr<core::AudioEffect>> effects;
-    // The plugins that are on delay the sound by the sum of their latencies.
-    std::int64_t latency = 0;
-    if (tracks_[index].plugin_instrument.plugin) {
-        latency += tracks_[index].plugin_instrument.plugin->latency();
-    }
-    for (const EffectSlot& slot : tracks_[index].effects) {
-        if (slot.plugin) {
-            slot.plugin->set_enabled(slot.enabled);
-            effects.push_back(slot.plugin);
-            if (slot.enabled) {
-                latency += slot.plugin->latency();
-            }
-        }
-    }
-    engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, effects,
-                              tracks_[index].plugin_instrument.plugin, latency);
+    const TrackPlugins plugins = track_plugins(tracks_[index]);
+    engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, plugins.effects,
+                              plugins.instrument, plugins.latency);
     update_streaming();
 }
 
@@ -3017,12 +3030,65 @@ bool Session::export_mp3(const std::filesystem::path& path, int kbps, std::strin
 }
 
 bool Session::render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const {
-    // A second engine renders the same project offline, so playback is not disturbed.
+    // A second engine renders the same project offline. A plugin cannot work for two engines at
+    // once, so while the file is written the plugins are lent to the second engine: playback
+    // stops, the playing engine lets go of them, and it gets them back afterwards.
+    Session& self = const_cast<Session&>(*this);
+    bool lent = false;
+    for (const TrackInfo& track : tracks_) {
+        lent = lent || track.plugin_instrument.plugin || !track.effects.empty();
+    }
+    struct Return {
+        Session& session;
+        bool active;
+        ~Return() {
+            if (active) {
+                for (const TrackInfo& track : session.tracks_) {
+                    const TrackPlugins plugins = track_plugins(track);
+                    if (plugins.instrument) {
+                        plugins.instrument->reset();
+                    }
+                    for (const auto& effect : plugins.effects) {
+                        effect->reset();
+                    }
+                }
+                session.sync_engine_tracks(0);
+            }
+        }
+    };
+    if (lent) {
+        self.engine_.stop();
+        for (std::size_t i = 0; i < tracks_.size(); ++i) {
+            self.engine_.set_track_regions(static_cast<std::uint32_t>(i), engine_regions(tracks_[i]));
+        }
+        if (device_.running()) {
+            // Wait until the audio thread has let go of the plugins.
+            const std::int64_t token = ++self.sync_token_;
+            self.engine_.request_sync(token);
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (engine_.synced() < token && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            if (engine_.synced() < token) {
+                self.sync_engine_tracks(0);
+                return false;  // the sound device does not answer
+            }
+        }
+    }
     const auto offline = std::make_unique<core::Engine>(config_.sample_rate, config_.channels);
+    const Return give_back{self, lent};  // at the end the playing engine gets the plugins back
     for (std::size_t i = 0; i < tracks_.size(); ++i) {
         const TrackInfo& track = tracks_[i];
         const auto slot = static_cast<std::uint32_t>(i);
-        offline->set_track_regions(slot, engine_regions(track));
+        const TrackPlugins plugins = track_plugins(track);
+        if (plugins.instrument) {
+            plugins.instrument->reset();
+        }
+        for (const auto& effect : plugins.effects) {
+            effect->reset();
+        }
+        offline->set_track_regions(slot, engine_regions(track), plugins.effects, plugins.instrument,
+                                   plugins.latency);
         offline->set_track_gain(slot, track.gain);
         offline->set_track_pan(slot, track.pan);
         offline->set_track_mute(slot, silenced(track));

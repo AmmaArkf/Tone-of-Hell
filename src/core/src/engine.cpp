@@ -343,6 +343,12 @@ bool Engine::live_note_off(int pitch) {
 
 bool Engine::live_all_notes_off() { return commands_.try_push(Command(CommandType::LiveAllOff)); }
 
+bool Engine::request_sync(std::int64_t token) {
+    Command command(CommandType::Sync);
+    command.a = token;
+    return commands_.try_push(command);
+}
+
 bool Engine::live_plugin_note(std::shared_ptr<AudioEffect> instrument, bool on, int pitch, float velocity) {
     if (!instrument || pitch < 0 || pitch > 127) {
         return false;
@@ -761,6 +767,9 @@ void Engine::apply(const Command& command) noexcept {
                     voice.released_at = voice.time;
                 }
             }
+            break;
+        case CommandType::Sync:
+            synced_.store(command.a, std::memory_order_release);
             break;
         case CommandType::LivePluginNote:
             if (command.effect != nullptr) {
