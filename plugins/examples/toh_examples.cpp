@@ -1,4 +1,5 @@
-// Example CLAP plugins that come with Tone of Hell: Echo, Tremolo, Gain and Simple Synth.
+// Example CLAP plugins that come with Tone of Hell: Echo, Tremolo, Gain, Simple Synth, and two
+// against noise: Noise Gate and Denoiser.
 //
 // They are small on purpose: they show what a CLAP effect needs (a factory, audio ports,
 // parameters and a saved state), they give a new user a few effects to try, and the tests use
@@ -10,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -26,6 +28,7 @@ struct ParamDef {
     double max;
     double default_value;
     const char* unit;
+    bool stepped = false;
 };
 
 const ParamDef kEchoParams[] = {{0, "Time", 10.0, 2000.0, 375.0, "ms"},
@@ -46,6 +49,18 @@ const char* const kTremoloFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_P
                                         CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const char* const kGainFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY,
                                      CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+const ParamDef kGateParams[] = {{0, "Threshold", -80.0, 0.0, -45.0, "dB"},
+                                {1, "Attack", 0.1, 100.0, 2.0, "ms"},
+                                {2, "Release", 5.0, 2000.0, 150.0, "ms"},
+                                {3, "Depth", 0.0, 80.0, 60.0, "dB"}};
+const ParamDef kDenoiseParams[] = {{0, "Learn noise", 0.0, 1.0, 0.0, "", true},
+                                   {1, "Reduction", 0.0, 40.0, 18.0, "dB"},
+                                   {2, "Sensitivity", 0.5, 4.0, 1.5, "x"},
+                                   {3, "Smoothing", 0.0, 100.0, 60.0, "%"}};
+const char* const kGateFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_GATE,
+                                     CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+const char* const kDenoiseFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_RESTORATION,
+                                        CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const char* const kSynthFeatures[] = {CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER,
                                       CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 
@@ -65,8 +80,71 @@ const clap_plugin_descriptor_t kSynth = {
     CLAP_VERSION_INIT, "org.toneofhell.synth", "Simple Synth", "Tone of Hell",
     "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
     "A small synthesizer: a soft sine that turns brighter towards a saw wave.", kSynthFeatures};
+const clap_plugin_descriptor_t kGate = {
+    CLAP_VERSION_INIT, "org.toneofhell.gate", "Noise Gate", "Tone of Hell",
+    "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
+    "Turns the sound down while it is quieter than the threshold: no noise in the pauses.", kGateFeatures};
+const clap_plugin_descriptor_t kDenoise = {
+    CLAP_VERSION_INIT, "org.toneofhell.denoiser", "Denoiser", "Tone of Hell",
+    "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
+    "Learns a steady noise (hiss, hum, a fan) from a part with only noise, then takes it out of the sound.",
+    kDenoiseFeatures};
 
-enum class Kind { Echo, Tremolo, Gain, Synth };
+enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise };
+
+// The denoiser works on overlapping pieces of kFft frames, a quarter apart.
+constexpr std::size_t kFft = 1024;
+constexpr std::size_t kHop = kFft / 4;
+constexpr std::size_t kBins = kFft / 2 + 1;
+constexpr std::size_t kFftLatency = kFft - kHop;
+
+// An in-place radix-2 FFT (the inverse is not scaled).
+void fft(std::complex<float>* a, std::size_t n, bool inverse) {
+    for (std::size_t i = 1, j = 0; i < n; ++i) {
+        std::size_t bit = n >> 1;
+        for (; (j & bit) != 0; bit >>= 1) {
+            j ^= bit;
+        }
+        j ^= bit;
+        if (i < j) {
+            std::swap(a[i], a[j]);
+        }
+    }
+    for (std::size_t len = 2; len <= n; len <<= 1) {
+        const double angle = (inverse ? 2.0 : -2.0) * kPi / static_cast<double>(len);
+        const std::complex<float> step(static_cast<float>(std::cos(angle)), static_cast<float>(std::sin(angle)));
+        for (std::size_t i = 0; i < n; i += len) {
+            std::complex<float> w(1.0f, 0.0f);
+            for (std::size_t k = 0; k < len / 2; ++k) {
+                const std::complex<float> u = a[i + k];
+                const std::complex<float> v = a[i + k + len / 2] * w;
+                a[i + k] = u + v;
+                a[i + k + len / 2] = u - v;
+                w *= step;
+            }
+        }
+    }
+}
+
+struct DenoiseChannel {
+    std::array<float, kFft> in{};
+    std::array<float, kFft> out{};
+    std::array<float, kFft> sum{};       // overlapping pieces added up
+    std::array<float, kBins> profile{};  // the learned noise: its level at every frequency
+    std::array<double, kBins> learned{};
+    std::array<float, kBins> gain{};
+};
+
+struct Denoise {
+    std::array<DenoiseChannel, 2> channels{};
+    std::array<float, kFft> window{};
+    std::array<std::complex<float>, kFft> work{};
+    std::size_t rover = kFftLatency;
+    bool learning = false;
+    std::uint32_t learned_frames = 0;
+    std::array<float, 2 * kBins> pending{};  // a profile from a loaded state
+    std::atomic<bool> has_pending{false};
+};
 
 // One playing note of the synthesizer.
 struct Voice {
@@ -91,7 +169,51 @@ struct Example {
     std::size_t write = 0;
     double phase = 0.0;
     std::array<Voice, 16> voices{};
+    float gate_level = 0.0f;
+    float gate_gain = 1.0f;
+    bool gate_open = true;
+    Denoise* denoise = nullptr;  // only for the denoiser
 };
+
+// One piece of the denoiser: to the spectrum, every frequency turned down by how much noise
+// it holds, and back.
+void denoise_frame(Example& e, DenoiseChannel& ch) {
+    Denoise& d = *e.denoise;
+    for (std::size_t k = 0; k < kFft; ++k) {
+        d.work[k] = std::complex<float>(ch.in[k] * d.window[k], 0.0f);
+    }
+    fft(d.work.data(), kFft, false);
+    const auto floor_gain = static_cast<float>(std::pow(10.0, -e.values[1].load() / 20.0));
+    const auto sensitivity = static_cast<float>(e.values[2].load());
+    const auto hold = static_cast<float>(e.values[3].load() / 100.0 * 0.9);
+    for (std::size_t k = 0; k < kBins; ++k) {
+        const float level = std::abs(d.work[k]);
+        float gain = 1.0f;
+        if (d.learning) {
+            ch.learned[k] += static_cast<double>(level);
+            ch.profile[k] = static_cast<float>(ch.learned[k] / static_cast<double>(d.learned_frames + 1));
+        } else if (ch.profile[k] > 0.0f) {
+            gain = level > 1e-9f ? std::max((level - sensitivity * ch.profile[k]) / level, floor_gain) : floor_gain;
+            if (gain < ch.gain[k]) {
+                gain = hold * ch.gain[k] + (1.0f - hold) * gain;  // closing slowly: less "musical noise"
+            }
+        }
+        ch.gain[k] = gain;
+        d.work[k] *= gain;
+        if (k > 0 && k < kFft / 2) {
+            d.work[kFft - k] *= gain;
+        }
+    }
+    fft(d.work.data(), kFft, true);
+    const float scale = 0.5f / static_cast<float>(kFft);  // the windows overlap to 2
+    for (std::size_t k = 0; k < kFft; ++k) {
+        ch.sum[k] += d.work[k].real() * d.window[k] * scale;
+    }
+    std::copy(ch.sum.begin(), ch.sum.begin() + kHop, ch.out.begin());
+    std::copy(ch.sum.begin() + kHop, ch.sum.end(), ch.sum.begin());
+    std::fill(ch.sum.end() - kHop, ch.sum.end(), 0.0f);
+    std::copy(ch.in.begin() + kHop, ch.in.end(), ch.in.begin());
+}
 
 Example& self(const clap_plugin_t* plugin) { return *static_cast<Example*>(plugin->plugin_data); }
 
@@ -118,7 +240,10 @@ void apply_events(Example& e, const clap_input_events_t* events) {
 
 bool plugin_init(const clap_plugin_t*) { return true; }
 
-void plugin_destroy(const clap_plugin_t* plugin) { delete &self(plugin); }
+void plugin_destroy(const clap_plugin_t* plugin) {
+    delete self(plugin).denoise;
+    delete &self(plugin);
+}
 
 bool plugin_activate(const clap_plugin_t* plugin, double rate, std::uint32_t, std::uint32_t) {
     Example& e = self(plugin);
@@ -308,6 +433,65 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
         }
         case Kind::Synth:
             break;
+        case Kind::Gate: {
+            const auto threshold = static_cast<float>(std::pow(10.0, e.values[0].load() / 20.0));
+            const auto attack = static_cast<float>(std::exp(-1.0 / (e.values[1].load() / 1000.0 * e.rate)));
+            const auto release = static_cast<float>(std::exp(-1.0 / (e.values[2].load() / 1000.0 * e.rate)));
+            const auto closed = static_cast<float>(std::pow(10.0, -e.values[3].load() / 20.0));
+            const auto fall = static_cast<float>(std::exp(-1.0 / (0.005 * e.rate)));
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                const float left = input(0, i);
+                const float right = input(1, i);
+                const float level = std::max(std::fabs(left), std::fabs(right));
+                e.gate_level = level > e.gate_level ? level : e.gate_level * fall;
+                // It opens at the threshold and closes a little below it, so it does not flutter.
+                if (e.gate_level > threshold) {
+                    e.gate_open = true;
+                } else if (e.gate_level < threshold * 0.7f) {
+                    e.gate_open = false;
+                }
+                const float target = e.gate_open ? 1.0f : closed;
+                const float coefficient = target > e.gate_gain ? attack : release;
+                e.gate_gain = target + (e.gate_gain - target) * coefficient;
+                output(i, left * e.gate_gain, right * e.gate_gain);
+            }
+            break;
+        }
+        case Kind::Denoise: {
+            Denoise& d = *e.denoise;
+            if (d.has_pending.exchange(false)) {  // a profile that came with a loaded state
+                for (std::size_t c = 0; c < 2; ++c) {
+                    std::copy(d.pending.begin() + static_cast<std::ptrdiff_t>(c * kBins),
+                              d.pending.begin() + static_cast<std::ptrdiff_t>((c + 1) * kBins),
+                              d.channels[c].profile.begin());
+                }
+            }
+            const bool learn = e.values[0].load() >= 0.5;
+            if (learn && !d.learning) {  // learning begins: forget the old noise
+                for (DenoiseChannel& ch : d.channels) {
+                    ch.learned.fill(0.0);
+                }
+                d.learned_frames = 0;
+            }
+            d.learning = learn;
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                float result[2];
+                for (std::uint32_t c = 0; c < 2; ++c) {
+                    d.channels[c].in[d.rover] = input(c, i);
+                    result[c] = d.channels[c].out[d.rover - kFftLatency];
+                }
+                output(i, result[0], result[1]);
+                if (++d.rover >= kFft) {
+                    d.rover = kFftLatency;
+                    denoise_frame(e, d.channels[0]);
+                    denoise_frame(e, d.channels[1]);
+                    if (d.learning) {
+                        ++d.learned_frames;
+                    }
+                }
+            }
+            break;
+        }
         case Kind::Gain: {
             const double gain = std::pow(10.0, e.values[0].load() / 20.0);
             const double pan = e.values[1].load() / 100.0;
@@ -375,6 +559,9 @@ bool params_info(const clap_plugin_t* plugin, std::uint32_t index, clap_param_in
     *info = clap_param_info_t{};
     info->id = def.id;
     info->flags = CLAP_PARAM_IS_AUTOMATABLE;
+    if (def.stepped) {
+        info->flags |= CLAP_PARAM_IS_STEPPED;
+    }
     info->cookie = nullptr;
     std::snprintf(info->name, sizeof(info->name), "%s", def.name);
     info->module[0] = '\0';
@@ -435,6 +622,23 @@ bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream) {
         bytes += written;
         left -= static_cast<std::uint64_t>(written);
     }
+    if (e.denoise != nullptr) {  // the learned noise belongs to the state
+        std::array<float, 2 * kBins> profile{};
+        for (std::size_t c = 0; c < 2; ++c) {
+            std::copy(e.denoise->channels[c].profile.begin(), e.denoise->channels[c].profile.end(),
+                      profile.begin() + static_cast<std::ptrdiff_t>(c * kBins));
+        }
+        const auto* profile_bytes = reinterpret_cast<const char*>(profile.data());
+        std::uint64_t profile_left = sizeof(float) * profile.size();
+        while (profile_left > 0) {
+            const std::int64_t written = stream->write(stream, profile_bytes, profile_left);
+            if (written <= 0) {
+                return false;
+            }
+            profile_bytes += written;
+            profile_left -= static_cast<std::uint64_t>(written);
+        }
+    }
     return true;
 }
 
@@ -454,10 +658,33 @@ bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
     for (std::uint32_t i = 0; i < e.count; ++i) {
         e.values[i].store(std::clamp(data[i], e.defs[i].min, e.defs[i].max));
     }
+    if (e.denoise != nullptr) {
+        e.values[0].store(0.0);  // not learning after a load
+        std::array<float, 2 * kBins> profile{};
+        auto* profile_bytes = reinterpret_cast<char*>(profile.data());
+        std::uint64_t profile_left = sizeof(float) * profile.size();
+        while (profile_left > 0) {
+            const std::int64_t read = stream->read(stream, profile_bytes, profile_left);
+            if (read <= 0) {
+                break;
+            }
+            profile_bytes += read;
+            profile_left -= static_cast<std::uint64_t>(read);
+        }
+        if (profile_left == 0) {
+            e.denoise->pending = profile;
+            e.denoise->has_pending.store(true);
+        }
+    }
     return true;
 }
 
 const clap_plugin_state_t kState = {state_save, state_load};
+
+// The denoiser delays the sound by the pieces it works on; the host makes up for it.
+std::uint32_t latency_get(const clap_plugin_t*) { return static_cast<std::uint32_t>(kFftLatency); }
+
+const clap_plugin_latency_t kLatency = {latency_get};
 
 const void* plugin_extension(const clap_plugin_t* plugin, const char* id) {
     if (std::strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) {
@@ -469,6 +696,9 @@ const void* plugin_extension(const clap_plugin_t* plugin, const char* id) {
     if (std::strcmp(id, CLAP_EXT_STATE) == 0) {
         return &kState;
     }
+    if (std::strcmp(id, CLAP_EXT_LATENCY) == 0 && self(plugin).kind == Kind::Denoise) {
+        return &kLatency;
+    }
     if (std::strcmp(id, CLAP_EXT_NOTE_PORTS) == 0 && self(plugin).kind == Kind::Synth) {
         return &kNotePorts;
     }
@@ -479,8 +709,8 @@ void plugin_on_main_thread(const clap_plugin_t*) {}
 
 // ---- The factory -----------------------------------------------------------------------------------
 
-const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain, &kSynth};
-constexpr std::uint32_t kPluginCount = 4;
+const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain, &kSynth, &kGate, &kDenoise};
+constexpr std::uint32_t kPluginCount = 6;
 
 std::uint32_t factory_count(const clap_plugin_factory_t*) { return kPluginCount; }
 
@@ -513,6 +743,24 @@ const clap_plugin_t* factory_create(const clap_plugin_factory_t*, const clap_hos
         e->defs = kSynthParams;
         e->count = 4;
         e->plugin.desc = &kSynth;
+    } else if (std::strcmp(id, kGate.id) == 0) {
+        e->kind = Kind::Gate;
+        e->defs = kGateParams;
+        e->count = 4;
+        e->plugin.desc = &kGate;
+    } else if (std::strcmp(id, kDenoise.id) == 0) {
+        e->kind = Kind::Denoise;
+        e->defs = kDenoiseParams;
+        e->count = 4;
+        e->plugin.desc = &kDenoise;
+        e->denoise = new Denoise();
+        for (std::size_t k = 0; k < kFft; ++k) {
+            e->denoise->window[k] = static_cast<float>(
+                std::sqrt(0.5 - 0.5 * std::cos(2.0 * kPi * static_cast<double>(k) / static_cast<double>(kFft))));
+        }
+        for (DenoiseChannel& ch : e->denoise->channels) {
+            ch.gain.fill(1.0f);
+        }
     } else {
         delete e;
         return nullptr;

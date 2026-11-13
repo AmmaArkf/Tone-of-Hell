@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.15
+
+- Two plugins against noise come with the program (FX > Add an effect):
+  - Noise Gate: turns the sound down while it is quieter than the threshold, so the pauses are silent (threshold, attack, release, depth).
+  - Denoiser: takes a steady noise (hiss, hum, a fan) out of the sound. Switch "Learn noise" on while only the noise plays, then off: it has learned the level of the noise at every frequency and turns each frequency down by how much noise it holds (reduction, sensitivity, smoothing). The learned noise is saved with the project. Its delay of 16 ms is compensated.
+
 ## 0.2.14
 
 - VST3 plugins: effects and instruments in the VST3 format work like CLAP ones (FX button, instrument plugins, their own windows on Windows, sliders otherwise, saved state, delay compensation). The program finds them in the usual VST3 folders (Common Files\VST3 and the user's Programs\Common\VST3 on Windows, ~/.vst3 and /usr/lib/vst3 on Linux); menus mark them [VST3].

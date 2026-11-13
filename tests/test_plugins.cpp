@@ -41,7 +41,9 @@ float played_sample(Session& session) {
 TEST_CASE("The example plugins are found in their file") {
     std::string error;
     const auto infos = toh::plugins::read_clap_file(kExamples, &error);
-    REQUIRE_MESSAGE(infos.size() == 4, error);
+    REQUIRE_MESSAGE(infos.size() == 6, error);
+    CHECK(infos[4].name == "Noise Gate");
+    CHECK(infos[5].name == "Denoiser");
     CHECK(infos[0].name == "Echo");
     CHECK(infos[1].name == "Tremolo");
     CHECK(infos[2].name == "Gain");
@@ -82,6 +84,76 @@ TEST_CASE("A CLAP effect changes the sound and keeps its state") {
 
     CHECK(ClapPlugin::create(kExamples, "org.toneofhell.nothing", 48000.0, 2, &error) == nullptr);
     CHECK_FALSE(error.empty());
+}
+
+namespace {
+
+// Plays a second of sound through a plugin; returns the RMS of the last half second.
+// The sound is a sine of `tone` plus steady noise of `noise` (both as peak levels).
+double rms_through(ClapPlugin& plugin, double tone, double noise, std::uint32_t& seed) {
+    constexpr int kBlocks = 94;  // about a second
+    std::vector<float> block(2 * 512);
+    double sum = 0.0;
+    std::size_t counted = 0;
+    static std::size_t n = 0;
+    for (int b = 0; b < kBlocks; ++b) {
+        for (std::size_t i = 0; i < 512; ++i, ++n) {
+            seed = seed * 1664525u + 1013904223u;
+            const double hiss = (static_cast<double>(seed >> 8) / 8388608.0 - 1.0) * noise;
+            const double value = tone * std::sin(2.0 * 3.14159265358979 * 1000.0 * static_cast<double>(n) / 48000.0) + hiss;
+            block[2 * i] = block[2 * i + 1] = static_cast<float>(value);
+        }
+        plugin.process(block.data(), 512, 2);
+        plugin.idle();
+        if (b >= kBlocks / 2) {
+            for (std::size_t i = 0; i < 512; ++i) {
+                sum += static_cast<double>(block[2 * i]) * static_cast<double>(block[2 * i]);
+                ++counted;
+            }
+        }
+    }
+    return std::sqrt(sum / static_cast<double>(counted));
+}
+
+}  // namespace
+
+TEST_CASE("The noise gate closes on quiet sound and lets loud sound through") {
+    std::string error;
+    auto gate = ClapPlugin::create(kExamples, "org.toneofhell.gate", 48000.0, 2, &error);
+    REQUIRE_MESSAGE(gate != nullptr, error);
+    std::uint32_t seed = 1;
+    CHECK(rms_through(*gate, 0.0, 0.001, seed) < 0.00005);  // far below the -45 dB threshold
+    const double loud = rms_through(*gate, 0.5, 0.001, seed);
+    CHECK(loud == doctest::Approx(0.5 / std::sqrt(2.0)).epsilon(0.03));
+}
+
+TEST_CASE("The denoiser learns a noise and takes it out, keeping the sound") {
+    std::string error;
+    auto denoiser = ClapPlugin::create(kExamples, "org.toneofhell.denoiser", 48000.0, 2, &error);
+    REQUIRE_MESSAGE(denoiser != nullptr, error);
+    CHECK(denoiser->latency() == 768);
+    std::uint32_t seed = 7;
+    // Before it has learned anything the sound passes unchanged.
+    const double untouched = rms_through(*denoiser, 0.0, 0.05, seed);
+    CHECK(untouched == doctest::Approx(0.05 / std::sqrt(3.0)).epsilon(0.05));
+
+    REQUIRE(denoiser->set_param(0, 1.0));  // learn from a second of the noise alone
+    rms_through(*denoiser, 0.0, 0.05, seed);
+    REQUIRE(denoiser->set_param(0, 0.0));
+    const double cleaned = rms_through(*denoiser, 0.0, 0.05, seed);
+    CHECK(cleaned < 0.35 * untouched);  // more than 9 dB quieter
+
+    // A tone in the noise stays as loud as it was.
+    const double tone = rms_through(*denoiser, 0.5, 0.05, seed);
+    CHECK(tone == doctest::Approx(0.5 / std::sqrt(2.0)).epsilon(0.05));
+
+    // The learned noise is part of the state.
+    std::vector<char> state;
+    REQUIRE(denoiser->save_state(state));
+    auto other = ClapPlugin::create(kExamples, "org.toneofhell.denoiser", 48000.0, 2, &error);
+    REQUIRE(other != nullptr);
+    REQUIRE(other->load_state(state));
+    CHECK(rms_through(*other, 0.0, 0.05, seed) < 0.35 * untouched);
 }
 
 TEST_CASE("An instrument plugin plays the notes of its track, live keys too") {
