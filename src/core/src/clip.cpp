@@ -7,7 +7,7 @@ namespace toh::core {
 
 std::size_t read_clip_frames(const ClipData& clip, std::int64_t first, std::size_t count,
                              float* out) {
-    if (first < 0 || clip.channels == 0) {
+    if (first < 0 || clip.channels == 0 || clip.notes != nullptr) {
         return 0;
     }
     if (clip.disk != nullptr) {

@@ -48,6 +48,8 @@ struct Region {
     /// higher, like a tape). `length` counts timeline frames; the clip frames used are
     /// clip_frames_used().
     double rate = 1.0;
+    /// For note regions (clip->notes): the instrument that plays them.
+    Instrument instrument = Instrument::Keys;
 };
 
 /// How many frames of its clip a region plays.

@@ -46,9 +46,39 @@ std::vector<core::Region> engine_regions(const TrackInfo& track) {
         region.fade_out = info.fade_out;
         region.fade_shape = info.fade_shape;
         region.rate = info.rate;
+        region.instrument = track.instrument;
         regions.push_back(std::move(region));
     }
     return regions;
+}
+
+// A source of notes: the notes cleaned up and sorted, `frames` long.
+std::shared_ptr<const Source> note_source(std::string name, std::vector<core::Note> notes,
+                                          std::int64_t frames, std::uint32_t channels,
+                                          std::uint32_t sample_rate) {
+    std::vector<core::Note> clean;
+    clean.reserve(notes.size());
+    for (core::Note note : notes) {
+        if (note.length <= 0 || note.pitch > 127 || note.start < 0 || note.start >= frames) {
+            continue;
+        }
+        note.velocity = std::clamp(note.velocity, 0.0f, 1.0f);
+        note.length = std::min(note.length, frames - note.start);
+        clean.push_back(note);
+    }
+    std::stable_sort(clean.begin(), clean.end(),
+                     [](const core::Note& a, const core::Note& b) { return a.start < b.start; });
+    auto data = std::make_shared<core::NoteData>();
+    data->notes = std::move(clean);
+    data->frames = frames;
+    auto clip = std::make_shared<core::ClipData>();
+    clip->channels = channels;
+    clip->sample_rate = sample_rate;
+    clip->notes = std::move(data);
+    auto source = std::make_shared<Source>();
+    source->name = std::move(name);
+    source->clip = std::move(clip);
+    return source;
 }
 
 // Keeps the fades of a region inside its length.
@@ -69,6 +99,9 @@ Overview make_overview(const core::ClipData& clip, std::uint32_t frames_per_buck
     const auto frames = static_cast<std::size_t>(clip.frames());
     if (channels == 0 || frames == 0) {
         return overview;
+    }
+    if (clip.notes != nullptr) {
+        return overview;  // notes have no waveform
     }
     if (clip.disk != nullptr) {
         // Read the file block by block.
@@ -130,7 +163,7 @@ bool Overview::range(std::int64_t first_frame, std::int64_t last_frame, float& l
 
 bool Source::range(std::int64_t first_frame, std::int64_t last_frame, float& low,
                    float& high) const noexcept {
-    if (!clip || last_frame < first_frame) {
+    if (!clip || clip->notes != nullptr || last_frame < first_frame) {
         return false;
     }
     // Long ranges: the overview is accurate enough and much faster.
@@ -464,6 +497,46 @@ std::size_t Session::add_empty_track(std::string name) {
     return tracks_.size() - 1;
 }
 
+std::size_t Session::add_instrument_track(std::string name, core::Instrument instrument,
+                                          std::int64_t start, std::int64_t length) {
+    if (tracks_.size() >= core::Engine::kMaxTracks || length <= 0) {
+        return tracks_.size();
+    }
+    TrackInfo track;
+    track.name = name;
+    track.icon = "keys";
+    track.instrument = instrument;
+    RegionInfo region;
+    region.source = note_source(std::move(name), {}, length, config_.channels, config_.sample_rate);
+    region.start = std::max<std::int64_t>(start, 0);
+    region.length = length;
+    track.regions.push_back(std::move(region));
+    tracks_.push_back(std::move(track));
+    sync_engine_tracks(tracks_.size() - 1);
+    update_length();
+    return tracks_.size() - 1;
+}
+
+bool Session::set_region_notes(std::size_t track, std::size_t region, std::vector<core::Note> notes) {
+    RegionInfo* info = find_region(track, region);
+    if (info == nullptr || !info->has_notes()) {
+        return false;
+    }
+    info->source = note_source(info->source->name, std::move(notes), info->source->clip->frames(),
+                               config_.channels, config_.sample_rate);
+    sync_track_regions(track);
+    return true;
+}
+
+bool Session::set_track_instrument(std::size_t index, core::Instrument instrument) {
+    if (index >= tracks_.size()) {
+        return false;
+    }
+    tracks_[index].instrument = instrument;
+    sync_track_regions(index);
+    return true;
+}
+
 bool Session::remove_track(std::size_t index) {
     if (index >= tracks_.size()) {
         return false;
@@ -496,6 +569,7 @@ void Session::sync_track_regions(std::size_t index) {
         region.fade_out = info.fade_out;
         region.fade_shape = info.fade_shape;
         region.rate = info.rate;
+        region.instrument = tracks_[index].instrument;
         regions.push_back(std::move(region));
     }
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions);
@@ -759,7 +833,8 @@ bool Session::set_region_fade_shape(std::size_t track, std::size_t region, core:
 
 bool Session::set_region_speed(std::size_t track, std::size_t region, double speed) {
     RegionInfo* info = find_region(track, region);
-    if (info == nullptr || !(speed >= core::Engine::kMinSpeed && speed <= core::Engine::kMaxSpeed)) {
+    if (info == nullptr || info->has_notes() ||
+        !(speed >= core::Engine::kMinSpeed && speed <= core::Engine::kMaxSpeed)) {
         return false;
     }
     // The same audio at another speed: the length on the timeline changes instead.
@@ -830,6 +905,50 @@ bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
     const std::int64_t length = last->end() - begin;
     if (length <= 0 || length > static_cast<std::int64_t>(config_.sample_rate) * 3600) {
         return false;
+    }
+
+    // Note regions join into one note list. Audio and notes cannot be joined.
+    std::size_t with_notes = 0;
+    for (const std::size_t index : regions) {
+        if (list[index].has_notes()) {
+            ++with_notes;
+        }
+    }
+    if (with_notes != 0 && with_notes != regions.size()) {
+        return false;
+    }
+    if (with_notes != 0) {
+        std::vector<core::Note> notes;
+        for (const std::size_t index : regions) {
+            const RegionInfo& part = list[index];
+            const std::int64_t from = part.offset;
+            const std::int64_t to = part.offset + part.length;
+            for (const core::Note& note : part.source->clip->notes->notes) {
+                if (note.start < from || note.start >= to) {
+                    continue;
+                }
+                core::Note moved = note;
+                moved.start = part.start - begin + (note.start - from);
+                moved.length = std::min(note.length, to - note.start);
+                notes.push_back(moved);
+            }
+        }
+        RegionInfo merged;
+        merged.source = note_source(first->source->name, std::move(notes), length,
+                                    config_.channels, config_.sample_rate);
+        merged.start = begin;
+        merged.length = length;
+        const std::size_t position = regions.front();
+        for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
+            list.erase(list.begin() + static_cast<std::ptrdiff_t>(*it));
+        }
+        list.insert(list.begin() + static_cast<std::ptrdiff_t>(position), std::move(merged));
+        if (joined != nullptr) {
+            *joined = position;
+        }
+        sync_track_regions(track);
+        update_length();
+        return true;
     }
 
     // The joined audio is mixed block by block into a new cache file.
@@ -1307,6 +1426,7 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
             }
         }
         out << "icon=" << one_line(icon) << "\n";
+        out << "instrument=" << static_cast<int>(track.instrument) << "\n";
         out << "gain=" << track.gain << "\n";
         out << "pan=" << track.pan << "\n";
         out << "mute=" << (track.mute ? 1 : 0) << "\n";
@@ -1384,7 +1504,9 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
     const std::vector<std::shared_ptr<const Source>> sources = used_sources();
     std::vector<std::string> names;
     for (std::size_t i = 0; i < sources.size(); ++i) {
-        names.push_back("audio-" + std::to_string(i + 1) + ".f32");
+        names.push_back(sources[i]->clip->notes != nullptr
+                            ? "notes-" + std::to_string(i + 1) + ".txt"
+                            : "audio-" + std::to_string(i + 1) + ".f32");
     }
     // Pictures of tracks that come from files travel inside the project, so they are there on
     // another computer too and when the file is moved.
@@ -1434,6 +1556,22 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
         }
         for (std::size_t i = 0; ok && i < sources.size(); ++i) {
             const core::ClipData& clip = *sources[i]->clip;
+            if (clip.notes != nullptr) {
+                // Notes: one line per note, "start length pitch velocity".
+                std::ostringstream notes_text;
+                notes_text.imbue(std::locale::classic());
+                notes_text.precision(9);
+                notes_text << "frames=" << clip.notes->frames << "\n";
+                for (const core::Note& note : clip.notes->notes) {
+                    notes_text << note.start << " " << note.length << " "
+                               << static_cast<int>(note.pitch) << " " << note.velocity << "\n";
+                }
+                const std::string body = notes_text.str();
+                const std::string note_entry = "notes/" + names[i];
+                ok = mz_zip_writer_add_mem(&zip.zip, note_entry.c_str(), body.data(), body.size(),
+                                           MZ_DEFAULT_LEVEL) != 0;
+                continue;
+            }
             const std::string entry = "audio/" + names[i];
             const auto bytes = static_cast<mz_uint64>(clip.frames()) * clip.channels * sizeof(float);
             if (clip.disk != nullptr) {
@@ -1539,6 +1677,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         float pan = 0.0f;
         bool mute = false;
         bool solo = false;
+        long long instrument = 0;
         std::vector<RegionEntry> regions;
     };
     std::vector<SourceEntry> sources;
@@ -1628,6 +1767,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().mute = integer != 0;
                 } else if (key == "solo") {
                     tracks.back().solo = integer != 0;
+                } else if (key == "instrument") {
+                    tracks.back().instrument = integer;
                 }
                 break;
             case Section::Region: {
@@ -1669,6 +1810,53 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         if (!valid_audio_name(entry.file)) {
             set_error(error, "the project names an invalid audio file: " + entry.file);
             return false;
+        }
+        if (entry.file.size() > 4 && entry.file.compare(entry.file.size() - 4, 4, ".txt") == 0) {
+            // The notes of a note region.
+            const int note_index =
+                mz_zip_reader_locate_file(&zip.zip, ("notes/" + entry.file).c_str(), nullptr, 0);
+            std::string body;
+            if (note_index >= 0) {
+                std::size_t body_size = 0;
+                void* data = mz_zip_reader_extract_to_heap(&zip.zip, static_cast<mz_uint>(note_index),
+                                                           &body_size, 0);
+                if (data != nullptr) {
+                    body.assign(static_cast<const char*>(data), body_size);
+                    mz_free(data);
+                }
+            }
+            std::istringstream note_in(body);
+            note_in.imbue(std::locale::classic());
+            std::string note_line;
+            std::int64_t note_frames = 0;
+            std::vector<core::Note> notes;
+            while (std::getline(note_in, note_line)) {
+                if (note_line.rfind("frames=", 0) == 0) {
+                    note_frames = std::strtoll(note_line.c_str() + 7, nullptr, 10);
+                    continue;
+                }
+                std::istringstream fields(note_line);
+                fields.imbue(std::locale::classic());
+                long long note_start = 0;
+                long long note_length = 0;
+                int pitch = 0;
+                float velocity = 0.0f;
+                if (fields >> note_start >> note_length >> pitch >> velocity) {
+                    core::Note note;
+                    note.start = note_start;
+                    note.length = note_length;
+                    note.pitch = static_cast<std::uint8_t>(std::clamp(pitch, 0, 255));
+                    note.velocity = velocity;
+                    notes.push_back(note);
+                }
+            }
+            if (note_frames <= 0) {
+                set_error(error, "the notes of the project are missing or damaged: " + entry.file);
+                return false;
+            }
+            loaded.push_back(note_source(entry.name, std::move(notes), note_frames,
+                                         config_.channels, config_.sample_rate));
+            continue;
         }
         const int index =
             mz_zip_reader_locate_file(&zip.zip, ("audio/" + entry.file).c_str(), nullptr, 0);
@@ -1741,6 +1929,9 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         track.pan = entry.pan;
         track.mute = entry.mute;
         track.solo = entry.solo;
+        if (entry.instrument >= 0 && entry.instrument < core::kInstrumentCount) {
+            track.instrument = static_cast<core::Instrument>(entry.instrument);
+        }
         for (const RegionEntry& region : entry.regions) {
             if (region.source < 0 || static_cast<std::size_t>(region.source) >= loaded.size()) {
                 continue;
@@ -1845,6 +2036,9 @@ std::string describe_change(const std::vector<TrackInfo>& before,
         if (before[i].name != after[i].name) {
             return "Rename a track";
         }
+        if (before[i].instrument != after[i].instrument) {
+            return "Change the instrument";
+        }
         if (before[i].icon != after[i].icon) {
             return "Change a track picture";
         }
@@ -1862,8 +2056,8 @@ std::string Session::edit_text() const {
     out.imbue(std::locale::classic());
     out.precision(9);
     for (const TrackInfo& track : tracks_) {
-        out << "T|" << track.name << "|" << track.icon << "|" << track.gain << "|" << track.pan
-            << "\n";
+        out << "T|" << track.name << "|" << track.icon << "|" << track.gain << "|" << track.pan << "|"
+            << static_cast<int>(track.instrument) << "\n";
         for (const RegionInfo& region : track.regions) {
             out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
                 << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"

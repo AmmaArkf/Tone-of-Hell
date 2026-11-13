@@ -808,6 +808,26 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                     region.offset + clip_frames_used(region.length, region.rate);
                 std::array<float, 16> from_disk{};
                 std::array<float, 16> from_disk_next{};
+                // Note regions: the notes that sound somewhere in this block.
+                const NoteData* const note_data = region.clip->notes.get();
+                std::array<std::uint32_t, 64> active{};
+                std::size_t active_count = 0;
+                if (note_data != nullptr) {
+                    const double release = instrument_release_seconds(region.instrument) *
+                                           static_cast<double>(sample_rate_);
+                    const std::int64_t low = region.offset + std::max<std::int64_t>(block_low - begin, 0);
+                    const std::int64_t high = region.offset + (block_high - begin) + 1;
+                    for (std::size_t k = 0; k < note_data->notes.size() && active_count < active.size(); ++k) {
+                        const Note& note = note_data->notes[k];
+                        if (note.start > high) {
+                            break;  // the notes are sorted by start
+                        }
+                        if (static_cast<double>(note.start + note.length) + release >
+                            static_cast<double>(low)) {
+                            active[active_count++] = static_cast<std::uint32_t>(k);
+                        }
+                    }
+                }
                 for (std::uint32_t i = 0; i < frames; ++i) {
                     const std::int64_t position = frame_pos_[i];
                     if (position < begin || position >= end) {
@@ -825,6 +845,24 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                         region_fade *= fade_curve(region.fade_shape,
                                                   (static_cast<float>(remaining) + 0.5f) /
                                                       static_cast<float>(region.fade_out));
+                    }
+                    if (note_data != nullptr) {
+                        const double note_pos = static_cast<double>(region.offset) +
+                                                static_cast<double>(into) +
+                                                static_cast<double>(frame_frac_[i]);
+                        float value = 0.0f;
+                        for (std::size_t k = 0; k < active_count; ++k) {
+                            const Note& note = note_data->notes[active[k]];
+                            value += note_sample(region.instrument, note,
+                                                 note_pos - static_cast<double>(note.start),
+                                                 static_cast<double>(sample_rate_));
+                        }
+                        value *= region_fade;
+                        float* note_dst = scratch + static_cast<std::size_t>(i) * channels;
+                        for (std::size_t c = 0; c < channels; ++c) {
+                            note_dst[c] += value;
+                        }
+                        continue;
                     }
                     // Where in the clip this frame is: a region may play its clip faster or
                     // slower (rate), and the playhead may be between two frames.

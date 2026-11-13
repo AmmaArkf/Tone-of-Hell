@@ -2,6 +2,14 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.1
+
+The first step of level 1 (MIDI and instruments):
+
+- Instrument tracks: right-click the track area > New instrument track, then Keys, Organ, Pad or Pluck, four simple built-in synthesizers of our own. Such a track holds a note region (purple, with a bar for every note).
+- Double-click in a note region adds a note there (one beat long, on the grid, the height chooses the pitch from C3 to C6); double-clicking a note removes it. A proper piano roll comes next.
+- The instrument of a track can be changed from the right-click menu of its region. Note regions can be moved, trimmed, cut, joined, undone, exported and saved in projects like audio regions; they keep normal speed.
+
 ## 0.2.0
 
 Level 0 (the core) is complete: every stage from the audio engine to projects and undo has been checked on a real computer. New since 0.1.0:

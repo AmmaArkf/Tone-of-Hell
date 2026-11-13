@@ -977,6 +977,24 @@ void draw_icon_popup(Session& session, UiState& ui, std::size_t track) {
     ImGui::EndPopup();
 }
 
+// ---- Instruments -------------------------------------------------------------------------
+
+const char* instrument_name(toh::core::Instrument instrument) {
+    static const char* const names[] = {"Keys", "Organ", "Pad", "Pluck"};
+    return names[static_cast<int>(instrument)];
+}
+
+// A new track with an instrument and an empty note region of 8 bars (or the project's length).
+void add_instrument_track(Session& session, UiState& ui, toh::core::Instrument instrument) {
+    const std::int64_t length =
+        std::max<std::int64_t>(session.length_frames(), std::llround(session.bar_frames() * 8.0));
+    const std::size_t index = session.add_instrument_track(T_(instrument_name(instrument)),
+                                                           instrument, 0, length);
+    if (index >= session.tracks().size()) {
+        ui.error = T_("The track limit is reached.");
+    }
+}
+
 // ---- Playback speed ----------------------------------------------------------------------
 
 // The speed slider and choices, for menus and popups.
@@ -2024,6 +2042,7 @@ void draw_dialogs(UiState& ui) {
                 {"Right-click empty track space", "Menu: add a track"},
                 {"Drag a region close to another", "Its edge sticks to the other edge"},
                 {"Drag a region up or down", "Move it to another track"},
+                {"Double-click in an instrument region", "Add a note there, or remove the one under the mouse"},
                 {"Scissors on, click a region", "Cut it where the mouse is"},
                 {"J", "Join the selected region with the next one"},
                 {"Click a track name", "Select the track (Ctrl: several)"},
@@ -2588,6 +2607,24 @@ Hit hit_test(const Session& session, const View& view, const TrackInfo& track, c
     return Hit();
 }
 
+// Note regions show the pitches 48 to 84 (C3 to C6) from bottom to top.
+constexpr int kNoteRangeLow = 48;
+constexpr int kNoteRangeHigh = 84;
+
+float note_y(int pitch, float top, float height) {
+    const int clamped = std::clamp(pitch, kNoteRangeLow, kNoteRangeHigh);
+    const float t = static_cast<float>(clamped - kNoteRangeLow) /
+                    static_cast<float>(kNoteRangeHigh - kNoteRangeLow);
+    return top + height - 4.0f - t * (height - 8.0f);
+}
+
+int y_to_pitch(float y, float top, float height) {
+    const float t = (top + height - 4.0f - y) / (height - 8.0f);
+    const int pitch = kNoteRangeLow + static_cast<int>(std::lround(
+                                          t * static_cast<float>(kNoteRangeHigh - kNoteRangeLow)));
+    return std::clamp(pitch, kNoteRangeLow, kNoteRangeHigh);
+}
+
 // The name written on a region, with its speed when that is not normal.
 std::string region_title(const RegionInfo& region) {
     if (region.rate == 1.0) {
@@ -2612,7 +2649,10 @@ void draw_region(const Session& session, const View& view, const TrackInfo& trac
     const float bottom = top + height;
     const ImVec2 low(x0, top + 1.0f);
     const ImVec2 high(std::max(x1, x0 + 1.0f), bottom - 1.0f);
-    draw_list->AddRectFilled(low, high, selected ? IM_COL32(58, 84, 116, 255) : IM_COL32(44, 62, 84, 255),
+    draw_list->AddRectFilled(low, high,
+                             region.has_notes()
+                                 ? (selected ? IM_COL32(92, 70, 120, 255) : IM_COL32(70, 52, 96, 255))
+                                 : (selected ? IM_COL32(58, 84, 116, 255) : IM_COL32(44, 62, 84, 255)),
                              3.0f);
 
     // Waveform: one vertical line per pixel column, only for the visible part.
@@ -2642,6 +2682,27 @@ void draw_region(const Session& session, const View& view, const TrackInfo& trac
         const float px = static_cast<float>(column) + 0.5f;
         draw_list->AddLine(ImVec2(px, middle - high_value * half),
                            ImVec2(px, middle - low_value * half + 1.0f), wave);
+    }
+
+    // Notes: a bar for every note, its height showing the pitch.
+    if (region.has_notes()) {
+        const float row = std::max(2.0f, (height - 8.0f) / static_cast<float>(kNoteRangeHigh - kNoteRangeLow + 1));
+        for (const toh::core::Note& note : region.source->clip->notes->notes) {
+            const std::int64_t from = std::max(note.start, region.offset);
+            const std::int64_t to = std::min(note.start + note.length, region.offset + region.length);
+            if (from >= to) {
+                continue;
+            }
+            const float nx0 = frame_to_x(session, view, region.start + (from - region.offset));
+            const float nx1 =
+                std::max(frame_to_x(session, view, region.start + (to - region.offset)), nx0 + 2.0f);
+            if (nx1 < left_edge || nx0 > right_edge) {
+                continue;
+            }
+            const float y = note_y(note.pitch, top, height);
+            draw_list->AddRectFilled(ImVec2(nx0, y - row * 0.5f), ImVec2(nx1, y + row * 0.5f),
+                                     IM_COL32(255, 190, 110, 230), 1.0f);
+        }
     }
 
     // Fades: the part that is turned down is shaded, with a line along the fade.
@@ -2782,7 +2843,19 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
         }
-        if (ImGui::BeginMenu(T_("Region speed"), region != nullptr)) {
+        if (region != nullptr && region->has_notes() && ImGui::BeginMenu(T_("Instrument"))) {
+            const toh::core::Instrument current = session.tracks()[ui.selected_track].instrument;
+            for (int k = 0; k < toh::core::kInstrumentCount; ++k) {
+                const auto instrument = static_cast<toh::core::Instrument>(k);
+                if (ImGui::MenuItem(T_(instrument_name(instrument)), nullptr, current == instrument)) {
+                    session.set_track_instrument(ui.selected_track, instrument);
+                }
+            }
+            ImGui::Separator();
+            ImGui::TextDisabled("%s", T_("Double-click in the region: add or remove a note"));
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu(T_("Region speed"), region != nullptr && !region->has_notes())) {
             float percent = static_cast<float>(region->rate * 100.0);
             ImGui::SetNextItemWidth(14.0f * ImGui::GetFontSize());
             if (ImGui::SliderFloat("##region speed", &percent, 25.0f, 400.0f, T_("Speed: %.0f%%"),
@@ -2825,6 +2898,35 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         }
         draw_playback_menu(session, ui);
         ImGui::EndPopup();
+    }
+
+    // Double-click in a note region: add a note there, or remove the note under the mouse.
+    if (hovered && hit.kind != DragKind::None && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
+        hit.region < track.regions.size() && track.regions[hit.region].has_notes()) {
+        const RegionInfo& region = track.regions[hit.region];
+        const std::int64_t frame = x_to_frame(session, view, io.MousePos.x);
+        const std::int64_t at = region.offset + (frame - region.start);
+        const int pitch = y_to_pitch(io.MousePos.y, origin.y, row_height);
+        std::vector<toh::core::Note> notes = region.source->clip->notes->notes;
+        bool removed = false;
+        for (auto it = notes.begin(); it != notes.end(); ++it) {
+            if (it->pitch == pitch && at >= it->start && at < it->start + it->length) {
+                notes.erase(it);
+                removed = true;
+                break;
+            }
+        }
+        if (!removed) {
+            toh::core::Note note;
+            note.start = std::max<std::int64_t>(
+                region.offset + (session.snap_frame(frame) - region.start), region.offset);
+            note.length = std::max<std::int64_t>(std::llround(session.beat_frames()), 1);
+            note.pitch = static_cast<std::uint8_t>(pitch);
+            note.velocity = 0.8f;
+            notes.push_back(note);
+        }
+        session.set_region_notes(track_index, hit.region, std::move(notes));
+        ui.drag = DragKind::None;
     }
 
     // The drag itself.
@@ -3296,6 +3398,15 @@ void draw_tracks(Session& session, UiState& ui) {
         }
         if (ImGui::MenuItem(T_("New track for recording"))) {
             add_new_track(session, ui, true);
+        }
+        if (ImGui::BeginMenu(T_("New instrument track"))) {
+            for (int k = 0; k < toh::core::kInstrumentCount; ++k) {
+                const auto instrument = static_cast<toh::core::Instrument>(k);
+                if (ImGui::MenuItem(T_(instrument_name(instrument)))) {
+                    add_instrument_track(session, ui, instrument);
+                }
+            }
+            ImGui::EndMenu();
         }
         draw_playback_menu(session, ui);
         ImGui::EndPopup();

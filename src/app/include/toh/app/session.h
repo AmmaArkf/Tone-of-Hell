@@ -104,6 +104,10 @@ struct RegionInfo {
     double rate = 1.0;
 
     std::int64_t end() const noexcept { return start + length; }
+    /// True for a region of notes (played by the track's instrument) instead of audio.
+    bool has_notes() const noexcept {
+        return source && source->clip && source->clip->notes != nullptr;
+    }
     /// The source frames the region plays, from `offset` on.
     std::int64_t source_frames() const noexcept { return core::clip_frames_used(length, rate); }
 };
@@ -114,6 +118,8 @@ struct TrackInfo {
     /// The picture shown next to the track: empty for none, the name of a built-in picture
     /// (for example "guitar"), or "file:" followed by the path of an image file (UTF-8).
     std::string icon;
+    /// The instrument that plays the note regions of this track.
+    core::Instrument instrument = core::Instrument::Keys;
     std::vector<RegionInfo> regions;  // in the order they were created
     float gain = 1.0f;
     float pan = 0.0f;
@@ -179,6 +185,15 @@ public:
     /// Adds a track without any audio, for example to record onto. Returns its index, or
     /// tracks().size() when the track limit is reached.
     std::size_t add_empty_track(std::string name);
+    /// Adds a track with an instrument and one empty note region from `start`, `length`
+    /// frames long. Returns its index, or tracks().size() when the track limit is reached.
+    std::size_t add_instrument_track(std::string name, core::Instrument instrument,
+                                     std::int64_t start, std::int64_t length);
+    /// Replaces the notes of a note region. Notes are sorted by start; notes without a length,
+    /// outside the region's note list or above pitch 127 are dropped, velocities are limited
+    /// to 0..1. Returns false for an audio region.
+    bool set_region_notes(std::size_t track, std::size_t region, std::vector<core::Note> notes);
+    bool set_track_instrument(std::size_t index, core::Instrument instrument);
 
     const std::vector<TrackInfo>& tracks() const noexcept { return tracks_; }
     bool set_track_gain(std::size_t index, float linear);

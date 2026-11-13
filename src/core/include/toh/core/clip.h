@@ -5,6 +5,7 @@
 #include <memory>
 #include <vector>
 
+#include "toh/core/notes.h"
 #include "toh/core/paged_file.h"
 
 namespace toh::core {
@@ -17,11 +18,16 @@ namespace toh::core {
 struct ClipData {
     std::vector<float> samples;
     std::shared_ptr<PagedFile> disk;
+    /// For note regions: the notes that the track's instrument plays (no samples then).
+    std::shared_ptr<const NoteData> notes;
     std::uint32_t channels = 0;
     std::uint32_t sample_rate = 0;
 
     /// Number of frames (one frame holds one sample for every channel).
     std::int64_t frames() const noexcept {
+        if (notes != nullptr) {
+            return notes->frames;
+        }
         if (disk != nullptr) {
             return disk->frames();
         }
