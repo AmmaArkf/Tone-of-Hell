@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.1.2
+
+- Undo (Ctrl+Z) and redo (Ctrl+Y), also in the Edit menu, which names the step ("Undo: Remove a track"). Every edit of tracks and regions is a step, a whole drag is one step, and up to 200 steps are kept. Mute, solo, the selection, the loop and the metronome are not steps. Opening a project or starting a new one clears the history.
+
 ## 0.1.1
 
 - With the metronome on, playback goes on past the end of the project until you stop it (Edit > Settings > General > Metronome; on by default). A loop still loops.

@@ -304,6 +304,27 @@ public:
     /// True when the project differs from what was last saved, opened or started.
     bool modified() const;
 
+    // ---- Undo ----------------------------------------------------------------------------
+    // Edits of tracks and regions are recorded as steps. A user interface calls
+    // commit_edits() whenever a gesture has ended (for example every frame while no mouse
+    // button is held), so a whole drag becomes one step. Mute, solo, the track selection, the
+    // loop and the metronome are not steps of their own.
+
+    /// Records the edits since the last call as one step (does nothing without edits).
+    void commit_edits();
+    bool can_undo() const noexcept { return !undo_.empty(); }
+    bool can_redo() const noexcept { return !redo_.empty(); }
+    /// What undo() and redo() would take back or bring back, in English (for example
+    /// "Remove a track"); pass it through tr() to show it.
+    std::string undo_label() const;
+    std::string redo_label() const;
+    /// Return to the state before the last step / after the step that was undone. Both do
+    /// nothing (and return false) while recording or when there is nothing to do.
+    bool undo();
+    bool redo();
+    /// Forgets every step (done by open_project() and new_project()).
+    void clear_history();
+
     // ---- Export --------------------------------------------------------------------------
 
     /// Writes the whole project to a WAV file as it sounds (faders, pan, mute, solo and the
@@ -378,6 +399,17 @@ private:
                              const std::vector<std::string>& files) const;
     /// The project as it is now, for comparing (see modified()).
     std::string state_text() const;
+
+    /// The tracks as they were at one moment, for undo and redo.
+    struct Snapshot {
+        std::vector<TrackInfo> tracks;
+        std::string text;   // edit_text() of these tracks
+        std::string label;  // what the step that follows (or was undone) did
+    };
+    /// Everything about the tracks that counts as an edit (not mute, solo or selection).
+    std::string edit_text() const;
+    /// Puts the tracks of a snapshot back and tells the engine.
+    void restore_tracks(const std::vector<TrackInfo>& tracks);
     void sync_engine_tracks(std::size_t first);
     void update_length();
     void drain_recording();
@@ -436,6 +468,10 @@ private:
 
     std::filesystem::path project_file_;
     std::string saved_state_;  // state_text() when the project was saved, opened or started
+
+    std::vector<Snapshot> undo_;  // oldest first
+    std::vector<Snapshot> redo_;  // the most recently undone step last
+    Snapshot committed_;          // the tracks as of the last commit_edits()
 
     std::mutex loader_mutex_;  // guards the loader_ members below
     std::condition_variable loader_cv_;

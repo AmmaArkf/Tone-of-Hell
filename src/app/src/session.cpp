@@ -176,6 +176,7 @@ Session::Session(const audio::DeviceConfig& config)
       // A first guess for the way through the sound card: one buffer out and one buffer in.
       record_offset_(2 * static_cast<std::int64_t>(config.buffer_frames)) {
     saved_state_ = state_text();  // an empty project counts as saved
+    clear_history();
     loader_ = std::thread([this] { loader_main(); });
 }
 
@@ -1594,6 +1595,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     seek_frames(0);
     project_file_ = file;
     saved_state_ = state_text();
+    clear_history();
     return true;
 }
 
@@ -1610,6 +1612,141 @@ void Session::new_project() {
     seek_frames(0);
     project_file_.clear();
     saved_state_ = state_text();
+    clear_history();
+}
+
+// ---- Undo --------------------------------------------------------------------------------
+
+namespace {
+
+constexpr std::size_t kMaxUndoSteps = 200;
+
+std::size_t region_count(const std::vector<TrackInfo>& tracks) {
+    std::size_t count = 0;
+    for (const TrackInfo& track : tracks) {
+        count += track.regions.size();
+    }
+    return count;
+}
+
+// A short name for what changed between two states, for the Edit menu.
+std::string describe_change(const std::vector<TrackInfo>& before,
+                            const std::vector<TrackInfo>& after) {
+    if (after.size() > before.size()) {
+        return "Add a track";
+    }
+    if (after.size() < before.size()) {
+        return "Remove a track";
+    }
+    const std::size_t regions_before = region_count(before);
+    const std::size_t regions_after = region_count(after);
+    if (regions_after > regions_before) {
+        return "Split or record";
+    }
+    if (regions_after < regions_before) {
+        return "Remove or join regions";
+    }
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        if (before[i].name != after[i].name) {
+            return "Rename a track";
+        }
+        if (before[i].icon != after[i].icon) {
+            return "Change a track picture";
+        }
+        if (before[i].gain != after[i].gain || before[i].pan != after[i].pan) {
+            return "Volume or pan";
+        }
+    }
+    return "Edit regions";
+}
+
+}  // namespace
+
+std::string Session::edit_text() const {
+    std::ostringstream out;
+    out.imbue(std::locale::classic());
+    out.precision(9);
+    for (const TrackInfo& track : tracks_) {
+        out << "T|" << track.name << "|" << track.icon << "|" << track.gain << "|" << track.pan
+            << "\n";
+        for (const RegionInfo& region : track.regions) {
+            out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
+                << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"
+                << region.fade_out << "\n";
+        }
+    }
+    return out.str();
+}
+
+void Session::clear_history() {
+    undo_.clear();
+    redo_.clear();
+    committed_ = Snapshot{tracks_, edit_text(), {}};
+}
+
+void Session::commit_edits() {
+    if (recording_) {
+        return;  // the take is not finished yet
+    }
+    std::string text = edit_text();
+    if (text == committed_.text) {
+        return;
+    }
+    Snapshot previous = std::move(committed_);
+    previous.label = describe_change(previous.tracks, tracks_);
+    committed_ = Snapshot{tracks_, std::move(text), {}};
+    undo_.push_back(std::move(previous));
+    if (undo_.size() > kMaxUndoSteps) {
+        undo_.erase(undo_.begin());
+    }
+    redo_.clear();
+}
+
+std::string Session::undo_label() const { return undo_.empty() ? std::string() : undo_.back().label; }
+
+std::string Session::redo_label() const { return redo_.empty() ? std::string() : redo_.back().label; }
+
+bool Session::undo() {
+    if (recording_) {
+        return false;
+    }
+    commit_edits();  // an edit that was not committed yet is the step to take back
+    if (undo_.empty()) {
+        return false;
+    }
+    Snapshot target = std::move(undo_.back());
+    undo_.pop_back();
+    redo_.push_back(Snapshot{tracks_, committed_.text, target.label});
+    restore_tracks(target.tracks);
+    committed_ = Snapshot{tracks_, edit_text(), {}};
+    return true;
+}
+
+bool Session::redo() {
+    if (recording_) {
+        return false;
+    }
+    commit_edits();
+    if (redo_.empty()) {
+        return false;
+    }
+    Snapshot target = std::move(redo_.back());
+    redo_.pop_back();
+    undo_.push_back(Snapshot{tracks_, committed_.text, target.label});
+    restore_tracks(target.tracks);
+    committed_ = Snapshot{tracks_, edit_text(), {}};
+    return true;
+}
+
+void Session::restore_tracks(const std::vector<TrackInfo>& tracks) {
+    const std::size_t old_count = tracks_.size();
+    tracks_ = tracks;
+    sync_engine_tracks(0);
+    for (std::size_t slot = tracks_.size() + 1; slot < old_count; ++slot) {
+        clear_engine_slot(slot);
+    }
+    sync_mutes();
+    update_length();
 }
 
 void Session::clear_engine_slot(std::size_t slot) {

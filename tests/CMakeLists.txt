@@ -11,7 +11,8 @@ add_executable(toh_tests
     test_settings.cpp
     test_spsc_queue.cpp
     test_streaming.cpp
-    test_transport.cpp)
+    test_transport.cpp
+    test_undo.cpp)
 
 target_include_directories(toh_tests SYSTEM PRIVATE ${PROJECT_SOURCE_DIR}/third_party/doctest)
 target_link_libraries(toh_tests PRIVATE toh_core toh_app toh_miniz toh_warnings Threads::Threads)

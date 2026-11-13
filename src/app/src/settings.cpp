@@ -30,6 +30,8 @@ const ActionInfo kActions[kActionCount] = {
     {Action::SaveProject, "save_project", "Save the project", "Ctrl+S"},
     {Action::SaveProjectAs, "save_project_as", "Save the project as", "Ctrl+Shift+S"},
     {Action::CutTool, "cut_tool", "Scissors on or off", "C"},
+    {Action::Undo, "undo", "Undo", "Ctrl+Z"},
+    {Action::Redo, "redo", "Redo", "Ctrl+Y"},
 };
 
 std::string trimmed(const std::string& text) {

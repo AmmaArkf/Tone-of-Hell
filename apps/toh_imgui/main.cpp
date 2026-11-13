@@ -1276,6 +1276,16 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
         case Action::CutTool:
             ui.cut_tool = !ui.cut_tool;
             break;
+        case Action::Undo:
+            if (ui.drag == DragKind::None && session.undo()) {
+                ui.selected = false;
+            }
+            break;
+        case Action::Redo:
+            if (ui.drag == DragKind::None && session.redo()) {
+                ui.selected = false;
+            }
+            break;
         case Action::SaveProject:
             save_project(session, ui);
             break;
@@ -1651,7 +1661,20 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
 
     if (ImGui::BeginMenu(T_("Edit"))) {
         const RegionInfo* region = selected_region(session, ui);
-        ImGui::MenuItem(T_("Undo (planned for stage 5)"), "Ctrl+Z", false, false);
+        const std::string undo_text = session.can_undo()
+                                          ? std::string(T_("Undo")) + ": " + T_(session.undo_label().c_str())
+                                          : std::string(T_("Undo"));
+        if (ImGui::MenuItem(undo_text.c_str(), key_label(ui, Action::Undo), false, session.can_undo())) {
+            session.undo();
+            ui.selected = false;
+        }
+        const std::string redo_text = session.can_redo()
+                                          ? std::string(T_("Redo")) + ": " + T_(session.redo_label().c_str())
+                                          : std::string(T_("Redo"));
+        if (ImGui::MenuItem(redo_text.c_str(), key_label(ui, Action::Redo), false, session.can_redo())) {
+            session.redo();
+            ui.selected = false;
+        }
         ImGui::Separator();
         if (ImGui::MenuItem(T_("Split at the playhead"), key_label(ui, Action::Split), false, !session.tracks().empty())) {
             split_at_playhead(session, ui);
@@ -3343,6 +3366,11 @@ int main(int argc, char* argv[]) {
             draw_settings_window(session, ui);
             if (ui.settings_changed) {
                 save_settings(session, ui);
+            }
+            // A gesture has ended once nothing is held: its edits become one undo step.
+            if (ui.drag == DragKind::None && !ImGui::IsAnyItemActive() &&
+                !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                session.commit_edits();
             }
             if (ui.quit) {
                 running = false;

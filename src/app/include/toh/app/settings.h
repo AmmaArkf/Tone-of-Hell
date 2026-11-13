@@ -34,6 +34,8 @@ enum class Action {
     SaveProject,
     SaveProjectAs,
     CutTool,
+    Undo,
+    Redo,
     Count
 };
 
