@@ -55,6 +55,8 @@ struct Settings {
     float input_gain = 1.0f;
     /// Latency correction for recordings in frames; negative means "use the default".
     std::int64_t record_offset_frames = -1;
+    /// Only the selected tracks play (when any track is selected).
+    bool play_selected_only = false;
     std::array<std::string, kActionCount> shortcuts;
 
     const std::string& shortcut(Action action) const noexcept {

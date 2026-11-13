@@ -391,6 +391,32 @@ bool selected_track_has_regions_to_join(const Session& session, const UiState& u
            session.tracks()[ui.selected_track].regions.size() >= 2;
 }
 
+void set_play_selected_only(Session& session, UiState& ui, bool enabled) {
+    session.set_play_selected_only(enabled);
+    ui.settings.play_selected_only = enabled;
+    ui.settings_changed = true;
+}
+
+// A click on a track header: selects that track only; with Ctrl or Shift, adds it to the
+// selection or takes it out. Clicking the only selected track deselects it.
+void click_track(Session& session, std::size_t index) {
+    const ImGuiIO& io = ImGui::GetIO();
+    const bool was_selected = session.tracks()[index].selected;
+    if (io.KeyCtrl || io.KeyShift) {
+        session.set_track_selected(index, !was_selected);
+        return;
+    }
+    std::size_t count = 0;
+    for (const TrackInfo& track : session.tracks()) {
+        count += track.selected ? 1 : 0;
+    }
+    if (was_selected && count == 1) {
+        session.clear_track_selection();
+    } else {
+        session.select_only_track(index);
+    }
+}
+
 // ---- Menu bar ----------------------------------------------------------------------------
 
 // Asks for a file name to export to. `mp3_kbps` is -1 for a WAV file in `format`, otherwise the
@@ -888,6 +914,7 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
             break;
         case Action::Deselect:
             ui.selected = false;
+            session.clear_track_selection();
             break;
         case Action::AddFiles:
             open_file_dialog(pending, window);
@@ -988,6 +1015,14 @@ void draw_settings_window(Session& session, UiState& ui) {
                 toh::app::set_language(ui.settings.language);
                 ui.settings_changed = true;
             }
+
+            ImGui::SeparatorText(T_("Which tracks play"));
+            bool selected_only = session.play_selected_only();
+            if (ImGui::Checkbox(T_("Play only the selected tracks"), &selected_only)) {
+                set_play_selected_only(session, ui, selected_only);
+            }
+            ImGui::TextDisabled("%s", T_("Click a track name to select it, Ctrl+click to select several. "
+                                         "With nothing selected, every track plays."));
 
             ImGui::SeparatorText(T_("Performance"));
             ImGui::BeginDisabled();
@@ -1246,6 +1281,11 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
     }
 
     if (ImGui::BeginMenu(T_("Transport"))) {
+        bool selected_only = session.play_selected_only();
+        if (ImGui::MenuItem(T_("Play only the selected tracks"), nullptr, &selected_only)) {
+            set_play_selected_only(session, ui, selected_only);
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem(T_(session.is_playing() ? "Pause" : "Play"),
                             key_label(ui, Action::PlayPause))) {
             session.toggle_play();
@@ -1317,6 +1357,7 @@ void draw_dialogs(UiState& ui) {
                 {"Right-click empty track space", "Menu: add a track"},
                 {"Drag a region close to another", "Its edge sticks to the other edge"},
                 {"J", "Join the selected region with the next one"},
+                {"Click a track name", "Select the track (Ctrl: several)"},
                 {"Double-click a track name", "Rename the track"},
                 {"Click the picture of a track", "Choose a picture for it"},
             };
@@ -2150,8 +2191,19 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     const float font = ImGui::GetFontSize();
     bool remove = false;
 
+    // A selected track has a blue header; a track that is not heard is drawn faded.
+    const bool dimmed = !session.track_audible(i);
+    if (dimmed) {
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.55f);
+    }
+    if (track.selected) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.17f, 0.25f, 0.40f, 1.0f));
+    }
     ImGui::BeginChild("header", ImVec2(header_width, row_height), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_NoScrollbar);
+    if (track.selected) {
+        ImGui::PopStyleColor();
+    }
 
     // The picture on the left of the controls: click it to choose another.
     const float icon_size = row_height - 2.0f * ImGui::GetStyle().WindowPadding.y - 2.0f;
@@ -2194,7 +2246,11 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     const float title_width = remove_x - ImGui::GetCursorPosX() - style.ItemSpacing.x;
     ImGui::TextUnformatted(fit_text(title, title_width).c_str());
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-        ImGui::SetTooltip(T_("%s\n(double-click to rename)"), title.c_str());
+        ImGui::SetTooltip(T_("%s\n(click to select, double-click to rename)"), title.c_str());
+    }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        !ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        click_track(session, i);
     }
     if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         ui.rename_open = true;
@@ -2283,7 +2339,14 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
         ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         ui.open_track_menu = true;  // empty part of the track header
     }
+    if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        click_track(session, i);
+    }
     ImGui::EndChild();
+    if (dimmed) {
+        ImGui::PopStyleVar();
+    }
     return remove;
 }
 
@@ -2589,6 +2652,7 @@ int main(int argc, char* argv[]) {
         session.set_devices(ui.settings.output_device, ui.settings.input_device);
         session.set_master_gain(ui.settings.master_gain);
         session.set_input_gain(ui.settings.input_gain);
+        session.set_play_selected_only(ui.settings.play_selected_only);
         if (ui.settings.record_offset_frames >= 0) {
             session.set_record_offset_frames(ui.settings.record_offset_frames);
         }

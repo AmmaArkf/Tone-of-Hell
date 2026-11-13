@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.12
+
+- Tracks can be selected: click a track name or the empty part of its header (Ctrl or Shift adds more; Escape clears). A selected track has a blue header.
+- New option "Play only the selected tracks" (Edit > Settings > General, and the Transport menu): when it is on and some tracks are selected, only those are heard, in playback and in exports. With nothing selected every track plays. Tracks that are not heard are drawn faded.
+
 ## 0.0.11
 
 - Regions can be glued into one: "Join with the next region" (J) and "Join all regions of the track", in the Edit menu and in the right-click menu of a region. Overlaps are mixed, gaps become silence, and the outer fades stay adjustable.

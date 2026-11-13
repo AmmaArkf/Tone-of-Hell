@@ -153,6 +153,47 @@ TEST_CASE("Session adds empty tracks that can be recorded onto") {
     CHECK(session.add_empty_track("one too many") == session.tracks().size());
 }
 
+TEST_CASE("Session can play only the selected tracks") {
+    Session session;
+    session.add_empty_track("one");
+    session.add_empty_track("two");
+    session.add_empty_track("three");
+    const auto audible = [&](bool a, bool b, bool c) {
+        return session.track_audible(0) == a && session.track_audible(1) == b &&
+               session.track_audible(2) == c;
+    };
+    CHECK(audible(true, true, true));
+
+    REQUIRE(session.set_track_selected(1, true));
+    CHECK(audible(true, true, true));  // the option is off
+    session.set_play_selected_only(true);
+    CHECK(session.play_selected_only());
+    CHECK(audible(false, true, false));
+    REQUIRE(session.set_track_selected(2, true));
+    CHECK(audible(false, true, true));
+
+    session.select_only_track(0);
+    CHECK(session.tracks()[0].selected);
+    CHECK_FALSE(session.tracks()[1].selected);
+    CHECK(audible(true, false, false));
+    REQUIRE(session.set_track_mute(0, true));
+    CHECK(audible(false, false, false));
+    REQUIRE(session.set_track_mute(0, false));
+
+    session.clear_track_selection();
+    CHECK(audible(true, true, true));  // nothing selected: every track plays
+
+    session.select_only_track(2);
+    REQUIRE(session.remove_track(2));
+    CHECK(session.track_audible(0));
+    CHECK(session.track_audible(1));
+
+    REQUIRE(session.set_track_solo(1, true));
+    CHECK_FALSE(session.track_audible(0));
+    CHECK(session.track_audible(1));
+    CHECK_FALSE(session.set_track_selected(7, true));
+}
+
 TEST_CASE("Session renames tracks and gives them pictures") {
     Session session;
     session.add_empty_track("Track 1");

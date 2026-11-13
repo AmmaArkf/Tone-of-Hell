@@ -230,6 +230,7 @@ bool Session::remove_track(std::size_t index) {
         }
     }
     sync_engine_tracks(index);  // every later track moves up one slot
+    sync_mutes();               // the removed track may have been the only selected one
     update_length();
     return true;
 }
@@ -259,7 +260,7 @@ void Session::sync_engine_tracks(std::size_t first) {
         sync_track_regions(i);
         engine_.set_track_gain(slot, track.gain);
         engine_.set_track_pan(slot, track.pan);
-        engine_.set_track_mute(slot, track.mute);
+        engine_.set_track_mute(slot, silenced(track));
         engine_.set_track_solo(slot, track.solo);
     }
     if (tracks_.size() < core::Engine::kMaxTracks) {
@@ -299,11 +300,75 @@ bool Session::set_track_pan(std::size_t index, float pan) {
 }
 
 bool Session::set_track_mute(std::size_t index, bool mute) {
-    if (index >= tracks_.size() ||
-        !engine_.set_track_mute(static_cast<std::uint32_t>(index), mute)) {
+    if (index >= tracks_.size()) {
         return false;
     }
     tracks_[index].mute = mute;
+    engine_.set_track_mute(static_cast<std::uint32_t>(index), silenced(tracks_[index]));
+    return true;
+}
+
+bool Session::set_track_selected(std::size_t index, bool selected) {
+    if (index >= tracks_.size()) {
+        return false;
+    }
+    tracks_[index].selected = selected;
+    sync_mutes();
+    return true;
+}
+
+void Session::select_only_track(std::size_t index) {
+    for (std::size_t i = 0; i < tracks_.size(); ++i) {
+        tracks_[i].selected = i == index;
+    }
+    sync_mutes();
+}
+
+void Session::clear_track_selection() {
+    for (TrackInfo& track : tracks_) {
+        track.selected = false;
+    }
+    sync_mutes();
+}
+
+void Session::set_play_selected_only(bool enabled) {
+    play_selected_only_ = enabled;
+    sync_mutes();
+}
+
+bool Session::silenced(const TrackInfo& track) const noexcept {
+    if (track.mute) {
+        return true;
+    }
+    if (!play_selected_only_ || track.selected) {
+        return false;
+    }
+    for (const TrackInfo& other : tracks_) {
+        if (other.selected) {
+            return true;  // some track is selected, and this one is not
+        }
+    }
+    return false;
+}
+
+void Session::sync_mutes() {
+    for (std::size_t i = 0; i < tracks_.size(); ++i) {
+        engine_.set_track_mute(static_cast<std::uint32_t>(i), silenced(tracks_[i]));
+    }
+}
+
+bool Session::track_audible(std::size_t index) const noexcept {
+    if (index >= tracks_.size() || silenced(tracks_[index])) {
+        return false;
+    }
+    if (tracks_[index].solo) {
+        return true;
+    }
+    for (const TrackInfo& other : tracks_) {
+        if (other.solo) {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -749,7 +814,7 @@ bool Session::render_project(const std::function<bool(const float*, std::uint32_
         offline->set_track_regions(slot, engine_regions(track));
         offline->set_track_gain(slot, track.gain);
         offline->set_track_pan(slot, track.pan);
-        offline->set_track_mute(slot, track.mute);
+        offline->set_track_mute(slot, silenced(track));
         offline->set_track_solo(slot, track.solo);
     }
     offline->set_gain(master_gain_);

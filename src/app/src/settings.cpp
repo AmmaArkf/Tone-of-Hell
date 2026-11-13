@@ -97,6 +97,8 @@ bool Settings::load(const std::filesystem::path& path) {
             if (end != value.c_str()) {
                 record_offset_frames = number;
             }
+        } else if (key == "play_selected_only") {
+            play_selected_only = value == "1" || value == "true";
         } else if (key.rfind("shortcut.", 0) == 0) {
             const std::string id = key.substr(9);
             for (std::size_t i = 0; i < kActionCount; ++i) {
@@ -122,6 +124,7 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "master_gain=" << master_gain << "\n";
     file << "input_gain=" << input_gain << "\n";
     file << "record_offset_frames=" << record_offset_frames << "\n";
+    file << "play_selected_only=" << (play_selected_only ? 1 : 0) << "\n";
     for (std::size_t i = 0; i < kActionCount; ++i) {
         file << "shortcut." << kActions[i].id << "=" << shortcuts[i] << "\n";
     }

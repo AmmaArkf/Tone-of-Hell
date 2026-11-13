@@ -65,6 +65,7 @@ struct TrackInfo {
     float pan = 0.0f;
     bool mute = false;
     bool solo = false;
+    bool selected = false;  // see Session::set_play_selected_only()
 };
 
 /// Settings of the built-in metronome. `bpm` counts quarter notes per minute; the time
@@ -120,6 +121,17 @@ public:
     bool set_track_pan(std::size_t index, float pan);
     bool set_track_mute(std::size_t index, bool mute);
     bool set_track_solo(std::size_t index, bool solo);
+    bool set_track_selected(std::size_t index, bool selected);
+    /// Selects one track and deselects every other one.
+    void select_only_track(std::size_t index);
+    void clear_track_selection();
+    /// When on and at least one track is selected, only the selected tracks are heard, in
+    /// playback and in exports. With nothing selected every track plays.
+    void set_play_selected_only(bool enabled);
+    bool play_selected_only() const noexcept { return play_selected_only_; }
+    /// Whether a track is heard: not muted, not silenced by the solo of another track and not
+    /// left out by "play only the selected tracks".
+    bool track_audible(std::size_t index) const noexcept;
     /// Renames a track. Spaces at either end are removed; an empty name is refused.
     bool set_track_name(std::size_t index, const std::string& name);
     /// Sets the picture of a track (see TrackInfo::icon).
@@ -262,6 +274,10 @@ public:
 
 private:
     RegionInfo* find_region(std::size_t track, std::size_t region) noexcept;
+    /// Whether the engine should silence a track: muted, or left out by the selection.
+    bool silenced(const TrackInfo& track) const noexcept;
+    /// Sends the silenced state of every track to the engine.
+    void sync_mutes();
     void sync_track_regions(std::size_t index);
     void sync_engine_tracks(std::size_t first);
     void update_length();
@@ -280,6 +296,7 @@ private:
     bool loop_ = false;
     bool reverse_ = false;
     bool snap_ = true;
+    bool play_selected_only_ = false;
     GridStep grid_step_ = GridStep::Beat;
     MetronomeSettings metronome_;
     std::int64_t length_frames_ = 0;
