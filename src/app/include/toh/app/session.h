@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -287,6 +288,21 @@ public:
     /// True when the running take reached full scale: the input was overloaded.
     bool take_clipped() const noexcept { return take_writer_.clipped(); }
 
+    // ---- Project -------------------------------------------------------------------------
+
+    /// Saves the project: a text file (`file`, usually "*.tohp") and, next to it, a folder
+    /// named after it plus " audio" with the audio of every region. Audio that is already in
+    /// that folder is not written again, and audio files that nothing uses any more are
+    /// removed. Returns false on failure (`error`, if given, says why).
+    bool save_project(const std::filesystem::path& file, std::string* error = nullptr);
+    /// Replaces everything in the session with a project saved by save_project(). On failure
+    /// nothing changes.
+    bool open_project(const std::filesystem::path& file, std::string* error = nullptr);
+    /// Empties the session: no tracks, the playhead at the start, no project file.
+    void new_project();
+    /// The file the project was last saved to or opened from; empty for a new project.
+    const std::filesystem::path& project_file() const noexcept { return project_file_; }
+
     // ---- Export --------------------------------------------------------------------------
 
     /// Writes the whole project to a WAV file as it sounds (faders, pan, mute, solo and the
@@ -348,6 +364,8 @@ private:
     /// Sends the silenced state of every track to the engine.
     void sync_mutes();
     void sync_track_regions(std::size_t index);
+    /// Empties one track slot of the engine.
+    void clear_engine_slot(std::size_t slot);
     void sync_engine_tracks(std::size_t first);
     void update_length();
     void drain_recording();
@@ -404,6 +422,11 @@ private:
     std::filesystem::path cache_folder_;
     int cache_count_ = 0;
 
+    std::filesystem::path project_file_;
+    std::filesystem::path project_audio_folder_;
+    /// The file in project_audio_folder_ that holds each source, for sources saved there.
+    std::map<std::shared_ptr<const Source>, std::string> saved_audio_;
+
     std::mutex loader_mutex_;  // guards the loader_ members below
     std::condition_variable loader_cv_;
     std::vector<StreamRegion> loader_regions_;
@@ -413,6 +436,7 @@ private:
     bool loader_stop_ = false;
     std::int64_t loader_hint_ = -1;  // a position just jumped to, not yet seen by the engine
     std::mutex prefetch_mutex_;      // one thread at a time fills the pages
+    std::mutex loader_busy_;         // held by the loader while it holds copies of regions
     std::thread loader_;             // last: started when everything else exists
 };
 

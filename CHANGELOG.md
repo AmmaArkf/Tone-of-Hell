@@ -2,6 +2,13 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.18
+
+- Projects can be saved and opened: File > New project (Ctrl+N), Open a project (Ctrl+Shift+O), Save the project (Ctrl+S) and Save the project as (Ctrl+Shift+S). The first Ctrl+S asks where to save.
+- A project is a text file ("*.tohp") with a folder next to it ("<name> audio") that holds its audio. Saving again writes only new audio and removes audio that is no longer used.
+- The dialogs start in "Documents/Tone of Hell"; Edit > Settings > General > Projects chooses another folder.
+- The window title shows the name of the project.
+
 ## 0.0.17
 
 - The window can open maximized or in full screen: Edit > Settings > General > Window.

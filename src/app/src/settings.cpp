@@ -25,6 +25,10 @@ const ActionInfo kActions[kActionCount] = {
     {Action::ZoomFit, "zoom_fit", "Show the whole project", "F"},
     {Action::NewTrack, "new_track", "New track", "Ctrl+T"},
     {Action::FullScreen, "full_screen", "Full screen on or off", "F11"},
+    {Action::NewProject, "new_project", "New project", "Ctrl+N"},
+    {Action::OpenProject, "open_project", "Open a project", "Ctrl+Shift+O"},
+    {Action::SaveProject, "save_project", "Save the project", "Ctrl+S"},
+    {Action::SaveProjectAs, "save_project_as", "Save the project as", "Ctrl+Shift+S"},
 };
 
 std::string trimmed(const std::string& text) {
@@ -98,6 +102,8 @@ bool Settings::load(const std::filesystem::path& path) {
             if (end != value.c_str()) {
                 record_offset_frames = number;
             }
+        } else if (key == "projects_folder") {
+            projects_folder = value;
         } else if (key == "start_window") {
             const int number = std::atoi(value.c_str());
             if (number >= 0 && number <= 2) {
@@ -139,6 +145,7 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "play_selected_only=" << (play_selected_only ? 1 : 0) << "\n";
     file << "magnet=" << (magnet ? 1 : 0) << "\n";
     file << "start_window=" << start_window << "\n";
+    file << "projects_folder=" << projects_folder << "\n";
     file << "reverse_starts_playback=" << (reverse_starts_playback ? 1 : 0) << "\n";
     file << "reverse_off_at_start=" << (reverse_off_at_start ? 1 : 0) << "\n";
     for (std::size_t i = 0; i < kActionCount; ++i) {

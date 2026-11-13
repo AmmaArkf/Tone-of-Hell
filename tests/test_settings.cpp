@@ -60,6 +60,7 @@ TEST_CASE("Settings survive saving and loading") {
     saved.play_selected_only = true;
     saved.magnet = false;
     saved.start_window = 2;
+    saved.projects_folder = "D:/Music/\xD0\x9F\xD1\x80\xD0\xBE\xD0\xB5\xD0\xBA\xD1\x82\xD1\x8B";
     saved.reverse_starts_playback = false;
     saved.shortcuts[static_cast<std::size_t>(Action::Record)] = "";
     REQUIRE(saved.save(path));
@@ -76,6 +77,7 @@ TEST_CASE("Settings survive saving and loading") {
     CHECK(loaded.play_selected_only);
     CHECK_FALSE(loaded.magnet);
     CHECK(loaded.start_window == 2);
+    CHECK(loaded.projects_folder == saved.projects_folder);
     CHECK_FALSE(loaded.reverse_starts_playback);
     CHECK(loaded.reverse_off_at_start);
     CHECK(loaded.shortcut(Action::Record).empty());

@@ -4,6 +4,7 @@ add_executable(toh_tests
     test_join.cpp
     test_mixer.cpp
     test_mp3.cpp
+    test_project.cpp
     test_recording.cpp
     test_regions.cpp
     test_session.cpp

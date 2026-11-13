@@ -3,7 +3,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
 #include <map>
+#include <set>
 #include <system_error>
 #include <utility>
 
@@ -316,15 +319,22 @@ void Session::loader_main() {
             break;
         }
         loader_wake_ = false;
-        const std::vector<StreamRegion> regions = loader_regions_;
-        const bool reverse = loader_reverse_;
-        const bool loop = loader_loop_;
-        const std::int64_t hint = loader_hint_;
-        loader_hint_ = -1;
-        lock.unlock();
-        if (!regions.empty()) {
-            prefetch_regions(regions, hint >= 0 ? hint : engine_.position_frames(), reverse, loop);
+        std::unique_lock<std::mutex> busy(loader_busy_);
+        {
+            // The copy keeps the files open while their pages load; it is gone before `busy`
+            // is released.
+            const std::vector<StreamRegion> regions = loader_regions_;
+            const bool reverse = loader_reverse_;
+            const bool loop = loader_loop_;
+            const std::int64_t hint = loader_hint_;
+            loader_hint_ = -1;
+            lock.unlock();
+            if (!regions.empty()) {
+                prefetch_regions(regions, hint >= 0 ? hint : engine_.position_frames(), reverse,
+                                 loop);
+            }
         }
+        busy.unlock();
         lock.lock();
     }
 }
@@ -1115,6 +1125,458 @@ void Session::finish_take() {
     tracks_[record_track_].regions.push_back(std::move(region));
     sync_track_regions(record_track_);
     update_length();
+}
+
+// ---- Project -----------------------------------------------------------------------------
+
+namespace {
+
+constexpr const char* kProjectHeader = "Tone of Hell project";
+
+// A project file holds one value per line, so line breaks inside names become spaces.
+std::string one_line(std::string text) {
+    for (char& c : text) {
+        if (c == '\n' || c == '\r') {
+            c = ' ';
+        }
+    }
+    return text;
+}
+
+std::filesystem::path audio_folder_of(const std::filesystem::path& file) {
+    std::filesystem::path folder = file.parent_path() / file.stem();
+    folder += " audio";
+    return folder;
+}
+
+// Writes the audio of a clip as raw float samples (the format of the cache files).
+bool write_audio_file(const core::ClipData& clip, const std::filesystem::path& path,
+                      std::string* error) {
+    if (clip.disk != nullptr) {
+        std::error_code code;
+        std::filesystem::copy_file(clip.disk->path(), path,
+                                   std::filesystem::copy_options::overwrite_existing, code);
+        if (code) {
+            set_error(error, "cannot copy audio into the project folder: " + code.message());
+            return false;
+        }
+        return true;
+    }
+    std::FILE* file = core::open_file(path, "wb");
+    if (file == nullptr) {
+        set_error(error, "cannot create " + path.u8string());
+        return false;
+    }
+    const std::size_t samples = clip.samples.size();
+    const bool written =
+        samples == 0 || std::fwrite(clip.samples.data(), sizeof(float), samples, file) == samples;
+    const bool closed = std::fclose(file) == 0;
+    if (!written || !closed) {
+        set_error(error, "cannot write " + path.u8string() + " (is the disk full?)");
+        return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+bool Session::save_project(const std::filesystem::path& file, std::string* error) {
+    const std::filesystem::path folder = audio_folder_of(file);
+    std::error_code code;
+    std::filesystem::create_directories(folder, code);
+    if (code) {
+        set_error(error, "cannot create the folder " + folder.u8string() + ": " + code.message());
+        return false;
+    }
+    if (folder != project_audio_folder_) {
+        saved_audio_.clear();  // another project: its audio is written anew
+        project_audio_folder_ = folder;
+    }
+
+    // Every source that a region uses, in a fixed order, with the file that holds it.
+    std::vector<std::shared_ptr<const Source>> sources;
+    std::map<const Source*, std::size_t> index_of;
+    for (const TrackInfo& track : tracks_) {
+        for (const RegionInfo& region : track.regions) {
+            if (index_of.emplace(region.source.get(), sources.size()).second) {
+                sources.push_back(region.source);
+            }
+        }
+    }
+    std::map<std::shared_ptr<const Source>, std::string> files;
+    std::set<std::string> taken;
+    for (const auto& source : sources) {
+        const auto saved = saved_audio_.find(source);
+        if (saved != saved_audio_.end() && std::filesystem::exists(folder / saved->second, code)) {
+            files[source] = saved->second;
+            taken.insert(saved->second);
+        }
+    }
+    int next = 1;
+    for (const auto& source : sources) {
+        if (files.count(source) != 0) {
+            continue;
+        }
+        std::string name;
+        do {
+            name = "audio-" + std::to_string(next++) + ".f32";
+        } while (taken.count(name) != 0 || std::filesystem::exists(folder / name, code));
+        if (!write_audio_file(*source->clip, folder / name, error)) {
+            return false;
+        }
+        files[source] = name;
+        taken.insert(name);
+    }
+
+    // The project file is written under another name first, so a failed save never leaves a
+    // broken project behind.
+    std::filesystem::path temporary = file;
+    temporary += ".saving";
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            set_error(error, "cannot create " + file.u8string());
+            return false;
+        }
+        out.imbue(std::locale::classic());
+        out.precision(17);
+        out << kProjectHeader << "\n";
+        out << "version=1\n";
+        out << "sample_rate=" << config_.sample_rate << "\n";
+        out << "channels=" << config_.channels << "\n";
+        out << "loop=" << (loop_ ? 1 : 0) << "\n";
+        out << "metronome=" << (metronome_.enabled ? 1 : 0) << "\n";
+        out << "bpm=" << metronome_.bpm << "\n";
+        out << "beats_per_bar=" << metronome_.beats_per_bar << "\n";
+        out << "beat_unit=" << metronome_.beat_unit << "\n";
+        out << "metronome_volume=" << metronome_.volume << "\n";
+        out << "grid_step=" << static_cast<int>(grid_step_) << "\n";
+        for (const auto& source : sources) {
+            out << "\n[source]\n";
+            out << "file=" << files[source] << "\n";
+            out << "name=" << one_line(source->name) << "\n";
+        }
+        for (const TrackInfo& track : tracks_) {
+            out << "\n[track]\n";
+            out << "name=" << one_line(track.name) << "\n";
+            out << "icon=" << one_line(track.icon) << "\n";
+            out << "gain=" << track.gain << "\n";
+            out << "pan=" << track.pan << "\n";
+            out << "mute=" << (track.mute ? 1 : 0) << "\n";
+            out << "solo=" << (track.solo ? 1 : 0) << "\n";
+            for (const RegionInfo& region : track.regions) {
+                out << "[region]\n";
+                out << "source=" << index_of[region.source.get()] << "\n";
+                out << "start=" << region.start << "\n";
+                out << "offset=" << region.offset << "\n";
+                out << "length=" << region.length << "\n";
+                out << "fade_in=" << region.fade_in << "\n";
+                out << "fade_out=" << region.fade_out << "\n";
+            }
+        }
+        out.flush();
+        if (!out) {
+            set_error(error, "cannot write " + file.u8string() + " (is the disk full?)");
+            out.close();
+            std::filesystem::remove(temporary, code);
+            return false;
+        }
+    }
+    std::filesystem::rename(temporary, file, code);
+    if (code) {
+        std::error_code ignored;
+        std::filesystem::remove(file, ignored);
+        code.clear();
+        std::filesystem::rename(temporary, file, code);
+    }
+    if (code) {
+        set_error(error, "cannot replace " + file.u8string() + ": " + code.message());
+        return false;
+    }
+
+    // Audio files of this project that nothing uses any more. The loader must not hold one
+    // open meanwhile (a file that is still open cannot be removed on Windows; it goes with a
+    // later save).
+    saved_audio_ = std::move(files);
+    const std::lock_guard<std::mutex> busy(loader_busy_);
+    for (std::filesystem::directory_iterator it(folder, code), end; !code && it != end;
+         it.increment(code)) {
+        const std::string name = it->path().filename().u8string();
+        if (name.rfind("audio-", 0) == 0 && it->path().extension() == ".f32" &&
+            taken.count(name) == 0) {
+            std::error_code ignored;
+            std::filesystem::remove(it->path(), ignored);
+        }
+    }
+    project_file_ = file;
+    return true;
+}
+
+bool Session::open_project(const std::filesystem::path& file, std::string* error) {
+    if (recording_) {
+        set_error(error, "stop the recording first");
+        return false;
+    }
+    std::ifstream in(file, std::ios::binary);
+    if (!in) {
+        set_error(error, "cannot open " + file.u8string());
+        return false;
+    }
+    std::string line;
+    std::getline(in, line);
+    if (!line.empty() && line.back() == '\r') {
+        line.pop_back();
+    }
+    if (line != kProjectHeader) {
+        set_error(error, "this is not a Tone of Hell project");
+        return false;
+    }
+
+    struct SourceEntry {
+        std::string file;
+        std::string name;
+    };
+    struct RegionEntry {
+        long long source = -1;
+        std::int64_t start = 0;
+        std::int64_t offset = 0;
+        std::int64_t length = 0;
+        std::int64_t fade_in = 0;
+        std::int64_t fade_out = 0;
+    };
+    struct TrackEntry {
+        std::string name;
+        std::string icon;
+        float gain = 1.0f;
+        float pan = 0.0f;
+        bool mute = false;
+        bool solo = false;
+        std::vector<RegionEntry> regions;
+    };
+    std::vector<SourceEntry> sources;
+    std::vector<TrackEntry> tracks;
+    long long rate = 0;
+    long long channels = 0;
+    bool loop = false;
+    MetronomeSettings metronome = metronome_;
+    long long grid = static_cast<long long>(grid_step_);
+    enum class Section { Head, Source, Track, Region } section = Section::Head;
+
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        if (line == "[source]") {
+            sources.emplace_back();
+            section = Section::Source;
+            continue;
+        }
+        if (line == "[track]") {
+            tracks.emplace_back();
+            section = Section::Track;
+            continue;
+        }
+        if (line == "[region]") {
+            if (tracks.empty()) {
+                tracks.emplace_back();
+            }
+            tracks.back().regions.emplace_back();
+            section = Section::Region;
+            continue;
+        }
+        const std::size_t equals = line.find('=');
+        if (equals == std::string::npos) {
+            continue;
+        }
+        const std::string key = line.substr(0, equals);
+        const std::string value = line.substr(equals + 1);
+        const long long integer = std::strtoll(value.c_str(), nullptr, 10);
+        const double real = std::strtod(value.c_str(), nullptr);
+        switch (section) {
+            case Section::Head:
+                if (key == "sample_rate") {
+                    rate = integer;
+                } else if (key == "channels") {
+                    channels = integer;
+                } else if (key == "loop") {
+                    loop = integer != 0;
+                } else if (key == "metronome") {
+                    metronome.enabled = integer != 0;
+                } else if (key == "bpm") {
+                    metronome.bpm = real;
+                } else if (key == "beats_per_bar") {
+                    metronome.beats_per_bar = static_cast<int>(integer);
+                } else if (key == "beat_unit") {
+                    metronome.beat_unit = static_cast<int>(integer);
+                } else if (key == "metronome_volume") {
+                    metronome.volume = static_cast<float>(real);
+                } else if (key == "grid_step") {
+                    grid = integer;
+                }
+                break;
+            case Section::Source:
+                if (key == "file") {
+                    sources.back().file = value;
+                } else if (key == "name") {
+                    sources.back().name = value;
+                }
+                break;
+            case Section::Track:
+                if (key == "name") {
+                    tracks.back().name = value;
+                } else if (key == "icon") {
+                    tracks.back().icon = value;
+                } else if (key == "gain") {
+                    tracks.back().gain = std::clamp(static_cast<float>(real), 0.0f, 2.0f);
+                } else if (key == "pan") {
+                    tracks.back().pan = std::clamp(static_cast<float>(real), -1.0f, 1.0f);
+                } else if (key == "mute") {
+                    tracks.back().mute = integer != 0;
+                } else if (key == "solo") {
+                    tracks.back().solo = integer != 0;
+                }
+                break;
+            case Section::Region: {
+                RegionEntry& region = tracks.back().regions.back();
+                if (key == "source") {
+                    region.source = integer;
+                } else if (key == "start") {
+                    region.start = integer;
+                } else if (key == "offset") {
+                    region.offset = integer;
+                } else if (key == "length") {
+                    region.length = integer;
+                } else if (key == "fade_in") {
+                    region.fade_in = integer;
+                } else if (key == "fade_out") {
+                    region.fade_out = integer;
+                }
+                break;
+            }
+        }
+    }
+
+    if (rate != static_cast<long long>(config_.sample_rate) ||
+        channels != static_cast<long long>(config_.channels)) {
+        set_error(error, "the project was saved at " + std::to_string(rate) + " Hz with " +
+                             std::to_string(channels) + " channels, but the program runs at " +
+                             std::to_string(config_.sample_rate) + " Hz with " +
+                             std::to_string(config_.channels));
+        return false;
+    }
+
+    // The audio files: only plain names inside the project's audio folder are accepted.
+    const std::filesystem::path folder = audio_folder_of(file);
+    std::vector<std::shared_ptr<const Source>> loaded;
+    std::map<std::shared_ptr<const Source>, std::string> saved;
+    for (const SourceEntry& entry : sources) {
+        if (entry.file.empty() || entry.file.find_first_of("/\\:") != std::string::npos ||
+            entry.file.find("..") != std::string::npos) {
+            set_error(error, "the project names an invalid audio file: " + entry.file);
+            return false;
+        }
+        const std::filesystem::path path = folder / std::filesystem::u8path(entry.file);
+        auto disk = core::PagedFile::open(path, config_.channels);
+        if (!disk) {
+            set_error(error, "an audio file of the project is missing: " + path.u8string());
+            return false;
+        }
+        auto clip = std::make_shared<core::ClipData>();
+        clip->channels = config_.channels;
+        clip->sample_rate = config_.sample_rate;
+        clip->disk = std::move(disk);
+        auto source = std::make_shared<Source>();
+        source->name = entry.name;
+        source->overview = make_overview(*clip);
+        source->clip = std::move(clip);
+        saved[source] = entry.file;
+        loaded.push_back(std::move(source));
+    }
+
+    std::vector<TrackInfo> fresh;
+    for (const TrackEntry& entry : tracks) {
+        if (fresh.size() >= core::Engine::kMaxTracks) {
+            break;
+        }
+        TrackInfo track;
+        track.name = entry.name.empty() ? "Track " + std::to_string(fresh.size() + 1) : entry.name;
+        track.icon = entry.icon;
+        track.gain = entry.gain;
+        track.pan = entry.pan;
+        track.mute = entry.mute;
+        track.solo = entry.solo;
+        for (const RegionEntry& region : entry.regions) {
+            if (region.source < 0 || static_cast<std::size_t>(region.source) >= loaded.size()) {
+                continue;
+            }
+            const auto& source = loaded[static_cast<std::size_t>(region.source)];
+            if (region.start < 0 || region.offset < 0 || region.length <= 0 ||
+                region.offset + region.length > source->clip->frames()) {
+                continue;  // does not fit its audio: left out
+            }
+            RegionInfo info;
+            info.source = source;
+            info.start = region.start;
+            info.offset = region.offset;
+            info.length = region.length;
+            info.fade_in = region.fade_in;
+            info.fade_out = region.fade_out;
+            limit_fades(info);
+            track.regions.push_back(std::move(info));
+        }
+        fresh.push_back(std::move(track));
+    }
+
+    // Everything checked: replace the session.
+    engine_.stop();
+    const std::size_t old_count = tracks_.size();
+    tracks_ = std::move(fresh);
+    sync_engine_tracks(0);
+    for (std::size_t slot = tracks_.size() + 1; slot < old_count; ++slot) {
+        clear_engine_slot(slot);
+    }
+    update_length();
+    set_loop(loop);
+    set_metronome(metronome);  // ignored if a value is out of range
+    if (grid >= 0 && grid <= static_cast<long long>(GridStep::None)) {
+        grid_step_ = static_cast<GridStep>(grid);
+    }
+    seek_frames(0);
+    project_file_ = file;
+    project_audio_folder_ = folder;
+    saved_audio_ = std::move(saved);
+    return true;
+}
+
+void Session::new_project() {
+    stop_recording();  // a take that is still running is dropped: its track goes away
+    engine_.stop();
+    const std::size_t old_count = tracks_.size();
+    tracks_.clear();
+    for (std::size_t slot = 0; slot < old_count; ++slot) {
+        clear_engine_slot(slot);
+    }
+    update_length();
+    update_streaming();
+    seek_frames(0);
+    project_file_.clear();
+    project_audio_folder_.clear();
+    saved_audio_.clear();
+}
+
+void Session::clear_engine_slot(std::size_t slot) {
+    if (slot >= core::Engine::kMaxTracks) {
+        return;
+    }
+    const auto index = static_cast<std::uint32_t>(slot);
+    engine_.set_track_regions(index, {});
+    engine_.set_track_gain(index, 1.0f);
+    engine_.set_track_pan(index, 0.0f);
+    engine_.set_track_mute(index, false);
+    engine_.set_track_solo(index, false);
 }
 
 // ---- Export ------------------------------------------------------------------------------

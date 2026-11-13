@@ -99,6 +99,28 @@ void SDLCALL export_dialog_callback(void* user_data, const char* const* file_lis
     wake_main_loop();
 }
 
+// A path chosen in a project or folder dialog, waiting for the main loop.
+struct PendingPath {
+    enum class Kind { SaveProject, OpenProject, ProjectsFolder };
+    std::mutex mutex;
+    bool ready = false;
+    Kind kind = Kind::SaveProject;
+    std::string path;  // UTF-8
+};
+
+void SDLCALL path_dialog_callback(void* user_data, const char* const* file_list, int /*filter*/) {
+    auto* request = static_cast<PendingPath*>(user_data);
+    if (file_list == nullptr || file_list[0] == nullptr) {
+        return;  // the dialog failed or was cancelled
+    }
+    {
+        const std::lock_guard<std::mutex> lock(request->mutex);
+        request->path = file_list[0];
+        request->ready = true;
+    }
+    wake_main_loop();
+}
+
 // A picture chosen in the "track picture" file dialog, waiting to be applied by the main loop.
 struct PendingIcon {
     std::mutex mutex;
@@ -159,6 +181,9 @@ struct UiState {
     Settings settings;             // what is remembered between runs
     std::filesystem::path settings_path;
     bool settings_changed = false; // write the settings file soon
+    PendingPath path_request;      // project and folder dialogs
+    bool confirm_new_project = false;
+    std::string window_title;      // what the window title shows now
     bool show_settings = false;
     int capturing = -1;            // the action whose shortcut is being changed, or -1
     toh::audio::DeviceList devices;
@@ -911,6 +936,144 @@ void draw_icon_popup(Session& session, UiState& ui, std::size_t track) {
     ImGui::EndPopup();
 }
 
+// ---- Projects ----------------------------------------------------------------------------
+
+// The folder where project dialogs start: the one from the settings, or "Tone of Hell" in the
+// user's Documents folder (created when needed).
+std::filesystem::path projects_folder(const UiState& ui) {
+    if (!ui.settings.projects_folder.empty()) {
+        return std::filesystem::u8path(ui.settings.projects_folder);
+    }
+    std::filesystem::path folder;
+    if (const char* documents = SDL_GetUserFolder(SDL_FOLDER_DOCUMENTS)) {
+        folder = std::filesystem::u8path(documents) / "Tone of Hell";
+    } else if (char* base = SDL_GetPrefPath("", "Tone of Hell")) {
+        folder = std::filesystem::u8path(base) / "Projects";
+        SDL_free(base);
+    }
+    std::error_code code;
+    std::filesystem::create_directories(folder, code);
+    return folder;
+}
+
+void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
+    {
+        const std::lock_guard<std::mutex> lock(ui.path_request.mutex);
+        ui.path_request.kind = kind;
+        ui.path_request.ready = false;
+    }
+    static const SDL_DialogFileFilter filters[] = {{"Tone of Hell project", "tohp"}};
+    std::filesystem::path start = projects_folder(ui);
+    if (kind == PendingPath::Kind::SaveProject) {
+        const std::filesystem::path& current = session.project_file();
+        start = current.empty() ? start / "Project.tohp" : current;
+    }
+    const std::string location = start.u8string();
+    if (kind == PendingPath::Kind::ProjectsFolder) {
+        SDL_ShowOpenFolderDialog(&path_dialog_callback, &ui.path_request, ui.window,
+                                 location.c_str(), false);
+    } else if (kind == PendingPath::Kind::SaveProject) {
+        SDL_ShowSaveFileDialog(&path_dialog_callback, &ui.path_request, ui.window, filters, 1,
+                               location.c_str());
+    } else {
+        SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, filters, 1,
+                               location.c_str(), false);
+    }
+}
+
+// Ctrl+S: saves to the project's file, or asks for one the first time.
+void save_project(Session& session, UiState& ui) {
+    if (session.project_file().empty()) {
+        open_path_dialog(session, ui, PendingPath::Kind::SaveProject);
+        return;
+    }
+    std::string error;
+    if (session.save_project(session.project_file(), &error)) {
+        ui.notice = std::string(T_("Saved: ")) + session.project_file().u8string();
+    } else {
+        ui.error = std::string(T_("Save: ")) + error;
+    }
+}
+
+// Applies a path that a project or folder dialog returned.
+void handle_path_request(Session& session, UiState& ui) {
+    PendingPath::Kind kind;
+    std::string path;
+    {
+        const std::lock_guard<std::mutex> lock(ui.path_request.mutex);
+        if (!ui.path_request.ready) {
+            return;
+        }
+        ui.path_request.ready = false;
+        kind = ui.path_request.kind;
+        path = ui.path_request.path;
+    }
+    std::string error;
+    if (kind == PendingPath::Kind::ProjectsFolder) {
+        ui.settings.projects_folder = path;
+        ui.settings_changed = true;
+    } else if (kind == PendingPath::Kind::SaveProject) {
+        std::filesystem::path file = std::filesystem::u8path(path);
+        if (file.extension() != ".tohp") {
+            file += ".tohp";
+        }
+        if (session.save_project(file, &error)) {
+            ui.notice = std::string(T_("Saved: ")) + file.u8string();
+        } else {
+            ui.error = std::string(T_("Save: ")) + error;
+        }
+    } else if (session.open_project(std::filesystem::u8path(path), &error)) {
+        ui.selected = false;
+        ui.armed = false;
+        fit_view(session, ui.view);
+        ui.notice = std::string(T_("Opened: ")) + path;
+    } else {
+        ui.error = std::string(T_("Open: ")) + error;
+    }
+}
+
+// "New project" asks first when there is something to lose.
+void draw_new_project_popup(Session& session, UiState& ui) {
+    if (ui.confirm_new_project) {
+        ImGui::OpenPopup("new project");
+        ui.confirm_new_project = false;
+    }
+    if (ImGui::BeginPopupModal("new project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted(T_("Start a new project? Changes that are not saved are lost."));
+        if (ImGui::Button(T_("New project"))) {
+            session.new_project();
+            ui.selected = false;
+            ui.armed = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T_("Cancel"))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
+void new_project(Session& session, UiState& ui) {
+    if (session.tracks().empty()) {
+        session.new_project();
+    } else {
+        ui.confirm_new_project = true;
+    }
+}
+
+// The window title names the project.
+void update_window_title(const Session& session, UiState& ui) {
+    std::string title = "Tone of Hell";
+    if (!session.project_file().empty()) {
+        title = session.project_file().stem().u8string() + " - " + title;
+    }
+    if (title != ui.window_title) {
+        ui.window_title = title;
+        SDL_SetWindowTitle(ui.window, title.c_str());
+    }
+}
+
 void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Window* window,
                     Action action) {
     const float centre_x = ui.view.lane_origin_x + ui.view.lane_width * 0.5f;
@@ -968,6 +1131,18 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
             break;
         case Action::NewTrack:
             add_new_track(session, ui, false);
+            break;
+        case Action::NewProject:
+            new_project(session, ui);
+            break;
+        case Action::OpenProject:
+            open_path_dialog(session, ui, PendingPath::Kind::OpenProject);
+            break;
+        case Action::SaveProject:
+            save_project(session, ui);
+            break;
+        case Action::SaveProjectAs:
+            open_path_dialog(session, ui, PendingPath::Kind::SaveProject);
             break;
         case Action::FullScreen:
             SDL_SetWindowFullscreen(window, (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) == 0);
@@ -1064,6 +1239,21 @@ void draw_settings_window(Session& session, UiState& ui) {
             }
             ImGui::TextDisabled("%s", T_("Click a track name to select it, Ctrl+click to select several. "
                                          "With nothing selected, every track plays."));
+
+            ImGui::SeparatorText(T_("Projects"));
+            ImGui::TextUnformatted(T_("Folder for projects (the save and open dialogs start here):"));
+            const std::string folder = projects_folder(ui).u8string();
+            ImGui::TextDisabled("%s", folder.c_str());
+            if (ImGui::Button(T_("Choose a folder..."))) {
+                open_path_dialog(session, ui, PendingPath::Kind::ProjectsFolder);
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(ui.settings.projects_folder.empty());
+            if (ImGui::Button(T_("Back to Documents"))) {
+                ui.settings.projects_folder.clear();
+                ui.settings_changed = true;
+            }
+            ImGui::EndDisabled();
 
             ImGui::SeparatorText(T_("Window"));
             ImGui::AlignTextToFramePadding();
@@ -1250,10 +1440,22 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
     }
 
     if (ImGui::BeginMenu(T_("File"))) {
+        if (ImGui::MenuItem(T_("New project"), key_label(ui, Action::NewProject))) {
+            new_project(session, ui);
+        }
+        if (ImGui::MenuItem(T_("Open a project..."), key_label(ui, Action::OpenProject))) {
+            open_path_dialog(session, ui, PendingPath::Kind::OpenProject);
+        }
+        if (ImGui::MenuItem(T_("Save the project"), key_label(ui, Action::SaveProject))) {
+            save_project(session, ui);
+        }
+        if (ImGui::MenuItem(T_("Save the project as..."), key_label(ui, Action::SaveProjectAs))) {
+            open_path_dialog(session, ui, PendingPath::Kind::SaveProject);
+        }
+        ImGui::Separator();
         if (ImGui::MenuItem(T_("Add audio files..."), key_label(ui, Action::AddFiles))) {
             open_file_dialog(pending, window);
         }
-        ImGui::MenuItem(T_("Save project (planned for stage 5)"), "Ctrl+S", false, false);
         if (ImGui::BeginMenu(T_("Export audio"), session.length_frames() > 0)) {
             if (ImGui::MenuItem(T_("WAV, 16-bit..."))) {
                 open_export_dialog(exports, window, toh::audio::SampleFormat::Int16);
@@ -2874,6 +3076,8 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
+            handle_path_request(session, ui);
+            update_window_title(session, ui);
             // A picture file arrived from the "track picture" dialog.
             {
                 const std::lock_guard<std::mutex> lock(ui.icon_request.mutex);
@@ -2898,6 +3102,7 @@ int main(int argc, char* argv[]) {
                              ImGuiWindowFlags_NoSavedSettings |
                              ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
             draw_menu_bar(session, pending, exports, window, ui);
+            draw_new_project_popup(session, ui);
             draw_toolbar(session, pending, window, ui);
             ImGui::Separator();
             // The track area leaves room below for the timeline scrollbar and the status bar.

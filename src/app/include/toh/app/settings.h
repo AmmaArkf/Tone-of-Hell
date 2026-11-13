@@ -29,6 +29,10 @@ enum class Action {
     ZoomFit,
     NewTrack,
     FullScreen,
+    NewProject,
+    OpenProject,
+    SaveProject,
+    SaveProjectAs,
     Count
 };
 
@@ -66,6 +70,9 @@ struct Settings {
     bool reverse_off_at_start = true;
     /// How the window opens: 0 as a normal window, 1 maximized, 2 full screen.
     int start_window = 0;
+    /// Where the save and open dialogs for projects start (UTF-8). Empty: the folder
+    /// "Tone of Hell" in the user's Documents folder.
+    std::string projects_folder;
     std::array<std::string, kActionCount> shortcuts;
 
     const std::string& shortcut(Action action) const noexcept {
