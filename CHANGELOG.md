@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.14
+
+- VST3 plugins: effects and instruments in the VST3 format work like CLAP ones (FX button, instrument plugins, their own windows on Windows, sliders otherwise, saved state, delay compensation). The program finds them in the usual VST3 folders (Common Files\VST3 and the user's Programs\Common\VST3 on Windows, ~/.vst3 and /usr/lib/vst3 on Linux); menus mark them [VST3].
+- The VST3 interfaces (MIT license since VST 3.8) are downloaded while configuring, like the CLAP headers.
+
 ## 0.2.13
 
 - Delay compensation: plugins that delay the sound (they say so through the CLAP latency extension, for example look-ahead limiters and linear-phase equalizers) no longer put their track late. Such a track reads its regions that much ahead, so all tracks stay together and nothing else gets later. When a plugin changes its latency, its track is compensated anew.

@@ -6,20 +6,9 @@
 #include <string>
 #include <vector>
 
-#include "toh/core/effect.h"
+#include "toh/plugins/plugin.h"
 
 namespace toh::plugins {
-
-/// What a plugin file says about one of its plugins.
-struct PluginInfo {
-    std::filesystem::path path;  ///< the .clap file
-    std::string id;              ///< for example "org.toneofhell.echo"
-    std::string name;
-    std::string vendor;
-    std::string version;
-    std::string description;
-    bool instrument = false;     ///< it makes sound from notes
-};
 
 /// The usual folders for CLAP plugins on this system (CLAP_PATH first).
 std::vector<std::filesystem::path> default_clap_folders();
@@ -32,21 +21,9 @@ std::vector<PluginInfo> read_clap_file(const std::filesystem::path& file, std::s
 std::vector<PluginInfo> scan_clap_folders(const std::vector<std::filesystem::path>& folders,
                                           std::vector<std::string>* problems = nullptr);
 
-/// One CLAP plugin, used as an insert effect of a track. process() runs on the audio thread;
-/// everything else must be called from the thread that created it (the main thread).
-class ClapPlugin final : public core::AudioEffect {
+/// One CLAP plugin.
+class ClapPlugin final : public Plugin {
 public:
-    struct Param {
-        std::uint32_t id = 0;
-        std::string name;
-        std::string module;  ///< a group like "Filter/Envelope", may be empty
-        double min = 0.0;
-        double max = 1.0;
-        double default_value = 0.0;
-        bool stepped = false;  ///< whole numbers only
-        bool hidden = false;   ///< hidden or read-only: not for the user to change
-    };
-
     /// Loads the plugin `id` of a .clap file and makes it ready to process sound at
     /// `sample_rate` with `channels` channels. Returns null when that fails; `error` says why.
     static std::shared_ptr<ClapPlugin> create(const std::filesystem::path& file, const std::string& id,
@@ -54,46 +31,30 @@ public:
                                               std::string* error = nullptr);
     ~ClapPlugin() override;
 
-    const PluginInfo& info() const noexcept;
-
+    const PluginInfo& info() const noexcept override;
     void process(float* interleaved, std::uint32_t frames, std::uint32_t channels) noexcept override;
     void add_note(std::uint32_t frame, bool on, int pitch, float velocity) noexcept override;
-    /// How many frames the plugin delays the sound it processes.
-    std::uint32_t latency() const noexcept;
-    /// True once after the plugin said that its latency changed.
-    bool take_latency_changed();
-    /// True for a plugin that makes its sound from notes: it says so, or it has no audio input.
-    bool is_instrument() const noexcept;
 
-    // ---- Parameters ----------------------------------------------------------------------
-    const std::vector<Param>& params() const noexcept;
-    double param_value(std::uint32_t id) const;
-    /// The value as the plugin writes it, for example "375 ms".
-    std::string param_text(std::uint32_t id, double value) const;
-    /// Sends a new value; the plugin gets it with the next block it processes.
-    bool set_param(std::uint32_t id, double value);
+    const std::vector<Param>& params() const noexcept override;
+    double param_value(std::uint32_t id) const override;
+    std::string param_text(std::uint32_t id, double value) const override;
+    bool set_param(std::uint32_t id, double value) override;
 
-    // ---- State ---------------------------------------------------------------------------
-    /// Everything the plugin needs to come back as it is: saved inside the project.
-    bool save_state(std::vector<char>& state) const;
-    bool load_state(const std::vector<char>& state);
+    bool save_state(std::vector<char>& state) const override;
+    bool load_state(const std::vector<char>& state) override;
 
-    // ---- The plugin's own window -----------------------------------------------------------
-    bool has_gui() const;
-    bool gui_open() const noexcept;
-    /// Puts the plugin's window inside `parent`: a HWND on Windows, an X11 window id on Linux.
-    /// `width` and `height` receive its size, `resizable` whether it can change.
-    bool open_gui(void* parent, std::uint32_t& width, std::uint32_t& height, bool& resizable);
-    /// Asks for another size; `width` and `height` receive the size it really takes.
-    bool resize_gui(std::uint32_t& width, std::uint32_t& height);
-    void close_gui();
-    /// A size the plugin asked its window to have, once.
-    bool take_resize_request(std::uint32_t& width, std::uint32_t& height);
-    /// True once when the plugin closed its window by itself.
-    bool take_gui_closed();
+    bool has_gui() const override;
+    bool gui_open() const noexcept override;
+    bool open_gui(void* parent, std::uint32_t& width, std::uint32_t& height, bool& resizable) override;
+    bool resize_gui(std::uint32_t& width, std::uint32_t& height) override;
+    void close_gui() override;
+    bool take_resize_request(std::uint32_t& width, std::uint32_t& height) override;
+    bool take_gui_closed() override;
 
-    /// Main thread, often (every frame): answers what the plugin asked for.
-    void idle();
+    void idle() override;
+    std::uint32_t latency() const noexcept override;
+    bool take_latency_changed() override;
+    bool is_instrument() const noexcept override;
 
     struct Impl;
 

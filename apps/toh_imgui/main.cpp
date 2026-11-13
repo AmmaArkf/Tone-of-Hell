@@ -195,11 +195,11 @@ struct UiState {
     bool plugins_scanned = false;
     std::size_t effect_track = 0;       // the track that gets the plugin chosen in the dialog
     struct PluginWindow {
-        std::weak_ptr<toh::plugins::ClapPlugin> plugin;
+        std::weak_ptr<toh::plugins::Plugin> plugin;
         SDL_Window* window = nullptr;
     };
     std::vector<PluginWindow> plugin_windows;  // plugins' own windows
-    std::vector<std::weak_ptr<toh::plugins::ClapPlugin>> knob_windows;  // sliders for the others
+    std::vector<std::weak_ptr<toh::plugins::Plugin>> knob_windows;  // sliders for the others
     // A selected part of the tracks (dragged out inside regions) and what was cut or copied.
     bool has_range = false;
     std::size_t range_first = 0;
@@ -1300,26 +1300,32 @@ std::filesystem::path bundled_plugins_folder() {
     return base != nullptr ? std::filesystem::u8path(base) / "plugins" : std::filesystem::path();
 }
 
-// Looks for CLAP plugins: the ones that come with the program, then the usual folders.
+// Looks for CLAP and VST3 plugins: the ones that come with the program, then the usual folders.
 void scan_plugins(UiState& ui) {
-    std::vector<std::filesystem::path> folders;
-    folders.push_back(bundled_plugins_folder());
-    for (const auto& folder : toh::plugins::default_clap_folders()) {
-        folders.push_back(folder);
-    }
     ui.plugin_problems.clear();
-    ui.plugin_list = toh::plugins::scan_clap_folders(folders, &ui.plugin_problems);
+    ui.plugin_list = toh::plugins::scan_all_plugins({bundled_plugins_folder()}, &ui.plugin_problems);
     ui.plugins_scanned = true;
-    toh::app::logging::info("CLAP plugins found: " + std::to_string(ui.plugin_list.size()));
+    toh::app::logging::info("Plugins found: " + std::to_string(ui.plugin_list.size()));
     for (const std::string& problem : ui.plugin_problems) {
-        toh::app::logging::info("CLAP plugin not loaded: " + problem);
+        toh::app::logging::info("Plugin not loaded: " + problem);
     }
 }
 
-void add_effect(Session& session, UiState& ui, std::size_t track, const std::filesystem::path& file,
-                const std::string& id) {
+// The name of a plugin in menus: with its maker, and the format when it is VST3.
+std::string plugin_label(const toh::plugins::PluginInfo& info) {
+    std::string label = info.name;
+    if (!info.vendor.empty()) {
+        label += "  (" + info.vendor + ")";
+    }
+    if (info.format == "vst3") {
+        label += "  [VST3]";
+    }
+    return label + "##" + info.format + "|" + info.path.u8string() + "|" + info.id;
+}
+
+void add_effect(Session& session, UiState& ui, std::size_t track, const toh::plugins::PluginInfo& info) {
     std::string error;
-    if (!session.add_clap_effect(track, file, id, &error)) {
+    if (!session.add_effect(track, info, &error)) {
         ui.error = std::string(T_("Effect: ")) + error;
     }
 }
@@ -1329,14 +1335,14 @@ void add_effect_from_file(Session& session, UiState& ui, const std::string& path
     const auto infos = toh::plugins::read_clap_file(std::filesystem::u8path(path), &error);
     for (const auto& info : infos) {
         if (!info.instrument) {
-            add_effect(session, ui, ui.effect_track, info.path, info.id);
+            add_effect(session, ui, ui.effect_track, info);
             return;
         }
     }
     ui.error = std::string(T_("Effect: ")) + (infos.empty() ? error : std::string(T_("the file holds only instruments")));
 }
 
-bool plugin_in_session(const Session& session, const toh::plugins::ClapPlugin* plugin) {
+bool plugin_in_session(const Session& session, const toh::plugins::Plugin* plugin) {
     for (const TrackInfo& track : session.tracks()) {
         if (track.plugin_instrument.plugin.get() == plugin) {
             return true;
@@ -1362,7 +1368,7 @@ void* native_window_handle(SDL_Window* window) {
 }
 
 // Opens the plugin's own window, or sliders for its parameters when it has none.
-void open_effect_window(UiState& ui, const std::shared_ptr<toh::plugins::ClapPlugin>& plugin) {
+void open_effect_window(UiState& ui, const std::shared_ptr<toh::plugins::Plugin>& plugin) {
     if (!plugin) {
         return;
     }
@@ -1452,12 +1458,7 @@ const toh::plugins::PluginInfo* plugin_instrument_menu(UiState& ui) {
             continue;
         }
         any = true;
-        std::string label = info.name;
-        if (!info.vendor.empty()) {
-            label += "  (" + info.vendor + ")";
-        }
-        label += "##" + info.path.u8string() + "|" + info.id;
-        if (ImGui::MenuItem(label.c_str())) {
+        if (ImGui::MenuItem(plugin_label(info).c_str())) {
             chosen = &info;
         }
         if (!info.description.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
@@ -1465,7 +1466,7 @@ const toh::plugins::PluginInfo* plugin_instrument_menu(UiState& ui) {
         }
     }
     if (!any) {
-        ImGui::TextDisabled("%s", T_("No CLAP instruments found."));
+        ImGui::TextDisabled("%s", T_("No CLAP or VST3 instruments found."));
     }
     return chosen;
 }
@@ -1474,7 +1475,7 @@ const toh::plugins::PluginInfo* plugin_instrument_menu(UiState& ui) {
 void set_plugin_instrument(Session& session, UiState& ui, std::size_t track,
                            const toh::plugins::PluginInfo& info) {
     std::string error;
-    if (session.set_track_plugin_instrument(track, info.path, info.id, &error)) {
+    if (session.set_track_plugin_instrument(track, info, &error)) {
         session.clear_track_sampler(track);
         open_effect_window(ui, session.tracks()[track].plugin_instrument.plugin);
     } else {
@@ -4200,20 +4201,15 @@ void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
                 continue;
             }
             any = true;
-            std::string label = info.name;
-            if (!info.vendor.empty()) {
-                label += "  (" + info.vendor + ")";
-            }
-            label += "##" + info.path.u8string() + "|" + info.id;
-            if (ImGui::MenuItem(label.c_str())) {
-                add_effect(session, ui, track, info.path, info.id);
+            if (ImGui::MenuItem(plugin_label(info).c_str())) {
+                add_effect(session, ui, track, info);
             }
             if (!info.description.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                 ImGui::SetTooltip("%s", info.description.c_str());
             }
         }
         if (!any) {
-            ImGui::TextDisabled("%s", T_("No CLAP effects found."));
+            ImGui::TextDisabled("%s", T_("No CLAP or VST3 effects found."));
         }
         ImGui::Separator();
         if (ImGui::MenuItem(T_("Load a .clap file..."))) {
@@ -4288,7 +4284,7 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     if (toggle_button(T_("FX"), !track.effects.empty(), ImVec4(0.25f, 0.62f, 0.35f, 1.0f))) {
         ImGui::OpenPopup("track effects");
     }
-    tooltip(T_("Effects of the track (CLAP plugins)"));
+    tooltip(T_("Effects of the track (CLAP and VST3 plugins)"));
     draw_effects_popup(session, ui, i);
 
     // The remove button sits in the far corner, away from mute and solo, and asks first.

@@ -116,7 +116,7 @@ struct RegionInfo {
 
 /// One insert effect of a track: for now a CLAP plugin.
 struct EffectSlot {
-    std::shared_ptr<plugins::ClapPlugin> plugin;
+    std::shared_ptr<plugins::Plugin> plugin;
     std::string name;  // UTF-8
     bool enabled = true;
 };
@@ -242,12 +242,16 @@ public:
     /// Adds the CLAP plugin `id` of a .clap file at the end of a track's effects.
     bool add_clap_effect(std::size_t track, const std::filesystem::path& file, const std::string& id,
                          std::string* error = nullptr);
+    /// Adds a plugin of any format at the end of a track's effects.
+    bool add_effect(std::size_t track, const plugins::PluginInfo& plugin, std::string* error = nullptr);
     bool remove_effect(std::size_t track, std::size_t slot);
     bool move_effect(std::size_t track, std::size_t slot, std::size_t to);
     bool set_effect_enabled(std::size_t track, std::size_t slot, bool enabled);
     /// Makes the CLAP plugin `id` of a .clap file the instrument of a track.
     bool set_track_plugin_instrument(std::size_t track, const std::filesystem::path& file,
                                      const std::string& id, std::string* error = nullptr);
+    bool set_track_plugin_instrument(std::size_t track, const plugins::PluginInfo& plugin,
+                                     std::string* error = nullptr);
     bool clear_track_plugin_instrument(std::size_t track);
     /// What could not be restored when the last project was opened (missing plugins).
     const std::vector<std::string>& open_warnings() const noexcept { return open_warnings_; }
@@ -630,7 +634,7 @@ private:
     std::string pending_label_;  // the name of the next undo step, if an edit gave one
     std::vector<std::string> open_warnings_;
     // The instrument plugin each live key went to, so that its end goes there too.
-    std::array<std::shared_ptr<plugins::ClapPlugin>, 128> live_plugin_keys_{};
+    std::array<std::shared_ptr<plugins::Plugin>, 128> live_plugin_keys_{};
     bool notes_recording_ = false;
     bool notes_seen_playing_ = false;
     std::int64_t notes_record_start_ = 0;

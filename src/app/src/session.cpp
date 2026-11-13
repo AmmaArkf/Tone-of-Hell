@@ -654,6 +654,14 @@ bool Session::clear_track_sampler(std::size_t index) {
 
 bool Session::add_clap_effect(std::size_t track, const std::filesystem::path& file, const std::string& id,
                               std::string* error) {
+    plugins::PluginInfo info;
+    info.format = "clap";
+    info.path = file;
+    info.id = id;
+    return add_effect(track, info, error);
+}
+
+bool Session::add_effect(std::size_t track, const plugins::PluginInfo& info, std::string* error) {
     if (track >= tracks_.size()) {
         set_error(error, "the track does not exist");
         return false;
@@ -662,8 +670,8 @@ bool Session::add_clap_effect(std::size_t track, const std::filesystem::path& fi
         set_error(error, "a track has at most " + std::to_string(kMaxEffects) + " effects");
         return false;
     }
-    auto plugin = plugins::ClapPlugin::create(file, id, static_cast<double>(config_.sample_rate),
-                                              config_.channels, error);
+    auto plugin = plugins::create_plugin(info.format, info.path, info.id,
+                                         static_cast<double>(config_.sample_rate), config_.channels, error);
     if (!plugin) {
         return false;
     }
@@ -713,12 +721,21 @@ bool Session::set_effect_enabled(std::size_t track, std::size_t slot, bool enabl
 
 bool Session::set_track_plugin_instrument(std::size_t track, const std::filesystem::path& file,
                                           const std::string& id, std::string* error) {
+    plugins::PluginInfo info;
+    info.format = "clap";
+    info.path = file;
+    info.id = id;
+    return set_track_plugin_instrument(track, info, error);
+}
+
+bool Session::set_track_plugin_instrument(std::size_t track, const plugins::PluginInfo& info,
+                                          std::string* error) {
     if (track >= tracks_.size()) {
         set_error(error, "the track does not exist");
         return false;
     }
-    auto plugin = plugins::ClapPlugin::create(file, id, static_cast<double>(config_.sample_rate),
-                                              config_.channels, error);
+    auto plugin = plugins::create_plugin(info.format, info.path, info.id,
+                                         static_cast<double>(config_.sample_rate), config_.channels, error);
     if (!plugin) {
         return false;
     }
@@ -760,7 +777,7 @@ bool Session::note_on(int pitch, float velocity) {
     int program = -1;
     core::Instrument instrument = core::Instrument::Keys;
     std::shared_ptr<const core::SamplerSound> sampler;
-    std::shared_ptr<plugins::ClapPlugin> plugin;
+    std::shared_ptr<plugins::Plugin> plugin;
     if (live_track_ < tracks_.size()) {
         program = tracks_[live_track_].program;
         instrument = tracks_[live_track_].instrument;
@@ -1948,6 +1965,7 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
         if (track.plugin_instrument.plugin) {
             const auto& info = track.plugin_instrument.plugin->info();
             const auto index = static_cast<std::size_t>(&track - tracks_.data());
+            out << "plugin_instrument_kind=" << info.format << "\n";
             out << "plugin_instrument_path=" << one_line(info.path.u8string()) << "\n";
             out << "plugin_instrument_id=" << one_line(info.id) << "\n";
             out << "plugin_instrument_name=" << one_line(track.plugin_instrument.name) << "\n";
@@ -1980,7 +1998,7 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
                 continue;
             }
             out << "[effect]\n";
-            out << "kind=clap\n";
+            out << "kind=" << slot.plugin->info().format << "\n";
             out << "path=" << one_line(slot.plugin->info().path.u8string()) << "\n";
             out << "id=" << one_line(slot.plugin->info().id) << "\n";
             out << "name=" << one_line(slot.name) << "\n";
@@ -2248,6 +2266,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         double rate = 1.0;
     };
     struct EffectEntry {
+        std::string kind = "clap";
         std::string path;
         std::string id;
         std::string name;
@@ -2370,6 +2389,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().instrument = integer;
                 } else if (key == "program") {
                     tracks.back().program = integer;
+                } else if (key == "plugin_instrument_kind") {
+                    tracks.back().plugin_instrument.kind = value;
                 } else if (key == "plugin_instrument_path") {
                     tracks.back().plugin_instrument.path = value;
                 } else if (key == "plugin_instrument_id") {
@@ -2410,7 +2431,9 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             }
             case Section::Effect: {
                 EffectEntry& effect = tracks.back().effects.back();
-                if (key == "path") {
+                if (key == "kind") {
+                    effect.kind = value;
+                } else if (key == "path") {
                     effect.path = value;
                 } else if (key == "id") {
                     effect.id = value;
@@ -2618,11 +2641,11 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             track.regions.push_back(std::move(info));
         }
         // Plugins: they are loaded again and get back their state.
-        const auto load_plugin = [&](const EffectEntry& effect) -> std::shared_ptr<plugins::ClapPlugin> {
+        const auto load_plugin = [&](const EffectEntry& effect) -> std::shared_ptr<plugins::Plugin> {
             std::string problem;
-            auto plugin = plugins::ClapPlugin::create(std::filesystem::u8path(effect.path), effect.id,
-                                                      static_cast<double>(config_.sample_rate),
-                                                      config_.channels, &problem);
+            auto plugin = plugins::create_plugin(effect.kind, std::filesystem::u8path(effect.path), effect.id,
+                                                 static_cast<double>(config_.sample_rate), config_.channels,
+                                                 &problem);
             if (!plugin) {
                 open_warnings_.push_back((effect.name.empty() ? effect.id : effect.name) + ": " + problem);
                 return nullptr;
@@ -2653,27 +2676,9 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             if (track.effects.size() >= kMaxEffects) {
                 break;
             }
-            std::string problem;
-            auto plugin = plugins::ClapPlugin::create(std::filesystem::u8path(effect.path), effect.id,
-                                                      static_cast<double>(config_.sample_rate),
-                                                      config_.channels, &problem);
+            auto plugin = load_plugin(effect);
             if (!plugin) {
-                open_warnings_.push_back((effect.name.empty() ? effect.id : effect.name) + ": " + problem);
                 continue;
-            }
-            const int state_index = effect.state.empty()
-                                        ? -1
-                                        : mz_zip_reader_locate_file(&zip.zip, effect.state.c_str(), nullptr, 0);
-            if (state_index >= 0) {
-                std::size_t state_bytes = 0;
-                void* data = mz_zip_reader_extract_to_heap(&zip.zip, static_cast<mz_uint>(state_index),
-                                                           &state_bytes, 0);
-                if (data != nullptr) {
-                    const std::vector<char> state(static_cast<const char*>(data),
-                                                  static_cast<const char*>(data) + state_bytes);
-                    mz_free(data);
-                    plugin->load_state(state);
-                }
             }
             EffectSlot slot;
             slot.name = effect.name.empty() ? plugin->info().name : effect.name;

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(ToneOfHell
-        VERSION 0.2.13
+        VERSION 0.2.14
         DESCRIPTION "An open source digital audio workstation (DAW) in C++"
         LANGUAGES C CXX)
 
@@ -56,6 +56,8 @@ include(cmake/Lame.cmake)
 include(cmake/Sounds.cmake)
 # The CLAP plugin standard (headers, MIT license, downloaded while configuring).
 include(cmake/Clap.cmake)
+# The VST3 plugin interfaces (MIT license since VST 3.8, downloaded while configuring).
+include(cmake/Vst3.cmake)
 
 # Layers, from the bottom up:
 #   toh_core   the audio engine; no dependencies

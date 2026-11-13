@@ -42,6 +42,7 @@ jobs:
           Copy-Item third_party/imgui/LICENSE.txt "$dist/licenses/DearImGui-LICENSE.txt"
           Copy-Item third_party/miniz/LICENSE "$dist/licenses/miniz-LICENSE.txt"
           Copy-Item build/_deps/clap-src/LICENSE "$dist/licenses/CLAP-LICENSE.txt"
+          Copy-Item build/_deps/vst3_pluginterfaces-src/LICENSE.txt "$dist/licenses/VST3-LICENSE.txt"
           Compress-Archive -Path $dist -DestinationPath "dist/$name.zip"
       - uses: actions/upload-artifact@v4
         with:
@@ -84,6 +85,7 @@ jobs:
           cp third_party/imgui/LICENSE.txt "$dist/licenses/DearImGui-LICENSE.txt"
           cp third_party/miniz/LICENSE "$dist/licenses/miniz-LICENSE.txt"
           cp build/_deps/clap-src/LICENSE "$dist/licenses/CLAP-LICENSE.txt"
+          cp build/_deps/vst3_pluginterfaces-src/LICENSE.txt "$dist/licenses/VST3-LICENSE.txt"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
       - uses: actions/upload-artifact@v4
         with:
