@@ -39,6 +39,7 @@ enum class Action {
     Faster,
     Slower,
     NormalSpeed,
+    PianoRoll,
     Count
 };
 

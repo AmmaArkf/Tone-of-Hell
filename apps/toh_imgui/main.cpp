@@ -186,6 +186,23 @@ struct UiState {
     Then pending_then = Then::Nothing;  // waits for the answer about unsaved changes
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
+
+    // The piano roll: one note region, edited on a working copy of its notes.
+    bool roll_open = false;
+    std::size_t roll_track = 0;
+    std::size_t roll_region = 0;
+    const void* roll_source = nullptr;  // the notes the working copy was taken from
+    std::vector<toh::core::Note> roll_notes;
+    std::vector<toh::core::Note> roll_origin;  // the notes when the drag began
+    std::vector<char> roll_selected;           // one flag per note of roll_notes
+    int roll_mode = 0;                         // 0 nothing, 1 moving, 2 changing the length
+    std::size_t roll_anchor = 0;               // the note the drag began on
+    double roll_start_frame = 0.0;
+    int roll_start_pitch = 0;
+    std::int64_t roll_last_length = 0;         // new notes get the length used last
+    float roll_beat_px = 48.0f;
+    bool roll_scroll = false;                  // scroll to middle C once
+    bool roll_focused = false;
     std::filesystem::path logs_folder;
     std::filesystem::path recovery_file;  // where autosave writes
     bool recovery_written = false;        // the recovery file holds unsaved changes
@@ -1398,6 +1415,8 @@ void update_window_title(const Session& session, UiState& ui) {
     }
 }
 
+void open_piano_roll(UiState& ui, std::size_t track, std::size_t region);  // with the piano roll
+
 void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Window* window,
                     Action action) {
     const float centre_x = ui.view.lane_origin_x + ui.view.lane_width * 0.5f;
@@ -1474,6 +1493,13 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
         case Action::NormalSpeed:
             session.set_speed(1.0);
             break;
+        case Action::PianoRoll:
+            if (const RegionInfo* region = selected_region(session, ui)) {
+                if (region->has_notes()) {
+                    open_piano_roll(ui, ui.selected_track, ui.selected_region);
+                }
+            }
+            break;
         case Action::Undo:
             if (ui.drag == DragKind::None && session.undo()) {
                 ui.selected = false;
@@ -1506,6 +1532,11 @@ void handle_shortcuts(Session& session, UiState& ui, PendingFiles& pending, SDL_
     }
     for (std::size_t i = 0; i < toh::app::kActionCount; ++i) {
         const auto action = static_cast<Action>(i);
+        // While the piano roll has the keyboard, its keys edit notes, not regions.
+        if (ui.roll_focused && (action == Action::RemoveRegion || action == Action::Split ||
+                                action == Action::JoinRegions || action == Action::Deselect)) {
+            continue;
+        }
         if (chord_pressed(parse_chord(ui.settings.shortcut(action)))) {
             perform_action(session, ui, pending, window, action);
         }
@@ -2843,6 +2874,10 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
         }
+        if (region != nullptr && region->has_notes() &&
+            ImGui::MenuItem(T_("Open the piano roll"), key_label(ui, Action::PianoRoll))) {
+            open_piano_roll(ui, ui.selected_track, ui.selected_region);
+        }
         if (region != nullptr && region->has_notes() && ImGui::BeginMenu(T_("Instrument"))) {
             const toh::core::Instrument current = session.tracks()[ui.selected_track].instrument;
             for (int k = 0; k < toh::core::kInstrumentCount; ++k) {
@@ -3292,6 +3327,374 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
         ImGui::PopStyleVar();
     }
     return remove;
+}
+
+// ---- Piano roll --------------------------------------------------------------------------
+
+std::string pitch_name(int pitch) {
+    static const char* const names[] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+    return std::string(names[pitch % 12]) + std::to_string(pitch / 12 - 1);
+}
+
+bool is_black_key(int pitch) {
+    const int key = pitch % 12;
+    return key == 1 || key == 3 || key == 6 || key == 8 || key == 10;
+}
+
+// One step of the grid in frames (a quarter beat when the grid is off).
+double grid_step_frames(const Session& session) {
+    switch (session.grid_step()) {
+        case GridStep::Bar:
+            return session.bar_frames();
+        case GridStep::Beat:
+            return session.beat_frames();
+        case GridStep::HalfBeat:
+            return session.beat_frames() / 2.0;
+        case GridStep::QuarterBeat:
+        case GridStep::None:
+            break;
+    }
+    return session.beat_frames() / 4.0;
+}
+
+void open_piano_roll(UiState& ui, std::size_t track, std::size_t region) {
+    ui.roll_open = true;
+    ui.roll_track = track;
+    ui.roll_region = region;
+    ui.roll_source = nullptr;
+    ui.roll_mode = 0;
+    ui.roll_scroll = true;
+}
+
+// Puts the notes (and their selection flags) in order of start, as the session keeps them.
+void sort_roll_notes(UiState& ui) {
+    std::vector<std::size_t> order(ui.roll_notes.size());
+    for (std::size_t k = 0; k < order.size(); ++k) {
+        order[k] = k;
+    }
+    std::stable_sort(order.begin(), order.end(), [&ui](std::size_t a, std::size_t b) {
+        return ui.roll_notes[a].start < ui.roll_notes[b].start;
+    });
+    std::vector<toh::core::Note> notes;
+    std::vector<char> selected;
+    for (const std::size_t k : order) {
+        notes.push_back(ui.roll_notes[k]);
+        selected.push_back(ui.roll_selected[k]);
+    }
+    ui.roll_notes = std::move(notes);
+    ui.roll_selected = std::move(selected);
+}
+
+void draw_piano_roll(Session& session, UiState& ui) {
+    ui.roll_focused = false;
+    if (!ui.roll_open) {
+        return;
+    }
+    const RegionInfo* region = nullptr;
+    if (ui.roll_track < session.tracks().size() &&
+        ui.roll_region < session.tracks()[ui.roll_track].regions.size()) {
+        region = &session.tracks()[ui.roll_track].regions[ui.roll_region];
+    }
+    if (region == nullptr || !region->has_notes()) {
+        ui.roll_open = false;
+        return;
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    const float font = ImGui::GetFontSize();
+    ImGui::SetNextWindowSize(ImVec2(62.0f * font, 28.0f * font), ImGuiCond_FirstUseEver);
+    const std::string title = std::string(T_("Piano roll")) + ": " +
+                              session.tracks()[ui.roll_track].name + "###piano roll";
+    if (!ImGui::Begin(title.c_str(), &ui.roll_open)) {
+        ImGui::End();
+        return;
+    }
+    ui.roll_focused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
+
+    // The working copy is taken again whenever the notes changed elsewhere (undo, the lane).
+    const void* source_id = region->source.get();
+    if (ui.roll_mode == 0 && source_id != ui.roll_source) {
+        ui.roll_notes = region->source->clip->notes->notes;
+        if (ui.roll_selected.size() != ui.roll_notes.size()) {
+            ui.roll_selected.assign(ui.roll_notes.size(), 0);
+        }
+        ui.roll_source = source_id;
+    }
+    const std::int64_t frames = region->source->clip->frames();
+    const double beat = std::max(session.beat_frames(), 1.0);
+    const double step = std::max(grid_step_frames(session), 1.0);
+    if (ui.roll_last_length <= 0) {
+        ui.roll_last_length = std::llround(beat);
+    }
+
+    if (ImGui::Button("-##roll zoom")) {
+        ui.roll_beat_px = std::max(ui.roll_beat_px / 1.5f, 8.0f);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("+##roll zoom")) {
+        ui.roll_beat_px = std::min(ui.roll_beat_px * 1.5f, 600.0f);
+    }
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::Text(T_("Notes: %d"), static_cast<int>(ui.roll_notes.size()));
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", T_("Click: add a note. Drag: move it; its right end: length. Right-click "
+                                 "or Delete: remove. Ctrl: select several. Alt: off the grid."));
+
+    const float key_h = std::max(0.85f * font, 8.0f);
+    const float keys_w = 3.5f * font;
+    const float width = keys_w + static_cast<float>(static_cast<double>(frames) / beat) * ui.roll_beat_px;
+    const float height = 128.0f * key_h;
+    ImGui::BeginChild("roll canvas", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar);
+    if (io.KeyCtrl && ImGui::IsWindowHovered() && io.MouseWheel != 0.0f) {
+        ui.roll_beat_px =
+            std::clamp(ui.roll_beat_px * (io.MouseWheel > 0.0f ? 1.25f : 0.8f), 8.0f, 600.0f);
+    }
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("roll", ImVec2(width, height),
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    const bool hovered = ImGui::IsItemHovered();
+    const bool activated = ImGui::IsItemActivated();
+    const bool active = ImGui::IsItemActive();
+    if (ui.roll_scroll) {
+        ImGui::SetScrollY((127.0f - 66.0f) * key_h - ImGui::GetWindowHeight() * 0.5f);
+        ui.roll_scroll = false;
+    }
+
+    const auto frame_to_px = [&](double frame) {
+        return origin.x + keys_w + static_cast<float>(frame / beat) * ui.roll_beat_px;
+    };
+    const auto px_to_frame = [&](float x) {
+        return static_cast<double>(x - origin.x - keys_w) / static_cast<double>(ui.roll_beat_px) * beat;
+    };
+    const auto pitch_to_y = [&](int pitch) {
+        return origin.y + static_cast<float>(127 - pitch) * key_h;
+    };
+    // The grid follows the timeline, so notes line up with the bars of the project.
+    const auto snap = [&](double rel, bool down) -> std::int64_t {
+        const std::int64_t value = std::llround(rel);
+        if (io.KeyAlt || session.grid_step() == GridStep::None) {
+            return value;
+        }
+        const double timeline = static_cast<double>(region->start - region->offset) + rel;
+        const double cells = timeline / step;
+        const double snapped = (down ? std::floor(cells) : std::round(cells)) * step;
+        return std::llround(snapped) - region->start + region->offset;
+    };
+
+    const double mouse_frame = px_to_frame(io.MousePos.x);
+    const int mouse_pitch =
+        std::clamp(127 - static_cast<int>(std::floor((io.MousePos.y - origin.y) / key_h)), 0, 127);
+    const bool in_grid = io.MousePos.x > origin.x + keys_w;
+
+    // The note under the mouse, and whether the mouse is near its right end.
+    std::size_t under = ui.roll_notes.size();
+    bool near_end = false;
+    if (hovered && in_grid) {
+        for (std::size_t k = ui.roll_notes.size(); k-- > 0;) {
+            const toh::core::Note& note = ui.roll_notes[k];
+            const float x0 = frame_to_px(static_cast<double>(note.start));
+            const float x1 = std::max(frame_to_px(static_cast<double>(note.start + note.length)), x0 + 3.0f);
+            if (note.pitch == mouse_pitch && io.MousePos.x >= x0 && io.MousePos.x <= x1) {
+                under = k;
+                near_end = io.MousePos.x > x1 - std::min(6.0f, (x1 - x0) * 0.4f);
+                break;
+            }
+        }
+    }
+    if (ui.roll_mode == 2 || (ui.roll_mode == 0 && near_end)) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+
+    bool changed = false;
+    const std::int64_t shortest = std::max<std::int64_t>(std::llround(step / 4.0), 16);
+    if (activated && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && in_grid) {
+        if (under < ui.roll_notes.size()) {
+            if (io.KeyCtrl) {
+                ui.roll_selected[under] = ui.roll_selected[under] != 0 ? 0 : 1;
+            } else if (ui.roll_selected[under] == 0) {
+                std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 0);
+                ui.roll_selected[under] = 1;
+            }
+            ui.roll_anchor = under;
+            ui.roll_mode = near_end ? 2 : 1;
+        } else {
+            if (!io.KeyCtrl) {
+                std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 0);
+            }
+            toh::core::Note note;
+            note.start = std::clamp<std::int64_t>(snap(mouse_frame, true), 0, std::max<std::int64_t>(frames - 1, 0));
+            note.length = std::min(ui.roll_last_length, frames - note.start);
+            note.pitch = static_cast<std::uint8_t>(mouse_pitch);
+            note.velocity = 0.8f;
+            ui.roll_notes.push_back(note);
+            ui.roll_selected.push_back(1);
+            ui.roll_anchor = ui.roll_notes.size() - 1;
+            ui.roll_mode = 2;  // dragging right away makes it longer
+            changed = true;
+        }
+        ui.roll_origin = ui.roll_notes;
+        ui.roll_start_frame = mouse_frame;
+        ui.roll_start_pitch = mouse_pitch;
+    }
+
+    // Dragging: the anchor note follows the grid and the other selected notes keep their
+    // distance to it.
+    if (ui.roll_mode != 0 && active && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        ui.roll_anchor < ui.roll_origin.size() && ui.roll_origin.size() == ui.roll_notes.size()) {
+        const double dx = mouse_frame - ui.roll_start_frame;
+        const int dp = mouse_pitch - ui.roll_start_pitch;
+        const toh::core::Note& anchor = ui.roll_origin[ui.roll_anchor];
+        std::vector<toh::core::Note> moved = ui.roll_origin;
+        if (ui.roll_mode == 1) {
+            const std::int64_t delta = snap(static_cast<double>(anchor.start) + dx, false) - anchor.start;
+            for (std::size_t k = 0; k < moved.size(); ++k) {
+                if (ui.roll_selected[k] == 0) {
+                    continue;
+                }
+                toh::core::Note& note = moved[k];
+                note.start = std::clamp<std::int64_t>(note.start + delta, 0, std::max<std::int64_t>(frames - 1, 0));
+                note.pitch = static_cast<std::uint8_t>(std::clamp(static_cast<int>(note.pitch) + dp, 0, 127));
+                note.length = std::min(note.length, frames - note.start);
+            }
+        } else {
+            const std::int64_t anchor_end = anchor.start + anchor.length;
+            const std::int64_t delta = snap(static_cast<double>(anchor_end) + dx, false) - anchor_end;
+            for (std::size_t k = 0; k < moved.size(); ++k) {
+                if (ui.roll_selected[k] == 0) {
+                    continue;
+                }
+                toh::core::Note& note = moved[k];
+                note.length = std::clamp<std::int64_t>(note.length + delta, shortest,
+                                                       std::max<std::int64_t>(frames - note.start, 1));
+            }
+            ui.roll_last_length = moved[ui.roll_anchor].length;
+        }
+        bool differs = false;
+        for (std::size_t k = 0; k < moved.size() && !differs; ++k) {
+            const toh::core::Note& a = moved[k];
+            const toh::core::Note& b = ui.roll_notes[k];
+            differs = a.start != b.start || a.length != b.length || a.pitch != b.pitch;
+        }
+        if (differs) {
+            ui.roll_notes = std::move(moved);
+            changed = true;
+        }
+    }
+    if (ui.roll_mode != 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        sort_roll_notes(ui);  // the drag is over
+        ui.roll_mode = 0;
+    }
+
+    // Removing: right-click a note, or Delete for the selected ones; Ctrl+A selects all.
+    if (ui.roll_mode == 0 && hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right) &&
+        under < ui.roll_notes.size()) {
+        ui.roll_notes.erase(ui.roll_notes.begin() + static_cast<std::ptrdiff_t>(under));
+        ui.roll_selected.erase(ui.roll_selected.begin() + static_cast<std::ptrdiff_t>(under));
+        changed = true;
+    }
+    if (ui.roll_mode == 0 && ui.roll_focused && !io.WantTextInput) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Delete) || ImGui::IsKeyPressed(ImGuiKey_Backspace)) {
+            std::vector<toh::core::Note> kept;
+            for (std::size_t k = 0; k < ui.roll_notes.size(); ++k) {
+                if (ui.roll_selected[k] == 0) {
+                    kept.push_back(ui.roll_notes[k]);
+                }
+            }
+            if (kept.size() != ui.roll_notes.size()) {
+                ui.roll_notes = std::move(kept);
+                ui.roll_selected.assign(ui.roll_notes.size(), 0);
+                changed = true;
+            }
+        }
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A)) {
+            std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 1);
+        }
+    }
+    if (changed) {
+        session.set_region_notes(ui.roll_track, ui.roll_region, ui.roll_notes);
+        ui.roll_source = nullptr;  // taken again once nothing is dragged
+        if (ui.roll_mode != 0) {
+            ui.roll_source = session.tracks()[ui.roll_track].regions[ui.roll_region].source.get();
+        }
+    }
+
+    // Drawing: keys and rows, the grid, the part outside the region, the notes, the playhead.
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const float view_left = ImGui::GetWindowPos().x;
+    const float view_right = view_left + ImGui::GetWindowWidth();
+    const float view_top = ImGui::GetWindowPos().y;
+    const float view_bottom = view_top + ImGui::GetWindowHeight();
+    for (int pitch = 0; pitch < 128; ++pitch) {
+        const float y = pitch_to_y(pitch);
+        if (y + key_h < view_top || y > view_bottom) {
+            continue;
+        }
+        d->AddRectFilled(ImVec2(origin.x + keys_w, y), ImVec2(origin.x + width, y + key_h),
+                         is_black_key(pitch) ? IM_COL32(29, 31, 37, 255) : IM_COL32(38, 41, 48, 255));
+        d->AddRectFilled(ImVec2(origin.x, y), ImVec2(origin.x + keys_w - 1.0f, y + key_h - 1.0f),
+                         is_black_key(pitch) ? IM_COL32(24, 24, 28, 255) : IM_COL32(215, 215, 222, 255));
+        if (pitch % 12 == 0) {
+            d->AddText(ImVec2(origin.x + 3.0f, y + (key_h - font) * 0.5f), IM_COL32(40, 40, 55, 255),
+                       pitch_name(pitch).c_str());
+            d->AddLine(ImVec2(origin.x + keys_w, y + key_h), ImVec2(origin.x + width, y + key_h),
+                       IM_COL32(70, 74, 86, 255));
+        }
+    }
+    // Vertical lines: steps of the grid, beats, and brighter bars.
+    double line_step = step;
+    while (line_step / beat * static_cast<double>(ui.roll_beat_px) < 6.0) {
+        line_step *= 2.0;
+    }
+    const double bar = std::max(session.bar_frames(), 1.0);
+    const double shift = static_cast<double>(region->start - region->offset);  // timeline - note frame
+    for (double t = std::ceil(shift / line_step) * line_step; t - shift <= static_cast<double>(frames);
+         t += line_step) {
+        const float x = frame_to_px(t - shift);
+        if (x < view_left - 1.0f) {
+            continue;
+        }
+        if (x > view_right + 1.0f) {
+            break;
+        }
+        const bool on_bar = std::fabs(std::remainder(t, bar)) < 0.5;
+        const bool on_beat = std::fabs(std::remainder(t, beat)) < 0.5;
+        d->AddLine(ImVec2(x, std::max(origin.y, view_top)), ImVec2(x, std::min(origin.y + height, view_bottom)),
+                   on_bar ? IM_COL32(110, 115, 130, 255)
+                          : (on_beat ? IM_COL32(70, 74, 86, 255) : IM_COL32(50, 53, 62, 255)));
+    }
+    // Notes before or after the region are kept but not heard.
+    const ImU32 outside = IM_COL32(0, 0, 0, 110);
+    if (region->offset > 0) {
+        d->AddRectFilled(ImVec2(origin.x + keys_w, std::max(origin.y, view_top)),
+                         ImVec2(frame_to_px(static_cast<double>(region->offset)), std::min(origin.y + height, view_bottom)),
+                         outside);
+    }
+    if (region->offset + region->length < frames) {
+        d->AddRectFilled(ImVec2(frame_to_px(static_cast<double>(region->offset + region->length)), std::max(origin.y, view_top)),
+                         ImVec2(origin.x + width, std::min(origin.y + height, view_bottom)), outside);
+    }
+    for (std::size_t k = 0; k < ui.roll_notes.size(); ++k) {
+        const toh::core::Note& note = ui.roll_notes[k];
+        const float x0 = frame_to_px(static_cast<double>(note.start));
+        const float x1 = std::max(frame_to_px(static_cast<double>(note.start + note.length)), x0 + 3.0f);
+        const float y = pitch_to_y(note.pitch);
+        if (x1 < view_left || x0 > view_right || y + key_h < view_top || y > view_bottom) {
+            continue;
+        }
+        const bool selected = k < ui.roll_selected.size() && ui.roll_selected[k] != 0;
+        d->AddRectFilled(ImVec2(x0, y + 1.0f), ImVec2(x1, y + key_h - 1.0f),
+                         selected ? IM_COL32(255, 225, 160, 255) : IM_COL32(240, 160, 80, 255), 2.0f);
+        d->AddRect(ImVec2(x0, y + 1.0f), ImVec2(x1, y + key_h - 1.0f), IM_COL32(60, 35, 10, 255), 2.0f);
+    }
+    const double playhead = static_cast<double>(session.position_frames()) - shift;
+    if (playhead >= 0.0 && playhead <= static_cast<double>(frames)) {
+        const float x = frame_to_px(playhead);
+        d->AddLine(ImVec2(x, std::max(origin.y, view_top)), ImVec2(x, std::min(origin.y + height, view_bottom)),
+                   IM_COL32(255, 80, 70, 230), 2.0f);
+    }
+    ImGui::EndChild();
+    ImGui::End();
 }
 
 void draw_tracks(Session& session, UiState& ui) {
@@ -3776,6 +4179,7 @@ int main(int argc, char* argv[]) {
             draw_status_bar(session, ui);
             draw_dialogs(ui);
             draw_settings_window(session, ui);
+            draw_piano_roll(session, ui);
             if (ui.settings_changed) {
                 save_settings(session, ui);
             }

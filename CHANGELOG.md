@@ -2,6 +2,14 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.2
+
+- A piano roll for note regions: right-click a note region > Open the piano roll, or select it and press P. It shows a keyboard from C-1 to G9 and the grid of the project.
+  - Click: add a note (it gets the length used last); drag right away to make it longer.
+  - Drag a note to move it in time and pitch, drag its right end to change its length; the selected notes move together. Ctrl+click selects several, Ctrl+A all.
+  - Right-click a note or press Delete to remove it. Alt while dragging ignores the grid. Ctrl+wheel zooms.
+  - Notes outside the region are shaded: they are kept but not heard. The playhead is shown, and every change can be undone.
+
 ## 0.2.1
 
 The first step of level 1 (MIDI and instruments):

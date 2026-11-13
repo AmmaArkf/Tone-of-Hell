@@ -35,6 +35,7 @@ const ActionInfo kActions[kActionCount] = {
     {Action::Faster, "faster", "Play faster", "Ctrl+UpArrow"},
     {Action::Slower, "slower", "Play slower", "Ctrl+DownArrow"},
     {Action::NormalSpeed, "normal_speed", "Normal speed", "Ctrl+0"},
+    {Action::PianoRoll, "piano_roll", "Open the piano roll", "P"},
 };
 
 std::string trimmed(const std::string& text) {
