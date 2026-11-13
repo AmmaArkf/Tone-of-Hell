@@ -307,6 +307,13 @@ bool Engine::start_recording() { return commands_.try_push(Command(CommandType::
 
 bool Engine::stop_recording() { return commands_.try_push(Command(CommandType::StopRecording)); }
 
+void Engine::set_soundfont(std::shared_ptr<const SoundFont> soundfont) {
+    soundfont_.store(soundfont.get(), std::memory_order_release);
+    if (soundfont) {
+        soundfonts_.push_back(std::move(soundfont));
+    }
+}
+
 bool Engine::set_speed(double speed) noexcept {
     if (!(speed >= kMinSpeed && speed <= kMaxSpeed)) {
         return false;
@@ -812,9 +819,18 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 const NoteData* const note_data = region.clip->notes.get();
                 std::array<std::uint32_t, 64> active{};
                 std::size_t active_count = 0;
+                // With a program and a SoundFont, recorded instruments play the notes.
+                const SoundFont* const font =
+                    note_data != nullptr && region.program >= 0
+                        ? soundfont_.load(std::memory_order_acquire)
+                        : nullptr;
+                const SoundFont::Preset* const preset =
+                    font != nullptr ? font->find(region.program) : nullptr;
                 if (note_data != nullptr) {
-                    const double release = instrument_release_seconds(region.instrument) *
-                                           static_cast<double>(sample_rate_);
+                    const double release =
+                        (preset != nullptr ? preset->release
+                                           : instrument_release_seconds(region.instrument)) *
+                        static_cast<double>(sample_rate_);
                     const std::int64_t low = region.offset + std::max<std::int64_t>(block_low - begin, 0);
                     const std::int64_t high = region.offset + (block_high - begin) + 1;
                     for (std::size_t k = 0; k < note_data->notes.size() && active_count < active.size(); ++k) {
@@ -850,6 +866,26 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                         const double note_pos = static_cast<double>(region.offset) +
                                                 static_cast<double>(into) +
                                                 static_cast<double>(frame_frac_[i]);
+                        float* note_dst = scratch + static_cast<std::size_t>(i) * channels;
+                        if (preset != nullptr) {
+                            float left = 0.0f;
+                            float right = 0.0f;
+                            for (std::size_t k = 0; k < active_count; ++k) {
+                                const Note& note = note_data->notes[active[k]];
+                                font->add_note(*preset, note, note_pos - static_cast<double>(note.start),
+                                               static_cast<double>(sample_rate_), left, right);
+                            }
+                            if (channels >= 2) {
+                                note_dst[0] += left * region_fade;
+                                note_dst[1] += right * region_fade;
+                                for (std::size_t c = 2; c < channels; ++c) {
+                                    note_dst[c] += 0.5f * (left + right) * region_fade;
+                                }
+                            } else {
+                                note_dst[0] += 0.5f * (left + right) * region_fade;
+                            }
+                            continue;
+                        }
                         float value = 0.0f;
                         for (std::size_t k = 0; k < active_count; ++k) {
                             const Note& note = note_data->notes[active[k]];
@@ -858,7 +894,6 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                                                  static_cast<double>(sample_rate_));
                         }
                         value *= region_fade;
-                        float* note_dst = scratch + static_cast<std::size_t>(i) * channels;
                         for (std::size_t c = 0; c < channels; ++c) {
                             note_dst[c] += value;
                         }

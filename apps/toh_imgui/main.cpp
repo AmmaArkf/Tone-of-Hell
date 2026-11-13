@@ -102,7 +102,7 @@ void SDLCALL export_dialog_callback(void* user_data, const char* const* file_lis
 
 // A path chosen in a project or folder dialog, waiting for the main loop.
 struct PendingPath {
-    enum class Kind { SaveProject, OpenProject, ProjectsFolder };
+    enum class Kind { SaveProject, OpenProject, ProjectsFolder, SoundFont };
     std::mutex mutex;
     bool ready = false;
     Kind kind = Kind::SaveProject;
@@ -1001,15 +1001,105 @@ const char* instrument_name(toh::core::Instrument instrument) {
     return names[static_cast<int>(instrument)];
 }
 
+// The name of a program of the SoundFont, or of the built-in instrument.
+std::string sound_name(const Session& session, int program, toh::core::Instrument instrument) {
+    if (program >= 0 && session.soundfont()) {
+        if (const auto* preset = session.soundfont()->find(program)) {
+            return preset->name;
+        }
+    }
+    return T_(instrument_name(instrument));
+}
+
 // A new track with an instrument and an empty note region of 8 bars (or the project's length).
-void add_instrument_track(Session& session, UiState& ui, toh::core::Instrument instrument) {
+void add_instrument_track(Session& session, UiState& ui, toh::core::Instrument instrument,
+                          int program) {
     const std::int64_t length =
         std::max<std::int64_t>(session.length_frames(), std::llround(session.bar_frames() * 8.0));
-    const std::size_t index = session.add_instrument_track(T_(instrument_name(instrument)),
-                                                           instrument, 0, length);
+    const std::size_t index = session.add_instrument_track(sound_name(session, program, instrument),
+                                                           instrument, 0, length, program);
     if (index >= session.tracks().size()) {
         ui.error = T_("The track limit is reached.");
     }
+}
+
+// The menu of sounds: the instruments of the SoundFont by family, the drums, and the simple
+// synthesizers. Returns true when one was chosen.
+bool instrument_menu(const Session& session, int current_program,
+                     toh::core::Instrument current_instrument, int& program,
+                     toh::core::Instrument& instrument) {
+    static const char* const families[] = {
+        "Pianos", "Chromatic percussion", "Organs", "Guitars", "Basses", "Strings",
+        "Ensembles", "Brass", "Reeds", "Pipes", "Synth leads", "Synth pads",
+        "Synth effects", "Ethnic", "Percussive", "Sound effects"};
+    bool chosen = false;
+    const auto& font = session.soundfont();
+    if (font) {
+        for (int family = 0; family < 16; ++family) {
+            if (!ImGui::BeginMenu(T_(families[family]))) {
+                continue;
+            }
+            for (int p = family * 8; p < family * 8 + 8; ++p) {
+                const auto* preset = font->find(p);
+                if (preset == nullptr) {
+                    continue;
+                }
+                const std::string label = preset->name + "##program" + std::to_string(p);
+                if (ImGui::MenuItem(label.c_str(), nullptr, current_program == p)) {
+                    program = p;
+                    instrument = current_instrument;
+                    chosen = true;
+                }
+            }
+            ImGui::EndMenu();
+        }
+        if (font->find(toh::core::SoundFont::kDrums) != nullptr &&
+            ImGui::MenuItem(T_("Drums"), nullptr, current_program == toh::core::SoundFont::kDrums)) {
+            program = toh::core::SoundFont::kDrums;
+            instrument = current_instrument;
+            chosen = true;
+        }
+        ImGui::Separator();
+    } else {
+        ImGui::TextDisabled("%s", T_("No SoundFont: only the simple synthesizers"));
+    }
+    if (ImGui::BeginMenu(T_("Simple synthesizers"))) {
+        for (int k = 0; k < toh::core::kInstrumentCount; ++k) {
+            const auto choice = static_cast<toh::core::Instrument>(k);
+            if (ImGui::MenuItem(T_(instrument_name(choice)), nullptr,
+                                current_program < 0 && current_instrument == choice)) {
+                program = -1;
+                instrument = choice;
+                chosen = true;
+            }
+        }
+        ImGui::EndMenu();
+    }
+    return chosen;
+}
+
+std::filesystem::path default_soundfont_path() {
+    const char* base = SDL_GetBasePath();
+    return base != nullptr ? std::filesystem::u8path(base) / "sounds" / "FluidR3_GM.sf2"
+                           : std::filesystem::path();
+}
+
+void load_soundfont(Session& session, UiState& ui, const std::filesystem::path& path) {
+    std::error_code code;
+    if (path.empty() || !std::filesystem::exists(path, code)) {
+        toh::app::logging::warning("No SoundFont at " + path.u8string() +
+                                   ": instrument tracks use the simple synthesizers");
+        return;
+    }
+    std::string error;
+    auto font = toh::core::SoundFont::load(path, &error);
+    if (!font) {
+        ui.error = std::string(T_("Instrument sounds: ")) + error;
+        return;
+    }
+    toh::app::logging::info("SoundFont " + path.u8string() + ": " +
+                            std::to_string(font->presets().size()) + " presets");
+    session.set_soundfont(std::move(font));
 }
 
 // ---- Playback speed ----------------------------------------------------------------------
@@ -1106,6 +1196,10 @@ void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
     } else if (kind == PendingPath::Kind::SaveProject) {
         SDL_ShowSaveFileDialog(&path_dialog_callback, &ui.path_request, ui.window, filters, 1,
                                location.c_str());
+    } else if (kind == PendingPath::Kind::SoundFont) {
+        static const SDL_DialogFileFilter sf_filters[] = {{"SoundFont", "sf2"}};
+        SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, sf_filters, 1,
+                               nullptr, false);
     } else {
         SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, filters, 1,
                                location.c_str(), false);
@@ -1185,6 +1279,12 @@ void handle_path_request(Session& session, UiState& ui) {
         return;
     }
     std::string error;
+    if (kind == PendingPath::Kind::SoundFont) {
+        ui.settings.soundfont_path = path;
+        ui.settings_changed = true;
+        load_soundfont(session, ui, std::filesystem::u8path(path));
+        return;
+    }
     if (kind == PendingPath::Kind::ProjectsFolder) {
         ui.settings.projects_folder = path;
         ui.settings_changed = true;
@@ -1681,6 +1781,25 @@ void draw_settings_window(Session& session, UiState& ui) {
                 ImGui::EndCombo();
             }
             ImGui::TextDisabled("%s", T_("F11 switches full screen on and off at any time."));
+
+            ImGui::SeparatorText(T_("Instrument sounds"));
+            if (session.soundfont()) {
+                ImGui::TextUnformatted(session.soundfont()->path().u8string().c_str());
+                ImGui::TextDisabled(T_("%d instruments"), static_cast<int>(session.soundfont()->presets().size()));
+            } else {
+                ImGui::TextDisabled("%s", T_("Not loaded: instrument tracks use the simple synthesizers."));
+            }
+            if (ImGui::Button(T_("Choose a SoundFont (.sf2)..."))) {
+                open_path_dialog(session, ui, PendingPath::Kind::SoundFont);
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(ui.settings.soundfont_path.empty());
+            if (ImGui::Button(T_("Back to the built-in sounds"))) {
+                ui.settings.soundfont_path.clear();
+                ui.settings_changed = true;
+                load_soundfont(session, ui, default_soundfont_path());
+            }
+            ImGui::EndDisabled();
 
             ImGui::SeparatorText(T_("Metronome"));
             if (ImGui::Checkbox(T_("With the metronome on, keep playing past the end"),
@@ -2879,12 +2998,12 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
             open_piano_roll(ui, ui.selected_track, ui.selected_region);
         }
         if (region != nullptr && region->has_notes() && ImGui::BeginMenu(T_("Instrument"))) {
-            const toh::core::Instrument current = session.tracks()[ui.selected_track].instrument;
-            for (int k = 0; k < toh::core::kInstrumentCount; ++k) {
-                const auto instrument = static_cast<toh::core::Instrument>(k);
-                if (ImGui::MenuItem(T_(instrument_name(instrument)), nullptr, current == instrument)) {
-                    session.set_track_instrument(ui.selected_track, instrument);
-                }
+            const TrackInfo& owner = session.tracks()[ui.selected_track];
+            int program = owner.program;
+            toh::core::Instrument instrument = owner.instrument;
+            if (instrument_menu(session, owner.program, owner.instrument, program, instrument)) {
+                session.set_track_program(ui.selected_track, program);
+                session.set_track_instrument(ui.selected_track, instrument);
             }
             ImGui::Separator();
             ImGui::TextDisabled("%s", T_("Double-click in the region: add or remove a note"));
@@ -3803,11 +3922,10 @@ void draw_tracks(Session& session, UiState& ui) {
             add_new_track(session, ui, true);
         }
         if (ImGui::BeginMenu(T_("New instrument track"))) {
-            for (int k = 0; k < toh::core::kInstrumentCount; ++k) {
-                const auto instrument = static_cast<toh::core::Instrument>(k);
-                if (ImGui::MenuItem(T_(instrument_name(instrument)))) {
-                    add_instrument_track(session, ui, instrument);
-                }
+            int program = -2;
+            toh::core::Instrument instrument = toh::core::Instrument::Keys;
+            if (instrument_menu(session, -2, toh::core::Instrument::Keys, program, instrument)) {
+                add_instrument_track(session, ui, instrument, program);
             }
             ImGui::EndMenu();
         }
@@ -4018,6 +4136,10 @@ int main(int argc, char* argv[]) {
         session.set_reverse_starts_playback(ui.settings.reverse_starts_playback);
         session.set_reverse_off_at_start(ui.settings.reverse_off_at_start);
         session.set_metronome_endless(ui.settings.metronome_endless);
+        load_soundfont(session, ui,
+                       ui.settings.soundfont_path.empty()
+                           ? default_soundfont_path()
+                           : std::filesystem::u8path(ui.settings.soundfont_path));
         if (ui.settings.record_offset_frames >= 0) {
             session.set_record_offset_frames(ui.settings.record_offset_frames);
         }
@@ -4045,6 +4167,11 @@ int main(int argc, char* argv[]) {
                                     build.commit + ", built " + build.date + ") on " +
                                     SDL_GetPlatform());
             toh::app::logging::info("Settings: " + ui.settings_path.u8string());
+            toh::app::logging::info(
+                session.soundfont()
+                    ? "SoundFont: " + session.soundfont()->path().u8string() + " (" +
+                          std::to_string(session.soundfont()->presets().size()) + " presets)"
+                    : std::string("No SoundFont: instrument tracks use the simple synthesizers"));
         }
 
         std::string audio_error;

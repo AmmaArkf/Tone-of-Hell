@@ -82,6 +82,8 @@ struct Settings {
     std::string projects_folder;
     /// Write a log file for every session.
     bool write_logs = true;
+    /// The SoundFont for instrument tracks (UTF-8); empty for the built-in FluidR3 GM.
+    std::string soundfont_path;
     /// With the metronome on, playback goes on past the end of the project.
     bool metronome_endless = true;
     /// Write unsaved changes to a recovery file every `autosave_minutes` minutes.

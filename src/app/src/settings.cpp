@@ -118,6 +118,8 @@ bool Settings::load(const std::filesystem::path& path) {
             }
         } else if (key == "metronome_endless") {
             metronome_endless = value == "1" || value == "true";
+        } else if (key == "soundfont") {
+            soundfont_path = value;
         } else if (key == "write_logs") {
             write_logs = value == "1" || value == "true";
         } else if (key == "projects_folder") {
@@ -165,6 +167,7 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "start_window=" << start_window << "\n";
     file << "projects_folder=" << projects_folder << "\n";
     file << "write_logs=" << (write_logs ? 1 : 0) << "\n";
+    file << "soundfont=" << soundfont_path << "\n";
     file << "metronome_endless=" << (metronome_endless ? 1 : 0) << "\n";
     file << "autosave=" << (autosave ? 1 : 0) << "\n";
     file << "autosave_minutes=" << autosave_minutes << "\n";

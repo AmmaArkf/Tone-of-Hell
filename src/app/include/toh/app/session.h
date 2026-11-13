@@ -120,6 +120,9 @@ struct TrackInfo {
     std::string icon;
     /// The instrument that plays the note regions of this track.
     core::Instrument instrument = core::Instrument::Keys;
+    /// A program of the SoundFont that plays the note regions instead (0..127 General MIDI,
+    /// core::SoundFont::kDrums for drums), or -1 for `instrument`.
+    int program = -1;
     std::vector<RegionInfo> regions;  // in the order they were created
     float gain = 1.0f;
     float pan = 0.0f;
@@ -188,12 +191,17 @@ public:
     /// Adds a track with an instrument and one empty note region from `start`, `length`
     /// frames long. Returns its index, or tracks().size() when the track limit is reached.
     std::size_t add_instrument_track(std::string name, core::Instrument instrument,
-                                     std::int64_t start, std::int64_t length);
+                                     std::int64_t start, std::int64_t length, int program = -1);
     /// Replaces the notes of a note region. Notes are sorted by start; notes without a length,
     /// outside the region's note list or above pitch 127 are dropped, velocities are limited
     /// to 0..1. Returns false for an audio region.
     bool set_region_notes(std::size_t track, std::size_t region, std::vector<core::Note> notes);
     bool set_track_instrument(std::size_t index, core::Instrument instrument);
+    /// Chooses a program of the SoundFont for a track (-1: the built-in instrument).
+    bool set_track_program(std::size_t index, int program);
+    /// The recorded instruments that programs refer to (also used by exports).
+    void set_soundfont(std::shared_ptr<const core::SoundFont> soundfont);
+    const std::shared_ptr<const core::SoundFont>& soundfont() const noexcept { return soundfont_; }
 
     const std::vector<TrackInfo>& tracks() const noexcept { return tracks_; }
     bool set_track_gain(std::size_t index, float linear);
@@ -513,6 +521,7 @@ private:
     std::filesystem::path cache_folder_;
     int cache_count_ = 0;
 
+    std::shared_ptr<const core::SoundFont> soundfont_;
     std::filesystem::path project_file_;
     std::string saved_state_;  // state_text() when the project was saved, opened or started
     std::string autosaved_state_;               // state_text() at the last recovery save

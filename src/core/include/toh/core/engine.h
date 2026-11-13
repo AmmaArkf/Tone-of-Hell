@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "toh/core/clip.h"
+#include "toh/core/soundfont.h"
 #include "toh/core/spsc_queue.h"
 #include "toh/core/spsc_ring.h"
 
@@ -50,6 +51,9 @@ struct Region {
     double rate = 1.0;
     /// For note regions (clip->notes): the instrument that plays them.
     Instrument instrument = Instrument::Keys;
+    /// For note regions: a program of the SoundFont (0..127, SoundFont::kDrums) that plays them
+    /// instead of `instrument`, or -1.
+    int program = -1;
 };
 
 /// How many frames of its clip a region plays.
@@ -144,6 +148,9 @@ public:
     /// normal speed. Any thread; returns false for a value out of range.
     bool set_speed(double speed) noexcept;
     double speed() const noexcept { return speed_.load(std::memory_order_relaxed); }
+    /// The recorded instruments for note regions with a program. Control thread; the
+    /// SoundFont stays alive as long as the engine.
+    void set_soundfont(std::shared_ptr<const SoundFont> soundfont);
     static constexpr double kMinSpeed = 0.25;
     static constexpr double kMaxSpeed = 4.0;
     /// Configures the built-in metronome click, which follows the timeline position.
@@ -352,6 +359,8 @@ private:
     std::int64_t pos_ = 0;
     double frac_ = 0.0;  // how far playback is between pos_ and pos_ + 1 (speeds other than 1)
     std::atomic<double> speed_{1.0};
+    std::atomic<const SoundFont*> soundfont_{nullptr};
+    std::vector<std::shared_ptr<const SoundFont>> soundfonts_;  // keeps every one alive
     bool loop_enabled_ = false;
     std::int64_t loop_start_ = 0;
     std::int64_t loop_end_ = -1;

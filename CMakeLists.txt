@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(ToneOfHell
-        VERSION 0.2.2
+        VERSION 0.2.3
         DESCRIPTION "An open source digital audio workstation (DAW) in C++"
         LANGUAGES C CXX)
 
@@ -53,6 +53,7 @@ endfunction()
 
 # The LAME MP3 encoder, as a separate LGPL library (downloaded while configuring).
 include(cmake/Lame.cmake)
+include(cmake/Sounds.cmake)
 
 # Layers, from the bottom up:
 #   toh_core   the audio engine; no dependencies

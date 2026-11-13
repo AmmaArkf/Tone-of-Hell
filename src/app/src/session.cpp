@@ -47,6 +47,7 @@ std::vector<core::Region> engine_regions(const TrackInfo& track) {
         region.fade_shape = info.fade_shape;
         region.rate = info.rate;
         region.instrument = track.instrument;
+        region.program = track.program;
         regions.push_back(std::move(region));
     }
     return regions;
@@ -498,14 +499,16 @@ std::size_t Session::add_empty_track(std::string name) {
 }
 
 std::size_t Session::add_instrument_track(std::string name, core::Instrument instrument,
-                                          std::int64_t start, std::int64_t length) {
-    if (tracks_.size() >= core::Engine::kMaxTracks || length <= 0) {
+                                          std::int64_t start, std::int64_t length, int program) {
+    if (tracks_.size() >= core::Engine::kMaxTracks || length <= 0 || program < -1 ||
+        program > core::SoundFont::kDrums) {
         return tracks_.size();
     }
     TrackInfo track;
     track.name = name;
-    track.icon = "keys";
+    track.icon = program == core::SoundFont::kDrums ? "drums" : "keys";
     track.instrument = instrument;
+    track.program = program;
     RegionInfo region;
     region.source = note_source(std::move(name), {}, length, config_.channels, config_.sample_rate);
     region.start = std::max<std::int64_t>(start, 0);
@@ -526,6 +529,20 @@ bool Session::set_region_notes(std::size_t track, std::size_t region, std::vecto
                                config_.channels, config_.sample_rate);
     sync_track_regions(track);
     return true;
+}
+
+bool Session::set_track_program(std::size_t index, int program) {
+    if (index >= tracks_.size() || program < -1 || program > core::SoundFont::kDrums) {
+        return false;
+    }
+    tracks_[index].program = program;
+    sync_track_regions(index);
+    return true;
+}
+
+void Session::set_soundfont(std::shared_ptr<const core::SoundFont> soundfont) {
+    soundfont_ = std::move(soundfont);
+    engine_.set_soundfont(soundfont_);
 }
 
 bool Session::set_track_instrument(std::size_t index, core::Instrument instrument) {
@@ -570,6 +587,7 @@ void Session::sync_track_regions(std::size_t index) {
         region.fade_shape = info.fade_shape;
         region.rate = info.rate;
         region.instrument = tracks_[index].instrument;
+        region.program = tracks_[index].program;
         regions.push_back(std::move(region));
     }
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions);
@@ -1427,6 +1445,7 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
         }
         out << "icon=" << one_line(icon) << "\n";
         out << "instrument=" << static_cast<int>(track.instrument) << "\n";
+        out << "program=" << track.program << "\n";
         out << "gain=" << track.gain << "\n";
         out << "pan=" << track.pan << "\n";
         out << "mute=" << (track.mute ? 1 : 0) << "\n";
@@ -1678,6 +1697,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         bool mute = false;
         bool solo = false;
         long long instrument = 0;
+        long long program = -1;
         std::vector<RegionEntry> regions;
     };
     std::vector<SourceEntry> sources;
@@ -1769,6 +1789,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().solo = integer != 0;
                 } else if (key == "instrument") {
                     tracks.back().instrument = integer;
+                } else if (key == "program") {
+                    tracks.back().program = integer;
                 }
                 break;
             case Section::Region: {
@@ -1932,6 +1954,9 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         if (entry.instrument >= 0 && entry.instrument < core::kInstrumentCount) {
             track.instrument = static_cast<core::Instrument>(entry.instrument);
         }
+        if (entry.program >= -1 && entry.program <= core::SoundFont::kDrums) {
+            track.program = static_cast<int>(entry.program);
+        }
         for (const RegionEntry& region : entry.regions) {
             if (region.source < 0 || static_cast<std::size_t>(region.source) >= loaded.size()) {
                 continue;
@@ -2036,7 +2061,7 @@ std::string describe_change(const std::vector<TrackInfo>& before,
         if (before[i].name != after[i].name) {
             return "Rename a track";
         }
-        if (before[i].instrument != after[i].instrument) {
+        if (before[i].instrument != after[i].instrument || before[i].program != after[i].program) {
             return "Change the instrument";
         }
         if (before[i].icon != after[i].icon) {
@@ -2057,7 +2082,7 @@ std::string Session::edit_text() const {
     out.precision(9);
     for (const TrackInfo& track : tracks_) {
         out << "T|" << track.name << "|" << track.icon << "|" << track.gain << "|" << track.pan << "|"
-            << static_cast<int>(track.instrument) << "\n";
+            << static_cast<int>(track.instrument) << "|" << track.program << "\n";
         for (const RegionInfo& region : track.regions) {
             out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
                 << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"
@@ -2206,6 +2231,7 @@ bool Session::render_project(const std::function<bool(const float*, std::uint32_
     }
     offline->set_gain(master_gain_);
     offline->set_blocking_reads(true);  // an export may wait for the disk
+    offline->set_soundfont(soundfont_);
     offline->play(false);  // no fade-in: the file starts exactly like the project
 
     const std::uint32_t block = 4096;

@@ -34,6 +34,7 @@ jobs:
           Copy-Item build/apps/toh_imgui/Release/toh_imgui.exe "$dist/Tone of Hell.exe"
           Copy-Item build/apps/toh_imgui/Release/*.dll $dist
           Copy-Item build/apps/toh_player/Release/toh_player.exe $dist
+          Copy-Item -Recurse build/apps/toh_imgui/Release/sounds "$dist/sounds"
           Copy-Item README.md, CHANGELOG.md, LICENSE $dist
           Copy-Item build/_deps/lame-src/COPYING "$dist/licenses/LAME-COPYING.txt"
           Copy-Item build/_deps/sdl3-src/LICENSE.txt "$dist/licenses/SDL-LICENSE.txt"
@@ -72,6 +73,7 @@ jobs:
           mkdir -p "$dist/licenses"
           cp build/apps/toh_imgui/toh_imgui "$dist/tone-of-hell"
           cp build/apps/toh_player/toh_player "$dist/"
+          cp -r build/apps/toh_imgui/sounds "$dist/sounds"
           find build -maxdepth 3 -name 'libmp3lame.so*' -exec cp -P {} "$dist/" \;
           cp README.md CHANGELOG.md LICENSE "$dist/"
           cp build/_deps/lame-src/COPYING "$dist/licenses/LAME-COPYING.txt"

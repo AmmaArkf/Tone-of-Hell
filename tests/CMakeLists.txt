@@ -10,6 +10,7 @@ add_executable(toh_tests
     test_regions.cpp
     test_session.cpp
     test_settings.cpp
+    test_soundfont.cpp
     test_spsc_queue.cpp
     test_streaming.cpp
     test_transport.cpp

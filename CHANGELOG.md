@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.3
+
+- Recorded instruments: instrument tracks can now be played by real recorded sounds from a SoundFont (.sf2). The program comes with FluidR3 GM by Frank Wen (MIT license): the 128 General MIDI instruments (pianos, organs, guitars, strings, brass, synthesizers ...) and a drum kit. It is downloaded while building and lies in "sounds" next to the program.
+- New instrument track and the Instrument menu of a note region list the sounds by family, plus Drums and the simple synthesizers of 0.2.1. Projects and exports keep the chosen sound.
+- Edit > Settings > General > Instrument sounds chooses another SoundFont.
+
 ## 0.2.2
 
 - A piano roll for note regions: right-click a note region > Open the piano roll, or select it and press P. It shows a keyboard from C-1 to G9 and the grid of the project.
