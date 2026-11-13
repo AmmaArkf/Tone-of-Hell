@@ -7,6 +7,7 @@ add_executable(toh_tests
     test_mp3.cpp
     test_notes.cpp
     test_project.cpp
+    test_range.cpp
     test_recording.cpp
     test_regions.cpp
     test_session.cpp

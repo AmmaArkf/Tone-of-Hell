@@ -151,7 +151,7 @@ struct View {
     float lane_width = 800.0f;
 };
 
-enum class DragKind { None, Seek, Move, TrimStart, TrimEnd, FadeIn, FadeOut };
+enum class DragKind { None, Seek, Move, TrimStart, TrimEnd, FadeIn, FadeOut, Select };
 
 struct UiState {
     std::string error;
@@ -187,6 +187,15 @@ struct UiState {
     Then pending_then = Then::Nothing;  // waits for the answer about unsaved changes
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
+    // A selected part of the tracks (dragged out inside regions) and what was cut or copied.
+    bool has_range = false;
+    std::size_t range_first = 0;
+    std::size_t range_last = 0;
+    std::int64_t range_begin = 0;
+    std::int64_t range_end = 0;
+    std::int64_t range_anchor = 0;       // where the drag began
+    std::size_t focus_track = 0;         // the lane clicked last: pasting goes there
+    Session::Clipboard clipboard;
     toh::app::MidiInput midi;            // MIDI keyboards
     std::vector<toh::app::MidiEvent> midi_events;
     bool musical_keyboard = false;       // the letter keys play notes
@@ -201,7 +210,7 @@ struct UiState {
     std::vector<toh::core::Note> roll_notes;
     std::vector<toh::core::Note> roll_origin;  // the notes when the drag began
     std::vector<char> roll_selected;           // one flag per note of roll_notes
-    int roll_mode = 0;                         // 0 nothing, 1 moving, 2 changing the length
+    int roll_mode = 0;  // 0 nothing, 1 moving, 2 changing the length, 3 playhead, 4 listening
     std::size_t roll_anchor = 0;               // the note the drag began on
     double roll_start_frame = 0.0;
     int roll_start_pitch = 0;
@@ -209,6 +218,10 @@ struct UiState {
     float roll_beat_px = 48.0f;
     bool roll_scroll = false;                  // scroll to middle C once
     bool roll_focused = false;
+    bool roll_hovered = false;                 // the canvas had the mouse in the last frame
+    float roll_scroll_x = 0.0f;                // its scrolling and left edge in the last frame
+    float roll_canvas_x = 0.0f;
+    int roll_preview = -1;                     // the note sounding while a note is dragged
     std::filesystem::path logs_folder;
     std::filesystem::path recovery_file;  // where autosave writes
     bool recovery_written = false;        // the recovery file holds unsaved changes
@@ -449,6 +462,87 @@ void split_at_playhead(Session& session, const UiState& ui) {
         for (std::size_t r = 0; r < count; ++r) {
             session.split_region(t, r, frame);
         }
+    }
+}
+
+// ---- Cut, copy and paste -----------------------------------------------------------------
+
+bool has_range(const UiState& ui) { return ui.has_range && ui.range_end > ui.range_begin; }
+
+Session::Range ui_range(const UiState& ui) {
+    Session::Range range;
+    range.first_track = ui.range_first;
+    range.last_track = ui.range_last;
+    range.begin = ui.range_begin;
+    range.end = ui.range_end;
+    return range;
+}
+
+// What cut and copy take: the selected part, else the selected region.
+bool can_take(const Session& session, const UiState& ui) {
+    return has_range(ui) || selected_region(session, ui) != nullptr;
+}
+
+void copy_selection(Session& session, UiState& ui) {
+    if (has_range(ui)) {
+        ui.clipboard = session.copy_range(ui_range(ui));
+    } else if (const RegionInfo* region = selected_region(session, ui)) {
+        ui.clipboard = Session::Clipboard();
+        RegionInfo copy = *region;
+        copy.start = 0;
+        ui.clipboard.length = copy.length;
+        ui.clipboard.tracks.push_back({copy});
+    } else {
+        return;
+    }
+    if (!ui.clipboard.empty()) {
+        ui.notice = T_("Copied. Ctrl+V pastes it at the playhead.");
+    }
+}
+
+void cut_selection(Session& session, UiState& ui) {
+    if (has_range(ui)) {
+        session.cut_range(ui_range(ui), &ui.clipboard);
+        ui.has_range = false;
+        ui.selected = false;
+    } else if (selected_region(session, ui) != nullptr) {
+        copy_selection(session, ui);
+        session.remove_region(ui.selected_track, ui.selected_region);
+        ui.selected = false;
+    }
+}
+
+void delete_selection(Session& session, UiState& ui) {
+    session.cut_range(ui_range(ui));
+    ui.has_range = false;
+    ui.selected = false;
+}
+
+void keep_selection(Session& session, UiState& ui) {
+    if (has_range(ui)) {
+        session.keep_range(ui_range(ui));
+        ui.selected = false;
+    }
+}
+
+// Pastes onto the lane clicked last, at the playhead, and moves the playhead after what was
+// pasted, so that pasting again puts the next copy right behind it.
+void paste_clipboard(Session& session, UiState& ui) {
+    if (ui.clipboard.empty()) {
+        return;
+    }
+    const std::size_t track = ui.focus_track < session.tracks().size() ? ui.focus_track
+                                                                       : Session::kNewTrack;
+    const std::int64_t frame = session.position_frames();
+    const std::size_t first = std::min(track, session.tracks().size());
+    if (session.paste(ui.clipboard, track, frame)) {
+        ui.has_range = true;
+        ui.range_first = first;
+        ui.range_last = first + ui.clipboard.tracks.size() - 1;
+        ui.range_begin = frame;
+        ui.range_end = frame + ui.clipboard.length;
+        ui.selected = false;
+        session.seek_frames(frame + ui.clipboard.length);
     }
 }
 
@@ -1448,6 +1542,28 @@ void import_midi_file(Session& session, UiState& ui, const std::string& path) {
     }
 }
 
+// Cut, Copy, Paste and Keep only the selection, for the Edit menu and the region menu.
+void draw_clipboard_items(Session& session, UiState& ui) {
+    if (ImGui::MenuItem(T_("Cut"), key_label(ui, Action::Cut), false, can_take(session, ui))) {
+        cut_selection(session, ui);
+    }
+    if (ImGui::MenuItem(T_("Copy"), key_label(ui, Action::Copy), false, can_take(session, ui))) {
+        copy_selection(session, ui);
+    }
+    if (ImGui::MenuItem(T_("Paste at the playhead"), key_label(ui, Action::Paste), false,
+                        !ui.clipboard.empty())) {
+        paste_clipboard(session, ui);
+    }
+    if (ImGui::MenuItem(T_("Keep only the selection"), key_label(ui, Action::KeepSelection), false,
+                        has_range(ui))) {
+        keep_selection(session, ui);
+    }
+    if (ImGui::MenuItem(T_("Delete the selection"), key_label(ui, Action::RemoveRegion), false,
+                        has_range(ui))) {
+        delete_selection(session, ui);
+    }
+}
+
 // ---- Playing notes -----------------------------------------------------------------------
 
 // The track that keyboard notes play: the armed instrument track, else a selected one, else the
@@ -1668,13 +1784,30 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
             split_at_playhead(session, ui);
             break;
         case Action::RemoveRegion:
-            remove_selected_region(session, ui);
+            if (has_range(ui)) {
+                delete_selection(session, ui);
+            } else {
+                remove_selected_region(session, ui);
+            }
+            break;
+        case Action::Cut:
+            cut_selection(session, ui);
+            break;
+        case Action::Copy:
+            copy_selection(session, ui);
+            break;
+        case Action::Paste:
+            paste_clipboard(session, ui);
+            break;
+        case Action::KeepSelection:
+            keep_selection(session, ui);
             break;
         case Action::JoinRegions:
             join_with_next(session, ui);
             break;
         case Action::Deselect:
             ui.selected = false;
+            ui.has_range = false;
             session.clear_track_selection();
             break;
         case Action::AddFiles:
@@ -1761,7 +1894,9 @@ void handle_shortcuts(Session& session, UiState& ui, PendingFiles& pending, SDL_
         }
         // While the piano roll has the keyboard, its keys edit notes, not regions.
         if (ui.roll_focused && (action == Action::RemoveRegion || action == Action::Split ||
-                                action == Action::JoinRegions || action == Action::Deselect)) {
+                                action == Action::JoinRegions || action == Action::Deselect ||
+                                action == Action::Cut || action == Action::Copy ||
+                                action == Action::Paste || action == Action::KeepSelection)) {
             continue;
         }
         if (chord_pressed(parse_chord(ui.settings.shortcut(action)))) {
@@ -2197,12 +2332,17 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
         }
-        if (ImGui::MenuItem(T_("Remove the selected region"), key_label(ui, Action::RemoveRegion), false, region != nullptr)) {
+        if (ImGui::MenuItem(T_("Remove the selected region"), key_label(ui, Action::RemoveRegion), false,
+                            region != nullptr && !has_range(ui))) {
             remove_selected_region(session, ui);
         }
         ImGui::Separator();
-        if (ImGui::MenuItem(T_("Deselect"), key_label(ui, Action::Deselect), false, ui.selected)) {
+        draw_clipboard_items(session, ui);
+        ImGui::Separator();
+        if (ImGui::MenuItem(T_("Deselect"), key_label(ui, Action::Deselect), false,
+                            ui.selected || has_range(ui))) {
             ui.selected = false;
+            ui.has_range = false;
         }
         ImGui::Separator();
         if (ImGui::MenuItem(T_("New track"), key_label(ui, Action::NewTrack))) {
@@ -2337,6 +2477,10 @@ void draw_dialogs(UiState& ui) {
                 {"Drag a region close to another", "Its edge sticks to the other edge"},
                 {"Drag a region up or down", "Move it to another track"},
                 {"Double-click in an instrument region", "Add a note there, or remove the one under the mouse"},
+                {"Drag the name strip of a region", "Move the region (also onto another track)"},
+                {"Drag inside regions", "Select a part of one or more tracks"},
+                {"Ctrl+X, Ctrl+C, Ctrl+V", "Cut, copy, paste at the playhead"},
+                {"Ctrl+E", "Keep only the selection"},
                 {"Piano keys on: A W S E D F T G Y H U J K", "Play the notes C to C; Z and X change the octave"},
                 {"R on an instrument track, then Record", "Write down the notes you play"},
                 {"Scissors on, click a region", "Cut it where the mouse is"},
@@ -2875,6 +3019,37 @@ std::size_t lane_under(const UiState& ui, float y, std::size_t count) {
     return count;
 }
 
+// The strip along the top of a region that shows its name; dragging it moves the region.
+float region_header_height() { return ImGui::GetFontSize() + 4.0f; }
+
+// The frame under x for an edge of a selected part. With the magnet on it sticks to grid
+// lines, region edges of `track` and the playhead nearby (Alt: no sticking).
+std::int64_t range_frame(const Session& session, const UiState& ui, float x, std::size_t track) {
+    const View& view = ui.view;
+    const std::int64_t frame = std::max<std::int64_t>(x_to_frame(session, view, x), 0);
+    if (!ui.settings.magnet || ImGui::GetIO().KeyAlt) {
+        return frame;
+    }
+    float best = 0.5f * ImGui::GetFontSize();
+    std::int64_t result = frame;
+    const auto consider = [&](std::int64_t candidate) {
+        const float distance = std::fabs(frame_to_x(session, view, candidate) - x);
+        if (distance <= best) {
+            best = distance;
+            result = candidate;
+        }
+    };
+    consider(session.snap_frame(frame));
+    consider(session.position_frames());
+    if (track < session.tracks().size()) {
+        for (const RegionInfo& region : session.tracks()[track].regions) {
+            consider(region.start);
+            consider(region.end());
+        }
+    }
+    return result;
+}
+
 // What is under the mouse inside a lane.
 struct Hit {
     DragKind kind = DragKind::None;
@@ -2906,8 +3081,10 @@ Hit hit_test(const Session& session, const View& view, const TrackInfo& track, c
             hit.kind = DragKind::TrimStart;
         } else if (wide && mouse.x > x1 - handle) {
             hit.kind = DragKind::TrimEnd;
+        } else if (mouse.y < lane_top + region_header_height()) {
+            hit.kind = DragKind::Move;  // the name strip
         } else {
-            hit.kind = DragKind::Move;
+            hit.kind = DragKind::Select;  // the body: select a part
         }
         return hit;
     }
@@ -3040,6 +3217,16 @@ void draw_region(const Session& session, const View& view, const TrackInfo& trac
         draw_fade(fade_out_x, x1, false);
     }
 
+    // The name strip on top: grab it to move the region.
+    const float strip_bottom = std::min(top + 1.0f + region_header_height(), bottom - 1.0f);
+    draw_list->AddRectFilled(low, ImVec2(high.x, strip_bottom),
+                             region.has_notes()
+                                 ? (selected ? IM_COL32(130, 100, 170, 235) : IM_COL32(52, 38, 72, 235))
+                                 : (selected ? IM_COL32(88, 124, 170, 235) : IM_COL32(30, 44, 62, 235)),
+                             3.0f, ImDrawFlags_RoundCornersTop);
+    draw_list->AddLine(ImVec2(low.x, strip_bottom), ImVec2(high.x, strip_bottom),
+                       IM_COL32(84, 104, 134, 200));
+
     draw_list->AddRect(low, high, selected ? IM_COL32(210, 228, 255, 255) : IM_COL32(84, 104, 134, 255),
                        3.0f);
 
@@ -3087,6 +3274,10 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
             ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
         } else if (hit.kind == DragKind::FadeIn || hit.kind == DragKind::FadeOut) {
             ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        } else if (hit.kind == DragKind::Move) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        } else if (hit.kind == DragKind::Select) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_TextInput);
         }
     }
 
@@ -3106,6 +3297,8 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     } else if (ImGui::IsItemActivated()) {
         ui.drag_track = track_index;
         ui.drag_owner = track_index;
+        ui.focus_track = track_index;
+        ui.has_range = false;
         if (hit.kind == DragKind::None) {
             ui.drag = DragKind::Seek;
             ui.selected = false;
@@ -3118,6 +3311,11 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
             ui.selected_region = hit.region;
             ui.drag_grab =
                 x_to_frame(session, view, io.MousePos.x) - track.regions[hit.region].start;
+            if (hit.kind == DragKind::Select) {
+                ui.range_anchor = range_frame(session, ui, io.MousePos.x, track_index);
+                ui.range_first = track_index;
+                ui.range_last = track_index;
+            }
         }
     }
 
@@ -3133,6 +3331,8 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     if (ImGui::BeginPopup("region menu")) {
         const RegionInfo* region = selected_region(session, ui);
         const std::int64_t playhead = session.position_frames();
+        draw_clipboard_items(session, ui);
+        ImGui::Separator();
         const bool can_split =
             region != nullptr && playhead > region->start && playhead < region->end();
         if (ImGui::MenuItem(T_("Split at the playhead"), key_label(ui, Action::Split), false, can_split)) {
@@ -3273,6 +3473,23 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                     session.seek_frames(mouse_frame);
                 }
                 break;
+            case DragKind::Select:
+                if (moved) {
+                    // From where the drag began to the mouse, over the lanes in between.
+                    const std::size_t lane = lane_under(ui, io.MousePos.y, session.tracks().size());
+                    if (lane < session.tracks().size()) {
+                        ui.range_first = std::min(ui.drag_owner, lane);
+                        ui.range_last = std::max(ui.drag_owner, lane);
+                    }
+                    const std::int64_t frame = range_frame(session, ui, io.MousePos.x, lane);
+                    ui.range_begin = std::min(ui.range_anchor, frame);
+                    ui.range_end = std::max(ui.range_anchor, frame);
+                    ui.has_range = ui.range_end > ui.range_begin;
+                    if (ui.has_range) {
+                        ui.selected = false;
+                    }
+                }
+                break;
             case DragKind::Move:
                 if (moved && region_exists) {
                     // Either end of the region may stick. The end that already sticks keeps
@@ -3372,6 +3589,14 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         const bool under_mouse = hovered && hit.kind != DragKind::None && hit.region == r;
         draw_region(session, view, track, track.regions[r], selected, selected || under_mouse,
                     origin.y, row_height);
+    }
+    // The selected part.
+    if (has_range(ui) && track_index >= ui.range_first && track_index <= ui.range_last) {
+        const float rx0 = frame_to_x(session, view, ui.range_begin);
+        const float rx1 = std::max(frame_to_x(session, view, ui.range_end), rx0 + 1.0f);
+        draw_list->AddRectFilled(ImVec2(rx0, origin.y), ImVec2(rx1, corner.y), IM_COL32(235, 240, 255, 55));
+        draw_list->AddLine(ImVec2(rx0, origin.y), ImVec2(rx0, corner.y), IM_COL32(235, 240, 255, 210), 1.5f);
+        draw_list->AddLine(ImVec2(rx1, origin.y), ImVec2(rx1, corner.y), IM_COL32(235, 240, 255, 210), 1.5f);
     }
     if (track.regions.empty() && !(session.is_recording() && session.record_track() == track_index)) {
         draw_list->AddText(ImVec2(view.lane_origin_x + 8.0f, origin.y + 6.0f),
@@ -3715,17 +3940,33 @@ void draw_piano_roll(Session& session, UiState& ui) {
     ImGui::SameLine();
     ImGui::TextDisabled("%s", T_("Click: add a note. Drag: move it; its right end: length. Right-click "
                                  "or Delete: remove. Ctrl: select several. Alt: off the grid."));
+    ImGui::TextDisabled("%s", T_("Wheel: zoom. Scrollbars: move. The strip on top: place the playhead. "
+                                 "The keys on the left: listen."));
 
     const float key_h = std::max(0.85f * font, 8.0f);
     const float keys_w = 3.5f * font;
+    const float ruler_h = font + 4.0f;
+    // The wheel only zooms, around the mouse; moving is left to the scrollbars.
+    float next_scroll_x = -1.0f;
+    if (ui.roll_hovered && io.MouseWheel != 0.0f) {
+        const float old_px = ui.roll_beat_px;
+        ui.roll_beat_px = std::clamp(ui.roll_beat_px * std::pow(1.25f, io.MouseWheel), 8.0f, 600.0f);
+        const float mouse_in_view = io.MousePos.x - ui.roll_canvas_x;
+        const float content_x = ui.roll_scroll_x + mouse_in_view - keys_w;
+        next_scroll_x = std::max(content_x * (ui.roll_beat_px / old_px) + keys_w - mouse_in_view, 0.0f);
+    }
     const float width = keys_w + static_cast<float>(static_cast<double>(frames) / beat) * ui.roll_beat_px;
     const float height = 128.0f * key_h;
-    ImGui::BeginChild("roll canvas", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_HorizontalScrollbar);
-    if (io.KeyCtrl && ImGui::IsWindowHovered() && io.MouseWheel != 0.0f) {
-        ui.roll_beat_px =
-            std::clamp(ui.roll_beat_px * (io.MouseWheel > 0.0f ? 1.25f : 0.8f), 8.0f, 600.0f);
+    ImGui::SetNextWindowContentSize(ImVec2(width, height));
+    if (next_scroll_x >= 0.0f) {
+        ImGui::SetNextWindowScroll(ImVec2(next_scroll_x, -1.0f));
     }
+    ImGui::BeginChild("roll canvas", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ui.roll_hovered = ImGui::IsWindowHovered();
+    ui.roll_scroll_x = ImGui::GetScrollX();
+    ui.roll_canvas_x = ImGui::GetCursorScreenPos().x + ImGui::GetScrollX();
+    const float ruler_bottom = ImGui::GetWindowPos().y + ruler_h;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("roll", ImVec2(width, height),
                            ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
@@ -3761,7 +4002,24 @@ void draw_piano_roll(Session& session, UiState& ui) {
     const double mouse_frame = px_to_frame(io.MousePos.x);
     const int mouse_pitch =
         std::clamp(127 - static_cast<int>(std::floor((io.MousePos.y - origin.y) / key_h)), 0, 127);
-    const bool in_grid = io.MousePos.x > origin.x + keys_w;
+    const bool in_ruler = io.MousePos.y < ruler_bottom;
+    const bool in_grid = io.MousePos.x > origin.x + keys_w && !in_ruler;
+    const double shift_frames = static_cast<double>(region->start - region->offset);  // timeline - note
+    // The note that sounds while the mouse holds a note or a key (-1: none).
+    const auto preview = [&](int pitch, float velocity) {
+        if (pitch == ui.roll_preview) {
+            return;
+        }
+        if (ui.roll_preview >= 0) {
+            session.note_off(ui.roll_preview);
+        }
+        ui.roll_preview = -1;
+        if (pitch >= 0 && !session.is_recording()) {
+            session.set_live_track(ui.roll_track);
+            session.note_on(pitch, velocity);
+            ui.roll_preview = pitch;
+        }
+    };
 
     // The note under the mouse, and whether the mouse is near its right end.
     std::size_t under = ui.roll_notes.size();
@@ -3784,6 +4042,19 @@ void draw_piano_roll(Session& session, UiState& ui) {
 
     bool changed = false;
     const std::int64_t shortest = std::max<std::int64_t>(std::llround(step / 4.0), 16);
+    // The strip on top places the playhead; the keys on the left sound their note.
+    if (activated && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && in_ruler) {
+        ui.roll_mode = 3;
+    } else if (activated && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && !in_grid) {
+        ui.roll_mode = 4;
+    }
+    if (ui.roll_mode == 3 && active && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const double at = std::clamp(mouse_frame, 0.0, static_cast<double>(frames));
+        session.seek_frames(std::max<std::int64_t>(std::llround(at + shift_frames), 0));
+    }
+    if (ui.roll_mode == 4 && active && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        preview(mouse_pitch, 0.8f);
+    }
     if (activated && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && in_grid) {
         if (under < ui.roll_notes.size()) {
             if (io.KeyCtrl) {
@@ -3812,11 +4083,14 @@ void draw_piano_roll(Session& session, UiState& ui) {
         ui.roll_origin = ui.roll_notes;
         ui.roll_start_frame = mouse_frame;
         ui.roll_start_pitch = mouse_pitch;
+        if (ui.roll_anchor < ui.roll_notes.size()) {
+            preview(ui.roll_notes[ui.roll_anchor].pitch, ui.roll_notes[ui.roll_anchor].velocity);
+        }
     }
 
     // Dragging: the anchor note follows the grid and the other selected notes keep their
     // distance to it.
-    if (ui.roll_mode != 0 && active && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+    if ((ui.roll_mode == 1 || ui.roll_mode == 2) && active && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
         ui.roll_anchor < ui.roll_origin.size() && ui.roll_origin.size() == ui.roll_notes.size()) {
         const double dx = mouse_frame - ui.roll_start_frame;
         const int dp = mouse_pitch - ui.roll_start_pitch;
@@ -3833,6 +4107,8 @@ void draw_piano_roll(Session& session, UiState& ui) {
                 note.pitch = static_cast<std::uint8_t>(std::clamp(static_cast<int>(note.pitch) + dp, 0, 127));
                 note.length = std::min(note.length, frames - note.start);
             }
+            // The dragged note sounds again at its new pitch.
+            preview(moved[ui.roll_anchor].pitch, moved[ui.roll_anchor].velocity);
         } else {
             const std::int64_t anchor_end = anchor.start + anchor.length;
             const std::int64_t delta = snap(static_cast<double>(anchor_end) + dx, false) - anchor_end;
@@ -3858,8 +4134,13 @@ void draw_piano_roll(Session& session, UiState& ui) {
         }
     }
     if (ui.roll_mode != 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-        sort_roll_notes(ui);  // the drag is over
+        if (ui.roll_mode == 1 || ui.roll_mode == 2) {
+            sort_roll_notes(ui);  // the drag is over
+        }
         ui.roll_mode = 0;
+    }
+    if (ui.roll_mode == 0) {
+        preview(-1, 0.0f);
     }
 
     // Removing: right-click a note, or Delete for the selected ones; Ctrl+A selects all.
@@ -3963,11 +4244,39 @@ void draw_piano_roll(Session& session, UiState& ui) {
                          selected ? IM_COL32(255, 225, 160, 255) : IM_COL32(240, 160, 80, 255), 2.0f);
         d->AddRect(ImVec2(x0, y + 1.0f), ImVec2(x1, y + key_h - 1.0f), IM_COL32(60, 35, 10, 255), 2.0f);
     }
+    // The strip on top, always in view: bar numbers; click or drag in it to place the playhead.
+    const float strip_left = std::max(origin.x + keys_w, view_left);
+    d->AddRectFilled(ImVec2(view_left, view_top), ImVec2(view_right, ruler_bottom),
+                     in_ruler && hovered ? IM_COL32(48, 52, 64, 255) : IM_COL32(36, 39, 48, 255));
+    d->AddLine(ImVec2(view_left, ruler_bottom), ImVec2(view_right, ruler_bottom), IM_COL32(90, 95, 110, 255));
+    {
+        double bar_step = bar;
+        while (bar_step / beat * static_cast<double>(ui.roll_beat_px) < 3.0f * font) {
+            bar_step *= 2.0;
+        }
+        for (double t = std::ceil(shift / bar_step) * bar_step; t - shift <= static_cast<double>(frames);
+             t += bar_step) {
+            const float x = frame_to_px(t - shift);
+            if (x < strip_left - 1.0f) {
+                continue;
+            }
+            if (x > view_right + 1.0f) {
+                break;
+            }
+            d->AddLine(ImVec2(x, ruler_bottom - 5.0f), ImVec2(x, ruler_bottom), IM_COL32(150, 155, 170, 255));
+            const std::string number = std::to_string(static_cast<long long>(std::llround(t / bar)) + 1);
+            d->AddText(ImVec2(x + 3.0f, view_top + 2.0f), IM_COL32(190, 195, 210, 255), number.c_str());
+        }
+    }
     const double playhead = static_cast<double>(session.position_frames()) - shift;
     if (playhead >= 0.0 && playhead <= static_cast<double>(frames)) {
         const float x = frame_to_px(playhead);
         d->AddLine(ImVec2(x, std::max(origin.y, view_top)), ImVec2(x, std::min(origin.y + height, view_bottom)),
                    IM_COL32(255, 80, 70, 230), 2.0f);
+        if (x >= strip_left) {
+            d->AddTriangleFilled(ImVec2(x - 6.0f, view_top), ImVec2(x + 6.0f, view_top),
+                                 ImVec2(x, ruler_bottom), IM_COL32(255, 80, 70, 255));
+        }
     }
     ImGui::EndChild();
     ImGui::End();

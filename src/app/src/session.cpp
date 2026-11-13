@@ -89,6 +89,28 @@ void limit_fades(RegionInfo& region) {
     region.fade_out = std::clamp<std::int64_t>(region.fade_out, 0, region.length - region.fade_in);
 }
 
+// The part of a region inside the timeline frames [begin, end). A fade stays only on an
+// edge of the region that is kept.
+bool region_part(const RegionInfo& region, std::int64_t begin, std::int64_t end, RegionInfo& part) {
+    const std::int64_t from = std::max(region.start, begin);
+    const std::int64_t to = std::min(region.end(), end);
+    if (to <= from) {
+        return false;
+    }
+    part = region;
+    part.start = from;
+    part.offset = region.offset + std::llround(static_cast<double>(from - region.start) * region.rate);
+    part.length = to - from;
+    if (from != region.start) {
+        part.fade_in = 0;
+    }
+    if (to != region.end()) {
+        part.fade_out = 0;
+    }
+    limit_fades(part);
+    return true;
+}
+
 }  // namespace
 
 // ---- Overview and Source -----------------------------------------------------------------
@@ -1167,6 +1189,132 @@ bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
     return true;
 }
 
+Session::Clipboard Session::copy_range(const Range& range) const {
+    Clipboard clipboard;
+    if (range.empty() || range.first_track >= tracks_.size()) {
+        return clipboard;
+    }
+    const std::size_t last = std::min(range.last_track, tracks_.size() - 1);
+    clipboard.length = range.end - range.begin;
+    for (std::size_t t = range.first_track; t <= last; ++t) {
+        std::vector<RegionInfo> parts;
+        for (const RegionInfo& region : tracks_[t].regions) {
+            RegionInfo part;
+            if (region_part(region, range.begin, range.end, part)) {
+                part.start -= range.begin;
+                parts.push_back(std::move(part));
+            }
+        }
+        clipboard.tracks.push_back(std::move(parts));
+    }
+    return clipboard;
+}
+
+bool Session::cut_range(const Range& range, Clipboard* taken) {
+    if (taken != nullptr) {
+        *taken = copy_range(range);
+    }
+    if (range.empty() || range.first_track >= tracks_.size()) {
+        return false;
+    }
+    const std::size_t last = std::min(range.last_track, tracks_.size() - 1);
+    bool changed = false;
+    for (std::size_t t = range.first_track; t <= last; ++t) {
+        std::vector<RegionInfo> kept;
+        bool touched = false;
+        for (const RegionInfo& region : tracks_[t].regions) {
+            if (region.end() <= range.begin || region.start >= range.end) {
+                kept.push_back(region);
+                continue;
+            }
+            touched = true;
+            RegionInfo part;
+            if (region_part(region, region.start, range.begin, part)) {
+                kept.push_back(part);
+            }
+            if (region_part(region, range.end, region.end(), part)) {
+                kept.push_back(part);
+            }
+        }
+        if (touched) {
+            tracks_[t].regions = std::move(kept);
+            sync_track_regions(t);
+            changed = true;
+        }
+    }
+    if (changed) {
+        update_length();
+        pending_label_ = taken != nullptr ? "Cut" : "Delete the selection";
+    }
+    return changed;
+}
+
+bool Session::keep_range(const Range& range) {
+    if (range.empty() || range.first_track >= tracks_.size()) {
+        return false;
+    }
+    const std::size_t last = std::min(range.last_track, tracks_.size() - 1);
+    bool changed = false;
+    for (std::size_t t = range.first_track; t <= last; ++t) {
+        std::vector<RegionInfo> kept;
+        bool touched = false;
+        for (const RegionInfo& region : tracks_[t].regions) {
+            RegionInfo part;
+            if (region_part(region, range.begin, range.end, part)) {
+                touched = touched || part.start != region.start || part.length != region.length;
+                kept.push_back(part);
+            } else {
+                touched = true;
+            }
+        }
+        if (touched) {
+            tracks_[t].regions = std::move(kept);
+            sync_track_regions(t);
+            changed = true;
+        }
+    }
+    if (changed) {
+        update_length();
+        pending_label_ = "Keep only the selection";
+    }
+    return changed;
+}
+
+bool Session::paste(const Clipboard& clipboard, std::size_t track, std::int64_t frame) {
+    if (clipboard.empty() || frame < 0) {
+        return false;
+    }
+    const std::size_t first = std::min(track, tracks_.size());
+    bool pasted = false;
+    for (std::size_t i = 0; i < clipboard.tracks.size(); ++i) {
+        const std::size_t target = first + i;
+        while (target >= tracks_.size()) {
+            const std::size_t before = tracks_.size();
+            add_empty_track("Pasted");
+            if (tracks_.size() == before) {
+                break;  // no room for more tracks
+            }
+        }
+        if (target >= tracks_.size()) {
+            break;
+        }
+        if (clipboard.tracks[i].empty()) {
+            continue;
+        }
+        for (RegionInfo region : clipboard.tracks[i]) {
+            region.start += frame;
+            tracks_[target].regions.push_back(std::move(region));
+        }
+        sync_track_regions(target);
+        pasted = true;
+    }
+    if (pasted) {
+        update_length();
+        pending_label_ = "Paste";
+    }
+    return pasted;
+}
+
 bool Session::remove_region(std::size_t track, std::size_t region) {
     if (find_region(track, region) == nullptr) {
         return false;
@@ -2217,12 +2365,14 @@ void Session::commit_edits() {
     if (recording_) {
         return;  // the take is not finished yet
     }
+    const std::string label = std::move(pending_label_);
+    pending_label_.clear();
     std::string text = edit_text();
     if (text == committed_.text) {
         return;
     }
     Snapshot previous = std::move(committed_);
-    previous.label = describe_change(previous.tracks, tracks_);
+    previous.label = label.empty() ? describe_change(previous.tracks, tracks_) : label;
     committed_ = Snapshot{tracks_, std::move(text), {}};
     undo_.push_back(std::move(previous));
     if (undo_.size() > kMaxUndoSteps) {

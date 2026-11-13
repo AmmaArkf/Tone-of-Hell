@@ -271,6 +271,42 @@ public:
     bool join_regions(std::size_t track, std::vector<std::size_t> regions,
                       std::size_t* joined = nullptr);
 
+    // ---- Parts of tracks -------------------------------------------------------------------
+
+    /// The timeline frames [begin, end) of the tracks first_track to last_track.
+    struct Range {
+        std::size_t first_track = 0;
+        std::size_t last_track = 0;
+        std::int64_t begin = 0;
+        std::int64_t end = 0;
+        bool empty() const noexcept { return end <= begin || last_track < first_track; }
+    };
+    /// Regions taken out of a range: one list per track, their starts counted from the
+    /// beginning of the range.
+    struct Clipboard {
+        std::vector<std::vector<RegionInfo>> tracks;
+        std::int64_t length = 0;
+        bool empty() const noexcept {
+            for (const auto& regions : tracks) {
+                if (!regions.empty()) {
+                    return false;
+                }
+            }
+            return true;
+        }
+    };
+    /// The parts of the regions inside a range. Regions that reach out of it are cut at its
+    /// edges; the sources are shared, nothing is copied.
+    Clipboard copy_range(const Range& range) const;
+    /// Removes what lies inside a range, cutting regions at its edges; `taken` receives it.
+    /// The rest stays where it is. Returns false when nothing was inside.
+    bool cut_range(const Range& range, Clipboard* taken = nullptr);
+    /// Keeps only what lies inside a range on its tracks: the rest of those tracks is removed.
+    bool keep_range(const Range& range);
+    /// Puts copied regions at `frame`, the first list onto `track` and the next ones onto the
+    /// tracks below; tracks are added when there are not enough (kNewTrack: all new).
+    bool paste(const Clipboard& clipboard, std::size_t track, std::int64_t frame);
+
     // ---- Grid ----------------------------------------------------------------------------
 
     bool snap() const noexcept { return snap_; }
@@ -550,6 +586,7 @@ private:
 
     std::shared_ptr<const core::SoundFont> soundfont_;
     std::size_t live_track_ = kNewTrack;
+    std::string pending_label_;  // the name of the next undo step, if an edit gave one
     bool notes_recording_ = false;
     bool notes_seen_playing_ = false;
     std::int64_t notes_record_start_ = 0;

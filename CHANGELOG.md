@@ -2,6 +2,13 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.6
+
+- Regions have a name strip on top: drag it to move the region, as before also onto another track.
+- Dragging inside regions selects a part of the track, or of several tracks when the mouse goes up or down. It sticks to the grid, region edges and the playhead nearby (Alt: free).
+- Piano roll: a strip with bar numbers on top places the playhead (click or drag). A note sounds while it is clicked or dragged, again at every new pitch; the keys on the left sound when clicked. The mouse wheel only zooms (around the mouse); the scrollbars move.
+- Cut (Ctrl+X), Copy (Ctrl+C), Paste at the playhead (Ctrl+V), Keep only the selection (Ctrl+E) and Delete for the selected part, in the Edit menu and the region menu. Without a selected part, Cut and Copy take the selected region. Each is one undo step.
+
 ## 0.2.5
 
 - MIDI keyboards: every connected MIDI keyboard plays notes right away (Windows MIDI inputs, Linux raw MIDI devices). Edit > Settings > General lists them.

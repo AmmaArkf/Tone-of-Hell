@@ -41,6 +41,10 @@ enum class Action {
     NormalSpeed,
     PianoRoll,
     MusicalKeyboard,
+    Cut,
+    Copy,
+    Paste,
+    KeepSelection,
     Count
 };
 
