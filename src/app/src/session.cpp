@@ -441,15 +441,23 @@ void Session::update() {
     }
     was_playing_backwards_ = playing && reverse_;
 
-    // Plugins get the time they asked for on the main thread.
-    for (const TrackInfo& track : tracks_) {
+    // Plugins get the time they asked for on the main thread. A track whose plugins changed
+    // their latency is compensated anew.
+    for (std::size_t t = 0; t < tracks_.size(); ++t) {
+        bool latency_changed = false;
+        const TrackInfo& track = tracks_[t];
         if (track.plugin_instrument.plugin) {
             track.plugin_instrument.plugin->idle();
+            latency_changed = track.plugin_instrument.plugin->take_latency_changed();
         }
         for (const EffectSlot& slot : track.effects) {
             if (slot.plugin) {
                 slot.plugin->idle();
+                latency_changed = slot.plugin->take_latency_changed() || latency_changed;
             }
+        }
+        if (latency_changed) {
+            sync_track_regions(t);
         }
     }
     if (notes_recording_) {
@@ -896,14 +904,22 @@ void Session::sync_track_regions(std::size_t index) {
         regions.push_back(std::move(region));
     }
     std::vector<std::shared_ptr<core::AudioEffect>> effects;
+    // The plugins that are on delay the sound by the sum of their latencies.
+    std::int64_t latency = 0;
+    if (tracks_[index].plugin_instrument.plugin) {
+        latency += tracks_[index].plugin_instrument.plugin->latency();
+    }
     for (const EffectSlot& slot : tracks_[index].effects) {
         if (slot.plugin) {
             slot.plugin->set_enabled(slot.enabled);
             effects.push_back(slot.plugin);
+            if (slot.enabled) {
+                latency += slot.plugin->latency();
+            }
         }
     }
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, effects,
-                              tracks_[index].plugin_instrument.plugin);
+                              tracks_[index].plugin_instrument.plugin, latency);
     update_streaming();
 }
 

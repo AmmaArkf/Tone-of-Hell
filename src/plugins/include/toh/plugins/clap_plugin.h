@@ -58,6 +58,10 @@ public:
 
     void process(float* interleaved, std::uint32_t frames, std::uint32_t channels) noexcept override;
     void add_note(std::uint32_t frame, bool on, int pitch, float velocity) noexcept override;
+    /// How many frames the plugin delays the sound it processes.
+    std::uint32_t latency() const noexcept;
+    /// True once after the plugin said that its latency changed.
+    bool take_latency_changed();
     /// True for a plugin that makes its sound from notes: it says so, or it has no audio input.
     bool is_instrument() const noexcept;
 

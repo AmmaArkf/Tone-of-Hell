@@ -105,9 +105,11 @@ public:
     /// shortened. Regions that overlap are mixed together. An empty list empties the track.
     /// `effects` are the insert effects of the track, in the order the sound passes them.
     /// `instrument` (a plugin) plays the note regions of the track instead, before the effects.
+    /// `latency` is how many frames the instrument and effects together delay the sound: the
+    /// track then reads its regions that much ahead (delay compensation, up to 2 seconds).
     bool set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
                            const std::vector<std::shared_ptr<AudioEffect>>& effects = {},
-                           std::shared_ptr<AudioEffect> instrument = nullptr);
+                           std::shared_ptr<AudioEffect> instrument = nullptr, std::int64_t latency = 0);
     /// A note played live on an instrument plugin (it must be the instrument of a track).
     bool live_plugin_note(std::shared_ptr<AudioEffect> instrument, bool on, int pitch, float velocity);
     /// Puts one whole clip at the start of a track, stops playback and returns to the start.
@@ -278,6 +280,7 @@ private:
         std::vector<Region> regions;
         std::vector<std::shared_ptr<AudioEffect>> effects;
         std::shared_ptr<AudioEffect> instrument;
+        std::int64_t latency = 0;  // frames the plugins delay the sound
         std::int64_t end = 0;  // end of the last region
     };
 
@@ -442,6 +445,8 @@ private:
     std::vector<float> master_mix_;
     std::vector<float> track_mix_;
     std::array<std::int64_t, kBlockFrames> note_prev_{};  // per frame: the position before it
+    std::vector<std::int64_t> shifted_pos_;          // frame_pos_ moved ahead for one track
+    const std::int64_t* track_pos_ = nullptr;        // the positions the current track reads
     std::vector<float> bus_mix_;
 
     // Copies of the audio-thread state for other threads to read.

@@ -51,6 +51,8 @@ Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
 
     const std::size_t block_samples = static_cast<std::size_t>(kBlockFrames) * channels_;
     frame_pos_.assign(kBlockFrames, -1);
+    shifted_pos_.assign(kBlockFrames, -1);
+    track_pos_ = frame_pos_.data();
     frame_fade_.assign(kBlockFrames, 0.0f);
     frame_frac_.assign(kBlockFrames, 0.0f);
     master_mix_.assign(block_samples, 0.0f);
@@ -90,7 +92,7 @@ bool Engine::push_content(std::uint32_t track, std::unique_ptr<TrackContent> con
 
 bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
                                const std::vector<std::shared_ptr<AudioEffect>>& effects,
-                               std::shared_ptr<AudioEffect> instrument) {
+                               std::shared_ptr<AudioEffect> instrument, std::int64_t latency) {
     if (track >= kMaxTracks) {
         return false;
     }
@@ -101,6 +103,7 @@ bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& r
     constexpr std::int64_t kMaxStart = std::int64_t{1} << 40;  // far beyond any real project
     auto content = std::make_unique<TrackContent>();
     content->instrument = std::move(instrument);
+    content->latency = std::clamp<std::int64_t>(latency, 0, static_cast<std::int64_t>(sample_rate_) * 2);
     for (const auto& effect : effects) {
         if (effect) {
             content->effects.push_back(effect);
@@ -412,7 +415,7 @@ void Engine::schedule_notes(Track& track, const Region& region, const NoteData& 
             continue;
         }
         for (std::uint32_t i = 0; i < frames; ++i) {
-            const std::int64_t position = frame_pos_[i];
+            const std::int64_t position = track_pos_[i];
             const std::int64_t previous = note_prev_[i];
             if (position < 0) {
                 continue;
@@ -1022,15 +1025,32 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
             float* scratch = track_mix_.data();
             bool any_region = false;
             std::uint64_t misses = 0;
+            // Delay compensation: a track whose plugins delay its sound reads its regions that
+            // much ahead, so that what comes out of the plugins lines up with the other tracks.
+            const std::int64_t ahead = track.content->latency;
+            const std::int64_t* positions = frame_pos_.data();
+            std::int64_t track_low = block_low;
+            std::int64_t track_high = block_high;
+            if (ahead > 0) {
+                for (std::uint32_t i = 0; i < frames; ++i) {
+                    shifted_pos_[i] = frame_pos_[i] >= 0 ? frame_pos_[i] + ahead : frame_pos_[i];
+                }
+                positions = shifted_pos_.data();
+                if (block_high >= 0) {
+                    track_low += ahead;
+                    track_high += ahead;
+                }
+            }
+            track_pos_ = positions;
             // An instrument plugin gets the notes as events. Where the playhead jumps (a seek,
             // a loop, playing backwards), the notes that were sounding end.
             AudioEffect* const instrument = track.content->instrument.get();
-            std::int64_t lowest_previous = block_high;
+            std::int64_t lowest_previous = track_high;
             if (instrument != nullptr) {
                 constexpr std::int64_t kMaxStep = 16;  // more than the fastest playback moves
                 std::int64_t previous = track.last_position;
                 for (std::uint32_t i = 0; i < frames; ++i) {
-                    const std::int64_t position = frame_pos_[i];
+                    const std::int64_t position = positions[i];
                     if (position < 0) {
                         note_prev_[i] = position;
                         continue;
@@ -1052,7 +1072,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
             for (const Region& region : track.content->regions) {
                 const std::int64_t begin = region.start;
                 const std::int64_t end = region.start + region.length;
-                if (end <= block_low || begin > block_high) {
+                if (end <= track_low || begin > track_high) {
                     continue;
                 }
                 if (!any_region) {
@@ -1069,7 +1089,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 const NoteData* const note_data = region.clip->notes.get();
                 if (note_data != nullptr && instrument != nullptr) {
                     schedule_notes(track, region, *note_data, *instrument, frames, lowest_previous,
-                                   block_high);
+                                   track_high);
                     continue;
                 }
                 std::array<std::uint32_t, 64> active{};
@@ -1090,8 +1110,8 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                          : preset != nullptr ? preset->release
                                              : instrument_release_seconds(region.instrument)) *
                         static_cast<double>(sample_rate_);
-                    const std::int64_t low = region.offset + std::max<std::int64_t>(block_low - begin, 0);
-                    const std::int64_t high = region.offset + (block_high - begin) + 1;
+                    const std::int64_t low = region.offset + std::max<std::int64_t>(track_low - begin, 0);
+                    const std::int64_t high = region.offset + (track_high - begin) + 1;
                     for (std::size_t k = 0; k < note_data->notes.size() && active_count < active.size(); ++k) {
                         const Note& note = note_data->notes[k];
                         if (note.start > high) {
@@ -1104,7 +1124,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                     }
                 }
                 for (std::uint32_t i = 0; i < frames; ++i) {
-                    const std::int64_t position = frame_pos_[i];
+                    const std::int64_t position = positions[i];
                     if (position < begin || position >= end) {
                         continue;
                     }

@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.13
+
+- Delay compensation: plugins that delay the sound (they say so through the CLAP latency extension, for example look-ahead limiters and linear-phase equalizers) no longer put their track late. Such a track reads its regions that much ahead, so all tracks stay together and nothing else gets later. When a plugin changes its latency, its track is compensated anew.
+
 ## 0.2.12
 
 - Instrument plugins: a CLAP synthesizer can play the note regions of a track. Choose it with "Instrument plugins" in the menu of a note region, or add a track with "New instrument plugin track" (right-click the track area). Its window opens at once; the FX menu shows it above the effects.

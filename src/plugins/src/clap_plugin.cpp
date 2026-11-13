@@ -205,6 +205,9 @@ struct ClapPlugin::Impl {
     const clap_plugin_params_t* params = nullptr;
     const clap_plugin_state_t* state = nullptr;
     const clap_plugin_gui_t* gui = nullptr;
+    const clap_plugin_latency_t* latency_ext = nullptr;
+    std::uint32_t latency = 0;
+    std::atomic<bool> latency_changed{false};
     std::vector<Param> param_list;
     std::uint32_t in_channels = 2;   // 0: no audio input (an instrument)
     std::uint32_t out_channels = 2;
@@ -280,7 +283,14 @@ const clap_host_gui_t kHostGui = {
     [](const clap_host_t* host, bool) { impl_of(host).gui_closed = true; },
 };
 
+const clap_host_latency_t kHostLatency = {
+    [](const clap_host_t* host) { impl_of(host).latency_changed = true; },
+};
+
 const void* host_extension(const clap_host_t*, const char* id) {
+    if (std::strcmp(id, CLAP_EXT_LATENCY) == 0) {
+        return &kHostLatency;
+    }
     if (std::strcmp(id, CLAP_EXT_THREAD_CHECK) == 0) {
         return &kThreadCheck;
     }
@@ -480,6 +490,8 @@ std::shared_ptr<ClapPlugin> ClapPlugin::create(const std::filesystem::path& file
     s.params = static_cast<const clap_plugin_params_t*>(s.plugin->get_extension(s.plugin, CLAP_EXT_PARAMS));
     s.state = static_cast<const clap_plugin_state_t*>(s.plugin->get_extension(s.plugin, CLAP_EXT_STATE));
     s.gui = static_cast<const clap_plugin_gui_t*>(s.plugin->get_extension(s.plugin, CLAP_EXT_GUI));
+    s.latency_ext =
+        static_cast<const clap_plugin_latency_t*>(s.plugin->get_extension(s.plugin, CLAP_EXT_LATENCY));
     const auto* ports =
         static_cast<const clap_plugin_audio_ports_t*>(s.plugin->get_extension(s.plugin, CLAP_EXT_AUDIO_PORTS));
 
@@ -514,6 +526,7 @@ std::shared_ptr<ClapPlugin> ClapPlugin::create(const std::filesystem::path& file
         return nullptr;
     }
     s.active = true;
+    s.latency = s.latency_ext != nullptr ? s.latency_ext->get(s.plugin) : 0;
     return result;
 }
 
@@ -659,6 +672,18 @@ void ClapPlugin::add_note(std::uint32_t frame, bool on, int pitch, float velocit
     note.on = on;
     note.key = static_cast<std::int16_t>(std::max(pitch, -1));
     note.velocity = velocity;
+}
+
+std::uint32_t ClapPlugin::latency() const noexcept { return impl_->latency; }
+
+bool ClapPlugin::take_latency_changed() {
+    Impl& s = *impl_;
+    if (!s.latency_changed.exchange(false)) {
+        return false;
+    }
+    const std::uint32_t before = s.latency;
+    s.latency = s.latency_ext != nullptr ? s.latency_ext->get(s.plugin) : 0;
+    return s.latency != before;
 }
 
 bool ClapPlugin::is_instrument() const noexcept { return impl_->info.instrument || impl_->in_channels == 0; }
