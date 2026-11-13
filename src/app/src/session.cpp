@@ -112,6 +112,11 @@ bool region_part(const RegionInfo& region, std::int64_t begin, std::int64_t end,
     return true;
 }
 
+// Where the state of an effect is kept inside a project.
+std::string effect_state_entry(std::size_t track, std::size_t slot) {
+    return "plugins/state-" + std::to_string(track + 1) + "-" + std::to_string(slot + 1) + ".bin";
+}
+
 }  // namespace
 
 // ---- Overview and Source -----------------------------------------------------------------
@@ -431,6 +436,14 @@ void Session::update() {
     }
     was_playing_backwards_ = playing && reverse_;
 
+    // Plugins get the time they asked for on the main thread.
+    for (const TrackInfo& track : tracks_) {
+        for (const EffectSlot& slot : track.effects) {
+            if (slot.plugin) {
+                slot.plugin->idle();
+            }
+        }
+    }
     if (notes_recording_) {
         // Notes are recorded until playback stops (Stop, pause, the end of a loop-less song).
         if (engine_.is_playing()) {
@@ -623,6 +636,65 @@ bool Session::clear_track_sampler(std::size_t index) {
     return set_track_sampler_sound(index, nullptr);
 }
 
+bool Session::add_clap_effect(std::size_t track, const std::filesystem::path& file, const std::string& id,
+                              std::string* error) {
+    if (track >= tracks_.size()) {
+        set_error(error, "the track does not exist");
+        return false;
+    }
+    if (tracks_[track].effects.size() >= kMaxEffects) {
+        set_error(error, "a track has at most " + std::to_string(kMaxEffects) + " effects");
+        return false;
+    }
+    auto plugin = plugins::ClapPlugin::create(file, id, static_cast<double>(config_.sample_rate),
+                                              config_.channels, error);
+    if (!plugin) {
+        return false;
+    }
+    EffectSlot slot;
+    slot.name = plugin->info().name;
+    slot.plugin = std::move(plugin);
+    tracks_[track].effects.push_back(std::move(slot));
+    sync_track_regions(track);
+    pending_label_ = "Add an effect";
+    return true;
+}
+
+bool Session::remove_effect(std::size_t track, std::size_t slot) {
+    if (track >= tracks_.size() || slot >= tracks_[track].effects.size()) {
+        return false;
+    }
+    auto& effects = tracks_[track].effects;
+    effects.erase(effects.begin() + static_cast<std::ptrdiff_t>(slot));
+    sync_track_regions(track);
+    pending_label_ = "Remove an effect";
+    return true;
+}
+
+bool Session::move_effect(std::size_t track, std::size_t slot, std::size_t to) {
+    if (track >= tracks_.size() || slot >= tracks_[track].effects.size() ||
+        to >= tracks_[track].effects.size() || slot == to) {
+        return false;
+    }
+    auto& effects = tracks_[track].effects;
+    EffectSlot moved = std::move(effects[slot]);
+    effects.erase(effects.begin() + static_cast<std::ptrdiff_t>(slot));
+    effects.insert(effects.begin() + static_cast<std::ptrdiff_t>(to), std::move(moved));
+    sync_track_regions(track);
+    pending_label_ = "Move an effect";
+    return true;
+}
+
+bool Session::set_effect_enabled(std::size_t track, std::size_t slot, bool enabled) {
+    if (track >= tracks_.size() || slot >= tracks_[track].effects.size()) {
+        return false;
+    }
+    tracks_[track].effects[slot].enabled = enabled;
+    sync_track_regions(track);
+    pending_label_ = "Switch an effect on or off";
+    return true;
+}
+
 bool Session::is_instrument_track(std::size_t index) const noexcept {
     if (index >= tracks_.size()) {
         return false;
@@ -769,7 +841,14 @@ void Session::sync_track_regions(std::size_t index) {
         region.sampler = tracks_[index].sampler;
         regions.push_back(std::move(region));
     }
-    engine_.set_track_regions(static_cast<std::uint32_t>(index), regions);
+    std::vector<std::shared_ptr<core::AudioEffect>> effects;
+    for (const EffectSlot& slot : tracks_[index].effects) {
+        if (slot.plugin) {
+            slot.plugin->set_enabled(slot.enabled);
+            effects.push_back(slot.plugin);
+        }
+    }
+    engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, effects);
     update_streaming();
 }
 
@@ -1815,6 +1894,20 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
             out << "fade_shape=" << static_cast<int>(region.fade_shape) << "\n";
             out << "rate=" << region.rate << "\n";
         }
+        const auto track_index = static_cast<std::size_t>(&track - tracks_.data());
+        for (std::size_t e = 0; e < track.effects.size(); ++e) {
+            const EffectSlot& slot = track.effects[e];
+            if (!slot.plugin) {
+                continue;
+            }
+            out << "[effect]\n";
+            out << "kind=clap\n";
+            out << "path=" << one_line(slot.plugin->info().path.u8string()) << "\n";
+            out << "id=" << one_line(slot.plugin->info().id) << "\n";
+            out << "name=" << one_line(slot.name) << "\n";
+            out << "enabled=" << (slot.enabled ? 1 : 0) << "\n";
+            out << "state=" << effect_state_entry(track_index, e) << "\n";
+        }
     }
     return out.str();
 }
@@ -1931,6 +2024,19 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
             const std::string entry = "samples/sample-" + std::to_string(t + 1) + ".f32";
             ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), samples.data(),
                                        samples.size() * sizeof(float), MZ_DEFAULT_LEVEL) != 0;
+        }
+        // The states of the effects, as the plugins write them.
+        for (std::size_t t = 0; ok && t < tracks_.size(); ++t) {
+            for (std::size_t e = 0; ok && e < tracks_[t].effects.size(); ++e) {
+                const auto& plugin = tracks_[t].effects[e].plugin;
+                std::vector<char> state;
+                if (!plugin || !plugin->save_state(state)) {
+                    continue;
+                }
+                const std::string entry = effect_state_entry(t, e);
+                ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), state.data(), state.size(),
+                                           MZ_DEFAULT_LEVEL) != 0;
+            }
         }
         for (std::size_t i = 0; ok && i < pictures.size(); ++i) {
             const std::string entry = "pictures/" + pictures[i].first;
@@ -2053,6 +2159,13 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         long long fade_shape = static_cast<long long>(core::FadeShape::Curve);
         double rate = 1.0;
     };
+    struct EffectEntry {
+        std::string path;
+        std::string id;
+        std::string name;
+        std::string state;
+        bool enabled = true;
+    };
     struct TrackEntry {
         std::string name;
         std::string icon;
@@ -2067,6 +2180,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         double sampler_rate = 0.0;
         double sampler_root = -1.0;
         std::vector<RegionEntry> regions;
+        std::vector<EffectEntry> effects;
     };
     std::vector<SourceEntry> sources;
     std::vector<TrackEntry> tracks;
@@ -2076,7 +2190,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     MetronomeSettings metronome = metronome_;
     long long grid = static_cast<long long>(grid_step_);
     std::filesystem::path original;  // in recovery files: the project file they belong to
-    enum class Section { Head, Source, Track, Region } section = Section::Head;
+    enum class Section { Head, Source, Track, Region, Effect } section = Section::Head;
 
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') {
@@ -2101,6 +2215,14 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             }
             tracks.back().regions.emplace_back();
             section = Section::Region;
+            continue;
+        }
+        if (line == "[effect]") {
+            if (tracks.empty()) {
+                tracks.emplace_back();
+            }
+            tracks.back().effects.emplace_back();
+            section = Section::Effect;
             continue;
         }
         const std::size_t equals = line.find('=');
@@ -2186,6 +2308,21 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     region.fade_shape = integer;
                 } else if (key == "rate") {
                     region.rate = real;
+                }
+                break;
+            }
+            case Section::Effect: {
+                EffectEntry& effect = tracks.back().effects.back();
+                if (key == "path") {
+                    effect.path = value;
+                } else if (key == "id") {
+                    effect.id = value;
+                } else if (key == "name") {
+                    effect.name = value;
+                } else if (key == "enabled") {
+                    effect.enabled = integer != 0;
+                } else if (key == "state") {
+                    effect.state = value;
                 }
                 break;
             }
@@ -2313,6 +2450,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         return icon;
     };
 
+    open_warnings_.clear();
     std::vector<TrackInfo> fresh;
     for (const TrackEntry& entry : tracks) {
         if (fresh.size() >= core::Engine::kMaxTracks) {
@@ -2381,6 +2519,39 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             }
             limit_fades(info);
             track.regions.push_back(std::move(info));
+        }
+        // Effects: the plugins are loaded again and get back their state.
+        for (const EffectEntry& effect : entry.effects) {
+            if (track.effects.size() >= kMaxEffects) {
+                break;
+            }
+            std::string problem;
+            auto plugin = plugins::ClapPlugin::create(std::filesystem::u8path(effect.path), effect.id,
+                                                      static_cast<double>(config_.sample_rate),
+                                                      config_.channels, &problem);
+            if (!plugin) {
+                open_warnings_.push_back((effect.name.empty() ? effect.id : effect.name) + ": " + problem);
+                continue;
+            }
+            const int state_index = effect.state.empty()
+                                        ? -1
+                                        : mz_zip_reader_locate_file(&zip.zip, effect.state.c_str(), nullptr, 0);
+            if (state_index >= 0) {
+                std::size_t state_bytes = 0;
+                void* data = mz_zip_reader_extract_to_heap(&zip.zip, static_cast<mz_uint>(state_index),
+                                                           &state_bytes, 0);
+                if (data != nullptr) {
+                    const std::vector<char> state(static_cast<const char*>(data),
+                                                  static_cast<const char*>(data) + state_bytes);
+                    mz_free(data);
+                    plugin->load_state(state);
+                }
+            }
+            EffectSlot slot;
+            slot.name = effect.name.empty() ? plugin->info().name : effect.name;
+            slot.enabled = effect.enabled;
+            slot.plugin = std::move(plugin);
+            track.effects.push_back(std::move(slot));
         }
         fresh.push_back(std::move(track));
     }
@@ -2483,6 +2654,10 @@ std::string Session::edit_text() const {
         out << "T|" << track.name << "|" << track.icon << "|" << track.gain << "|" << track.pan << "|"
             << static_cast<int>(track.instrument) << "|" << track.program << "|"
             << static_cast<const void*>(track.sampler.get()) << "\n";
+        for (const EffectSlot& slot : track.effects) {
+            out << "E|" << static_cast<const void*>(slot.plugin.get()) << "|" << (slot.enabled ? 1 : 0)
+                << "\n";
+        }
         for (const RegionInfo& region : track.regions) {
             out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
                 << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"

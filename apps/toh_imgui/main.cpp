@@ -104,7 +104,7 @@ void SDLCALL export_dialog_callback(void* user_data, const char* const* file_lis
 // A path chosen in a project or folder dialog, waiting for the main loop.
 struct PendingPath {
     enum class Kind { SaveProject, OpenProject, ProjectsFolder, SoundFont, ImportMidi, ExportMidi,
-                      SamplerSound };
+                      SamplerSound, ClapFile };
     std::mutex mutex;
     bool ready = false;
     Kind kind = Kind::SaveProject;
@@ -189,6 +189,17 @@ struct UiState {
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
+    // Plugins: the ones found on this computer, and their open windows.
+    std::vector<toh::plugins::PluginInfo> plugin_list;
+    std::vector<std::string> plugin_problems;
+    bool plugins_scanned = false;
+    std::size_t effect_track = 0;       // the track that gets the plugin chosen in the dialog
+    struct PluginWindow {
+        std::weak_ptr<toh::plugins::ClapPlugin> plugin;
+        SDL_Window* window = nullptr;
+    };
+    std::vector<PluginWindow> plugin_windows;  // plugins' own windows
+    std::vector<std::weak_ptr<toh::plugins::ClapPlugin>> knob_windows;  // sliders for the others
     // A selected part of the tracks (dragged out inside regions) and what was cut or copied.
     bool has_range = false;
     std::size_t range_first = 0;
@@ -1282,6 +1293,235 @@ std::filesystem::path projects_folder(const UiState& ui) {
     return folder;
 }
 
+// ---- Plugins -----------------------------------------------------------------------------
+
+std::filesystem::path bundled_plugins_folder() {
+    const char* base = SDL_GetBasePath();
+    return base != nullptr ? std::filesystem::u8path(base) / "plugins" : std::filesystem::path();
+}
+
+// Looks for CLAP plugins: the ones that come with the program, then the usual folders.
+void scan_plugins(UiState& ui) {
+    std::vector<std::filesystem::path> folders;
+    folders.push_back(bundled_plugins_folder());
+    for (const auto& folder : toh::plugins::default_clap_folders()) {
+        folders.push_back(folder);
+    }
+    ui.plugin_problems.clear();
+    ui.plugin_list = toh::plugins::scan_clap_folders(folders, &ui.plugin_problems);
+    ui.plugins_scanned = true;
+    toh::app::logging::info("CLAP plugins found: " + std::to_string(ui.plugin_list.size()));
+    for (const std::string& problem : ui.plugin_problems) {
+        toh::app::logging::info("CLAP plugin not loaded: " + problem);
+    }
+}
+
+void add_effect(Session& session, UiState& ui, std::size_t track, const std::filesystem::path& file,
+                const std::string& id) {
+    std::string error;
+    if (!session.add_clap_effect(track, file, id, &error)) {
+        ui.error = std::string(T_("Effect: ")) + error;
+    }
+}
+
+void add_effect_from_file(Session& session, UiState& ui, const std::string& path) {
+    std::string error;
+    const auto infos = toh::plugins::read_clap_file(std::filesystem::u8path(path), &error);
+    for (const auto& info : infos) {
+        if (!info.instrument) {
+            add_effect(session, ui, ui.effect_track, info.path, info.id);
+            return;
+        }
+    }
+    ui.error = std::string(T_("Effect: ")) + (infos.empty() ? error : std::string(T_("the file holds only instruments")));
+}
+
+bool plugin_in_session(const Session& session, const toh::plugins::ClapPlugin* plugin) {
+    for (const TrackInfo& track : session.tracks()) {
+        for (const toh::app::EffectSlot& slot : track.effects) {
+            if (slot.plugin.get() == plugin) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+// The window of the system under an SDL window, for a plugin to put its own window into.
+void* native_window_handle(SDL_Window* window) {
+    const SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+#ifdef _WIN32
+    return SDL_GetPointerProperty(properties, SDL_PROP_WINDOW_WIN32_HWND_POINTER, nullptr);
+#else
+    const Sint64 x11 = SDL_GetNumberProperty(properties, SDL_PROP_WINDOW_X11_WINDOW_NUMBER, 0);
+    return reinterpret_cast<void*>(static_cast<std::uintptr_t>(x11));
+#endif
+}
+
+// Opens the plugin's own window, or sliders for its parameters when it has none.
+void open_effect_window(UiState& ui, const std::shared_ptr<toh::plugins::ClapPlugin>& plugin) {
+    if (!plugin) {
+        return;
+    }
+    for (const auto& open : ui.plugin_windows) {
+        if (open.plugin.lock() == plugin) {
+            SDL_RaiseWindow(open.window);
+            return;
+        }
+    }
+    if (plugin->has_gui()) {
+        SDL_Window* window = SDL_CreateWindow(plugin->info().name.c_str(), 640, 400, SDL_WINDOW_HIDDEN);
+        void* native = window != nullptr ? native_window_handle(window) : nullptr;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        bool resizable = false;
+        if (native != nullptr && plugin->open_gui(native, width, height, resizable)) {
+            SDL_SetWindowSize(window, static_cast<int>(width), static_cast<int>(height));
+            SDL_SetWindowResizable(window, resizable);
+            SDL_ShowWindow(window);
+            ui.plugin_windows.push_back({plugin, window});
+            return;
+        }
+        if (window != nullptr) {
+            SDL_DestroyWindow(window);
+        }
+    }
+    for (const auto& knobs : ui.knob_windows) {
+        if (knobs.lock() == plugin) {
+            return;
+        }
+    }
+    ui.knob_windows.push_back(plugin);
+}
+
+void close_plugin_window(UiState& ui, std::size_t index) {
+    if (index >= ui.plugin_windows.size()) {
+        return;
+    }
+    if (auto plugin = ui.plugin_windows[index].plugin.lock()) {
+        plugin->close_gui();
+    }
+    SDL_DestroyWindow(ui.plugin_windows[index].window);
+    ui.plugin_windows.erase(ui.plugin_windows.begin() + static_cast<std::ptrdiff_t>(index));
+}
+
+void close_plugin_window_by_id(UiState& ui, SDL_WindowID id) {
+    for (std::size_t i = 0; i < ui.plugin_windows.size(); ++i) {
+        if (SDL_GetWindowID(ui.plugin_windows[i].window) == id) {
+            close_plugin_window(ui, i);
+            return;
+        }
+    }
+}
+
+void resize_plugin_window(UiState& ui, SDL_WindowID id, int width, int height) {
+    for (const auto& open : ui.plugin_windows) {
+        if (SDL_GetWindowID(open.window) != id) {
+            continue;
+        }
+        auto plugin = open.plugin.lock();
+        auto w = static_cast<std::uint32_t>(std::max(width, 1));
+        auto h = static_cast<std::uint32_t>(std::max(height, 1));
+        if (plugin && plugin->resize_gui(w, h) &&
+            (static_cast<int>(w) != width || static_cast<int>(h) != height)) {
+            SDL_SetWindowSize(open.window, static_cast<int>(w), static_cast<int>(h));
+        }
+        return;
+    }
+}
+
+void close_all_plugin_windows(UiState& ui) {
+    while (!ui.plugin_windows.empty()) {
+        close_plugin_window(ui, ui.plugin_windows.size() - 1);
+    }
+    ui.knob_windows.clear();
+}
+
+// A text for an ImGui format string: percent signs doubled.
+std::string escape_percent(const std::string& text) {
+    std::string result;
+    for (const char c : text) {
+        result += c;
+        if (c == '%') {
+            result += '%';
+        }
+    }
+    return result;
+}
+
+// Every frame: the plugins' own windows follow their plugins, and the slider windows are drawn.
+void draw_effect_windows(Session& session, UiState& ui) {
+    for (std::size_t i = 0; i < ui.plugin_windows.size();) {
+        auto plugin = ui.plugin_windows[i].plugin.lock();
+        if (!plugin || !plugin_in_session(session, plugin.get()) || plugin->take_gui_closed()) {
+            close_plugin_window(ui, i);
+            continue;
+        }
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        if (plugin->take_resize_request(width, height)) {
+            SDL_SetWindowSize(ui.plugin_windows[i].window, static_cast<int>(width), static_cast<int>(height));
+        }
+        ++i;
+    }
+    const float font = ImGui::GetFontSize();
+    for (std::size_t i = 0; i < ui.knob_windows.size();) {
+        auto plugin = ui.knob_windows[i].lock();
+        if (!plugin || !plugin_in_session(session, plugin.get())) {
+            ui.knob_windows.erase(ui.knob_windows.begin() + static_cast<std::ptrdiff_t>(i));
+            continue;
+        }
+        bool open = true;
+        char id[48];
+        std::snprintf(id, sizeof(id), "###knobs%p", static_cast<const void*>(plugin.get()));
+        const std::string title = plugin->info().name + id;
+        ImGui::SetNextWindowSize(ImVec2(28.0f * font, 0.0f), ImGuiCond_FirstUseEver);
+        if (ImGui::Begin(title.c_str(), &open)) {
+            if (!plugin->info().vendor.empty()) {
+                ImGui::TextDisabled("%s", plugin->info().vendor.c_str());
+            }
+            bool any = false;
+            for (const auto& param : plugin->params()) {
+                if (param.hidden) {
+                    continue;
+                }
+                any = true;
+                const double value = plugin->param_value(param.id);
+                const std::string text = escape_percent(plugin->param_text(param.id, value));
+                const std::string label = param.name + "##" + std::to_string(param.id);
+                ImGui::SetNextItemWidth(-9.0f * font);
+                if (param.stepped) {
+                    int whole = static_cast<int>(std::lround(value));
+                    if (ImGui::SliderInt(label.c_str(), &whole, static_cast<int>(param.min),
+                                         static_cast<int>(param.max), text.c_str())) {
+                        plugin->set_param(param.id, whole);
+                    }
+                } else {
+                    auto changing = static_cast<float>(value);
+                    if (ImGui::SliderFloat(label.c_str(), &changing, static_cast<float>(param.min),
+                                           static_cast<float>(param.max), text.c_str())) {
+                        plugin->set_param(param.id, changing);
+                    }
+                }
+                if (double_clicked()) {
+                    plugin->set_param(param.id, param.default_value);
+                }
+            }
+            if (!any) {
+                ImGui::TextDisabled("%s", T_("This plugin has no parameters to show."));
+            } else {
+                ImGui::TextDisabled("%s", T_("Double-click a slider: back to its first value."));
+            }
+        }
+        ImGui::End();
+        if (!open) {
+            ui.knob_windows.erase(ui.knob_windows.begin() + static_cast<std::ptrdiff_t>(i));
+        } else {
+            ++i;
+        }
+    }
+}
+
 std::string pitch_name(int pitch);  // C4 for 60, with sharps
 
 // A note with a fraction: its name, and how many cents it is off when it is.
@@ -1317,6 +1557,10 @@ void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
     } else if (kind == PendingPath::Kind::SoundFont) {
         static const SDL_DialogFileFilter sf_filters[] = {{"SoundFont", "sf2"}};
         SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, sf_filters, 1,
+                               nullptr, false);
+    } else if (kind == PendingPath::Kind::ClapFile) {
+        static const SDL_DialogFileFilter clap_filters[] = {{"CLAP plugin", "clap"}};
+        SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, clap_filters, 1,
                                nullptr, false);
     } else if (kind == PendingPath::Kind::SamplerSound) {
         static const SDL_DialogFileFilter sound_filters[] = {{"Sound", "wav;mp3;flac"}};
@@ -1414,6 +1658,10 @@ void handle_path_request(Session& session, UiState& ui) {
         ui.settings.soundfont_path = path;
         ui.settings_changed = true;
         load_soundfont(session, ui, std::filesystem::u8path(path));
+        return;
+    }
+    if (kind == PendingPath::Kind::ClapFile) {
+        add_effect_from_file(session, ui, path);
         return;
     }
     if (kind == PendingPath::Kind::SamplerSound) {
@@ -3817,6 +4065,102 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     draw_list->PopClipRect();
 }
 
+// The effects of a track: switch them on and off, open them, change their order, add more.
+void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
+    if (!ImGui::BeginPopup("track effects")) {
+        return;
+    }
+    ImGui::TextDisabled("%s", T_("Effects of the track: the sound passes them from top to bottom."));
+    const auto& effects = session.tracks()[track].effects;
+    if (effects.empty()) {
+        ImGui::TextUnformatted(T_("No effects yet."));
+    }
+    int action = 0;  // 1 up, 2 down, 3 remove
+    std::size_t target = 0;
+    for (std::size_t e = 0; e < effects.size(); ++e) {
+        ImGui::PushID(static_cast<int>(e));
+        bool on = effects[e].enabled;
+        if (ImGui::Checkbox("##on", &on)) {
+            session.set_effect_enabled(track, e, on);
+        }
+        tooltip(T_("On or off (off: the sound passes unchanged)"));
+        ImGui::SameLine();
+        ImGui::TextUnformatted(effects[e].name.c_str());
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T_("Open"))) {
+            open_effect_window(ui, effects[e].plugin);
+        }
+        tooltip(T_("The plugin's window, or sliders for its parameters"));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("^") && e > 0) {
+            action = 1;
+            target = e;
+        }
+        tooltip(T_("Earlier in the chain"));
+        ImGui::SameLine();
+        if (ImGui::SmallButton("v") && e + 1 < effects.size()) {
+            action = 2;
+            target = e;
+        }
+        tooltip(T_("Later in the chain"));
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T_("Remove"))) {
+            action = 3;
+            target = e;
+        }
+        ImGui::PopID();
+    }
+    if (action == 1) {
+        session.move_effect(track, target, target - 1);
+    } else if (action == 2) {
+        session.move_effect(track, target, target + 1);
+    } else if (action == 3) {
+        session.remove_effect(track, target);
+    }
+    ImGui::Separator();
+    if (ImGui::BeginMenu(T_("Add an effect"))) {
+        if (!ui.plugins_scanned) {
+            scan_plugins(ui);
+        }
+        bool any = false;
+        for (const auto& info : ui.plugin_list) {
+            if (info.instrument) {
+                continue;
+            }
+            any = true;
+            std::string label = info.name;
+            if (!info.vendor.empty()) {
+                label += "  (" + info.vendor + ")";
+            }
+            label += "##" + info.path.u8string() + "|" + info.id;
+            if (ImGui::MenuItem(label.c_str())) {
+                add_effect(session, ui, track, info.path, info.id);
+            }
+            if (!info.description.empty() && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("%s", info.description.c_str());
+            }
+        }
+        if (!any) {
+            ImGui::TextDisabled("%s", T_("No CLAP effects found."));
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem(T_("Load a .clap file..."))) {
+            ui.effect_track = track;
+            open_path_dialog(session, ui, PendingPath::Kind::ClapFile);
+        }
+        if (ImGui::MenuItem(T_("Look for plugins again"))) {
+            scan_plugins(ui);
+        }
+        if (!ui.plugin_problems.empty()) {
+            ImGui::TextDisabled(T_("%d files could not be loaded (see the log)."),
+                                static_cast<int>(ui.plugin_problems.size()));
+        }
+        ImGui::TextDisabled("%s", T_("Instrument plugins come in a later version."));
+        ImGui::EndMenu();
+    }
+    ImGui::EndPopup();
+}
+
 // The controls on the left of a lane. Returns true when the track should be removed.
 bool draw_track_header(Session& session, UiState& ui, std::size_t i, float header_width,
                        float row_height) {
@@ -3867,6 +4211,12 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
         ui.armed_track = i;
     }
     tooltip(T_("Arm for recording: the next take goes onto this track"));
+    ImGui::SameLine();
+    if (toggle_button(T_("FX"), !track.effects.empty(), ImVec4(0.25f, 0.62f, 0.35f, 1.0f))) {
+        ImGui::OpenPopup("track effects");
+    }
+    tooltip(T_("Effects of the track (CLAP plugins)"));
+    draw_effects_popup(session, ui, i);
 
     // The remove button sits in the far corner, away from mute and solo, and asks first.
     // The track name gets the space in between and is shortened when it does not fit.
@@ -4902,6 +5252,11 @@ int main(int argc, char* argv[]) {
                 } else if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
                            event.window.windowID == SDL_GetWindowID(window)) {
                     unless_unsaved(session, ui, UiState::Then::Quit);
+                } else if (event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) {
+                    close_plugin_window_by_id(ui, event.window.windowID);  // a plugin's window
+                } else if (event.type == SDL_EVENT_WINDOW_RESIZED &&
+                           event.window.windowID != SDL_GetWindowID(window)) {
+                    resize_plugin_window(ui, event.window.windowID, event.window.data1, event.window.data2);
                 } else if (event.type == SDL_EVENT_DROP_FILE && event.drop.data != nullptr) {
                     if (is_picture_file(event.drop.data)) {
                         ui.dropped_picture = event.drop.data;
@@ -5008,6 +5363,7 @@ int main(int argc, char* argv[]) {
             draw_dialogs(ui);
             draw_settings_window(session, ui);
             draw_piano_roll(session, ui);
+            draw_effect_windows(session, ui);
             if (ui.settings_changed) {
                 save_settings(session, ui);
             }
@@ -5018,6 +5374,7 @@ int main(int argc, char* argv[]) {
             }
             if (ui.quit) {
                 running = false;
+                close_all_plugin_windows(ui);
             }
             ImGui::End();
 

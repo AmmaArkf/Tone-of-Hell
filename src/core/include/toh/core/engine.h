@@ -9,6 +9,7 @@
 #include <cmath>
 
 #include "toh/core/clip.h"
+#include "toh/core/effect.h"
 #include "toh/core/sampler.h"
 #include "toh/core/soundfont.h"
 #include "toh/core/spsc_queue.h"
@@ -102,7 +103,9 @@ public:
     /// loading it), and every region must lie inside its clip: start >= 0, offset >= 0,
     /// length > 0 and offset + length <= clip frames. Fades longer than the region are
     /// shortened. Regions that overlap are mixed together. An empty list empties the track.
-    bool set_track_regions(std::uint32_t track, const std::vector<Region>& regions);
+    /// `effects` are the insert effects of the track, in the order the sound passes them.
+    bool set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
+                           const std::vector<std::shared_ptr<AudioEffect>>& effects = {});
     /// Puts one whole clip at the start of a track, stops playback and returns to the start.
     bool set_track_clip(std::uint32_t track, std::shared_ptr<const ClipData> clip);
     /// Removes the clip from a track, stops playback and returns to the start.
@@ -269,6 +272,7 @@ private:
     // Everything on one track. Built on the control thread, then only read by the audio thread.
     struct TrackContent {
         std::vector<Region> regions;
+        std::vector<std::shared_ptr<AudioEffect>> effects;
         std::int64_t end = 0;  // end of the last region
     };
 

@@ -88,16 +88,22 @@ bool Engine::push_content(std::uint32_t track, std::unique_ptr<TrackContent> con
     return true;
 }
 
-bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& regions) {
+bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
+                               const std::vector<std::shared_ptr<AudioEffect>>& effects) {
     if (track >= kMaxTracks) {
         return false;
     }
-    if (regions.empty()) {
+    if (regions.empty() && effects.empty()) {
         return push_content(track, nullptr, false);
     }
 
     constexpr std::int64_t kMaxStart = std::int64_t{1} << 40;  // far beyond any real project
     auto content = std::make_unique<TrackContent>();
+    for (const auto& effect : effects) {
+        if (effect) {
+            content->effects.push_back(effect);
+        }
+    }
     content->regions.reserve(regions.size());
     for (const Region& region : regions) {
         if (!region.clip || region.clip->channels != channels_ ||
@@ -1084,6 +1090,20 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
 
             if (misses != 0) {
                 disk_misses_.fetch_add(misses, std::memory_order_relaxed);
+            }
+
+            // The insert effects, in order, before the fader. They run also where no region
+            // plays, so that echoes and reverbs ring out.
+            if (!track.content->effects.empty()) {
+                if (!any_region) {
+                    std::fill(scratch, scratch + samples, 0.0f);
+                    any_region = true;
+                }
+                for (const auto& effect : track.content->effects) {
+                    if (effect->enabled()) {
+                        effect->process(scratch, frames, static_cast<std::uint32_t>(channels));
+                    }
+                }
             }
 
             float* destination = master;

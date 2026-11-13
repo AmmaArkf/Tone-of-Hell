@@ -18,6 +18,7 @@
 #include "toh/audio/wav_writer.h"
 #include "toh/core/clip.h"
 #include "toh/core/engine.h"
+#include "toh/plugins/clap_plugin.h"
 
 namespace toh::app {
 
@@ -113,6 +114,13 @@ struct RegionInfo {
     std::int64_t source_frames() const noexcept { return core::clip_frames_used(length, rate); }
 };
 
+/// One insert effect of a track: for now a CLAP plugin.
+struct EffectSlot {
+    std::shared_ptr<plugins::ClapPlugin> plugin;
+    std::string name;  // UTF-8
+    bool enabled = true;
+};
+
 /// What a user interface needs to know about one track.
 struct TrackInfo {
     std::string name;  // UTF-8
@@ -126,6 +134,8 @@ struct TrackInfo {
     int program = -1;
     /// A sound that plays the note regions of this track instead (a sampler), or null.
     std::shared_ptr<const core::SamplerSound> sampler;
+    /// Insert effects, in the order the sound passes them (before the fader).
+    std::vector<EffectSlot> effects;
     std::vector<RegionInfo> regions;  // in the order they were created
     float gain = 1.0f;
     float pan = 0.0f;
@@ -223,6 +233,18 @@ public:
     /// The note at which the sound plays as recorded (with a fraction for fine tuning).
     bool set_track_sampler_root(std::size_t index, double root);
     bool clear_track_sampler(std::size_t index);
+
+    // ---- Effects -------------------------------------------------------------------------
+
+    static constexpr std::size_t kMaxEffects = 16;  // per track
+    /// Adds the CLAP plugin `id` of a .clap file at the end of a track's effects.
+    bool add_clap_effect(std::size_t track, const std::filesystem::path& file, const std::string& id,
+                         std::string* error = nullptr);
+    bool remove_effect(std::size_t track, std::size_t slot);
+    bool move_effect(std::size_t track, std::size_t slot, std::size_t to);
+    bool set_effect_enabled(std::size_t track, std::size_t slot, bool enabled);
+    /// What could not be restored when the last project was opened (missing plugins).
+    const std::vector<std::string>& open_warnings() const noexcept { return open_warnings_; }
 
     /// Chooses a program of the SoundFont for a track (-1: the built-in instrument).
     bool set_track_program(std::size_t index, int program);
@@ -600,6 +622,7 @@ private:
     std::shared_ptr<const core::SoundFont> soundfont_;
     std::size_t live_track_ = kNewTrack;
     std::string pending_label_;  // the name of the next undo step, if an edit gave one
+    std::vector<std::string> open_warnings_;
     bool notes_recording_ = false;
     bool notes_seen_playing_ = false;
     std::int64_t notes_record_start_ = 0;

@@ -13,7 +13,7 @@ A stage is done when the criterion in parentheses is met and has been checked on
 - [x] **3. Timeline and regions.** Tracks with waveforms, moving, trimming, fades and a grid (an arrangement can be assembled with the mouse).
 - [x] **4. Recording and export.** Recording from an input, monitoring and export to WAV (the recorded and exported audio line up in time with what you hear in playback).
 - [x] **5. Project and undo.** Saving, loading, autosave and undo/redo (a project opens without losses).
-- [ ] **6. MIDI, piano roll and a simple synthesizer.** (A melody can be played from a keyboard, edited in the piano roll and played back.)
+- [x] **6. MIDI, piano roll and a simple synthesizer.** (A melody can be played from a keyboard, edited in the piano roll and played back.)
 - [ ] **7. Plugin hosting.** CLAP first, then VST3, with delay compensation (a third-party synthesizer and reverb work in the mix and keep their state).
 - [ ] **8. Automation and tempo map.** (Volume and plugin parameters follow curves, and the tempo can change inside a track.)
 - [ ] **9. Built-in effects.** Equalizer, compressor, reverb, delay and limiter (each is checked on test signals and produces no clicks).

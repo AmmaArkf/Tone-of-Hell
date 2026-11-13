@@ -2,6 +2,15 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.11
+
+- Plugins (stage 7 begins): every track has an FX button with a chain of CLAP effects. The sound passes them from top to bottom before the fader; they run also after the regions end, so echoes ring out. Effects can be switched off, moved up and down and removed; each change is one undo step.
+- The program looks for CLAP plugins in "plugins" next to itself and in the usual CLAP folders (and CLAP_PATH); any .clap file can also be loaded by hand.
+- "Open" shows the plugin's own window, or sliders for its parameters when it has none.
+- Effects are saved inside the project with their state (the settings of the plugin).
+- Three example plugins come with the program, written for it under the MIT license: Echo, Tremolo and Gain (ToneOfHell-Examples.clap).
+- Instrument plugins (that play notes) come next.
+
 ## 0.2.10
 
 - Sampler: any sound file (WAV, MP3, FLAC) can be the instrument of a track. Every note plays the sound higher or lower, like a tape. Add a track with "New sampler track (any sound)..." (right-click the track area), or choose Sampler in the menu of a note region.

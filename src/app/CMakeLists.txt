@@ -16,7 +16,7 @@ add_library(toh_app STATIC
 
 target_include_directories(toh_app PUBLIC include)
 target_link_libraries(toh_app
-    PUBLIC toh_core toh_audio Threads::Threads
+    PUBLIC toh_core toh_audio toh_plugins Threads::Threads
     PRIVATE toh_warnings toh_miniz)
 if(WIN32)
     target_link_libraries(toh_app PRIVATE winmm)  # MIDI keyboards

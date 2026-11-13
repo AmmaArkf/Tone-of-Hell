@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(ToneOfHell
-        VERSION 0.2.10
+        VERSION 0.2.11
         DESCRIPTION "An open source digital audio workstation (DAW) in C++"
         LANGUAGES C CXX)
 
@@ -54,14 +54,19 @@ endfunction()
 # The LAME MP3 encoder, as a separate LGPL library (downloaded while configuring).
 include(cmake/Lame.cmake)
 include(cmake/Sounds.cmake)
+# The CLAP plugin standard (headers, MIT license, downloaded while configuring).
+include(cmake/Clap.cmake)
 
 # Layers, from the bottom up:
 #   toh_core   the audio engine; no dependencies
 #   toh_audio  sound devices and file decoding
+#   toh_plugins  hosting of CLAP plugins
 #   toh_app    the session shared by every user interface
 add_subdirectory(src/core)
 add_subdirectory(src/audio)
+add_subdirectory(src/plugins)
 add_subdirectory(src/app)
+add_subdirectory(plugins/examples)
 
 if(TOH_BUILD_APPS)
     add_subdirectory(apps/toh_player)
