@@ -144,7 +144,9 @@ struct UiState {
     std::size_t selected_region = 0;
 
     DragKind drag = DragKind::None;
-    std::size_t drag_track = 0;
+    std::size_t drag_track = 0;    // the track of the dragged region (it can change while moving)
+    std::size_t drag_owner = 0;    // the lane where the drag began: it handles the mouse
+    std::vector<std::pair<float, float>> lane_spans;  // top and bottom of every lane on screen
     std::size_t drag_region = 0;
     std::int64_t drag_grab = 0;    // distance from the region start to the grabbed frame
     std::int64_t magnet_frame = -1;  // the edge a dragged region sticks to, or -1
@@ -1391,6 +1393,7 @@ void draw_dialogs(UiState& ui) {
                 {"Double-click a slider", "Back to its normal value"},
                 {"Right-click empty track space", "Menu: add a track"},
                 {"Drag a region close to another", "Its edge sticks to the other edge"},
+                {"Drag a region up or down", "Move it to another track"},
                 {"J", "Join the selected region with the next one"},
                 {"Click a track name", "Select the track (Ctrl: several)"},
                 {"Double-click a track name", "Rename the track"},
@@ -1876,6 +1879,16 @@ std::int64_t nearest_magnet(const Session& session, const View& view, std::size_
     return best;
 }
 
+// The track whose lane is at height `y` on the screen, or `count` when there is none.
+std::size_t lane_under(const UiState& ui, float y, std::size_t count) {
+    for (std::size_t t = 0; t < count && t < ui.lane_spans.size(); ++t) {
+        if (y >= ui.lane_spans[t].first && y < ui.lane_spans[t].second) {
+            return t;
+        }
+    }
+    return count;
+}
+
 // What is under the mouse inside a lane.
 struct Hit {
     DragKind kind = DragKind::None;
@@ -2005,7 +2018,11 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     const float width = view.lane_width;
     ImGui::InvisibleButton("lane", ImVec2(width, row_height));
     const bool hovered = ImGui::IsItemHovered();
-    const bool dragging_here = ui.drag != DragKind::None && ui.drag_track == track_index;
+    const bool dragging_here = ui.drag != DragKind::None && ui.drag_owner == track_index;
+    if (ui.lane_spans.size() <= track_index) {
+        ui.lane_spans.resize(track_index + 1);
+    }
+    ui.lane_spans[track_index] = {origin.y, origin.y + row_height};
 
     Hit hit;
     if (hovered && ui.drag == DragKind::None) {
@@ -2020,6 +2037,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     // Start of a click or drag.
     if (ImGui::IsItemActivated()) {
         ui.drag_track = track_index;
+        ui.drag_owner = track_index;
         if (hit.kind == DragKind::None) {
             ui.drag = DragKind::Seek;
             ui.selected = false;
@@ -2074,7 +2092,10 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     if (dragging_here && ImGui::IsItemActive()) {
         const std::int64_t mouse_frame = x_to_frame(session, view, io.MousePos.x);
         const bool moved = ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f);
-        const bool region_exists = ui.drag_region < track.regions.size();
+        // The dragged region may sit on another track than this lane's by now.
+        const std::size_t drag_track = ui.drag_track;
+        const bool region_exists = drag_track < session.tracks().size() &&
+                                   ui.drag_region < session.tracks()[drag_track].regions.size();
         // Regions follow the mouse smoothly; with the magnet on, an edge that comes close to
         // another edge sticks to it. Alt switches the magnet off while it is held.
         const bool magnet_on = ui.settings.magnet && !io.KeyAlt;
@@ -2086,7 +2107,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                 return frame;
             }
             const std::int64_t magnet =
-                nearest_magnet(session, view, track_index, ui.drag_region, frame, reach, held);
+                nearest_magnet(session, view, drag_track, ui.drag_region, frame, reach, held);
             ui.magnet_end = false;
             if (magnet >= 0) {
                 ui.magnet_frame = magnet;
@@ -2104,7 +2125,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                 if (moved && region_exists) {
                     // Either end of the region may stick. The end that already sticks keeps
                     // priority; otherwise the closer one wins.
-                    const std::int64_t length = track.regions[ui.drag_region].length;
+                    const std::int64_t length = session.tracks()[drag_track].regions[ui.drag_region].length;
                     std::int64_t start = std::max<std::int64_t>(mouse_frame - ui.drag_grab, 0);
                     const std::int64_t held = ui.magnet_frame;
                     const bool held_end = ui.magnet_end;
@@ -2113,10 +2134,10 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                         float start_distance = 0.0f;
                         float end_distance = 0.0f;
                         const std::int64_t to_start =
-                            nearest_magnet(session, view, track_index, ui.drag_region, start, reach,
+                            nearest_magnet(session, view, drag_track, ui.drag_region, start, reach,
                                            held_end ? -1 : held, &start_distance);
                         const std::int64_t to_end = nearest_magnet(
-                            session, view, track_index, ui.drag_region, start + length, reach,
+                            session, view, drag_track, ui.drag_region, start + length, reach,
                             held_end ? held : -1, &end_distance);
                         const bool end_fits = to_end >= 0 && to_end - length >= 0;
                         const bool keep_start = held >= 0 && !held_end && to_start == held;
@@ -2132,19 +2153,32 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                             ui.magnet_end = true;
                         }
                     }
-                    session.move_region(track_index, ui.drag_region, start);
+                    // Over another lane, the region moves onto that track.
+                    const std::size_t target =
+                        lane_under(ui, io.MousePos.y, session.tracks().size());
+                    std::size_t moved_to = ui.drag_region;
+                    if (target < session.tracks().size() && target != drag_track &&
+                        session.move_region_to_track(drag_track, ui.drag_region, target, start,
+                                                     &moved_to)) {
+                        ui.drag_track = target;
+                        ui.drag_region = moved_to;
+                        ui.selected_track = target;
+                        ui.selected_region = moved_to;
+                    } else {
+                        session.move_region(drag_track, ui.drag_region, start);
+                    }
                 }
                 break;
             case DragKind::TrimStart:
                 if (moved && region_exists) {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                    session.trim_region_start(track_index, ui.drag_region, stuck(mouse_frame));
+                    session.trim_region_start(drag_track, ui.drag_region, stuck(mouse_frame));
                 }
                 break;
             case DragKind::TrimEnd:
                 if (moved && region_exists) {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                    session.trim_region_end(track_index, ui.drag_region, stuck(mouse_frame));
+                    session.trim_region_end(drag_track, ui.drag_region, stuck(mouse_frame));
                 }
                 break;
             case DragKind::FadeIn:

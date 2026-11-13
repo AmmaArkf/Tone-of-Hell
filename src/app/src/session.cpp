@@ -640,6 +640,31 @@ bool Session::move_region(std::size_t track, std::size_t region, std::int64_t st
     return true;
 }
 
+bool Session::move_region_to_track(std::size_t track, std::size_t region, std::size_t target,
+                                   std::int64_t start, std::size_t* moved) {
+    if (find_region(track, region) == nullptr || target >= tracks_.size()) {
+        return false;
+    }
+    if (target == track) {
+        if (moved != nullptr) {
+            *moved = region;
+        }
+        return move_region(track, region, start);
+    }
+    RegionInfo info = tracks_[track].regions[region];
+    info.start = std::max<std::int64_t>(start, 0);
+    auto& from = tracks_[track].regions;
+    from.erase(from.begin() + static_cast<std::ptrdiff_t>(region));
+    tracks_[target].regions.push_back(std::move(info));
+    if (moved != nullptr) {
+        *moved = tracks_[target].regions.size() - 1;
+    }
+    sync_track_regions(track);
+    sync_track_regions(target);
+    update_length();
+    return true;
+}
+
 bool Session::trim_region_start(std::size_t track, std::size_t region, std::int64_t start) {
     RegionInfo* info = find_region(track, region);
     if (info == nullptr) {

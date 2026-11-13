@@ -103,6 +103,8 @@ const Entry kRussian[] = {
      "Магнит выключен: регионы двигаются свободно. Нажмите, чтобы включить."},
     {"Grid:", "Сетка:"},
     {"Do not stick to edges", "Не прилипать к краям"},
+    {"Drag a region up or down", "Перетащите регион вверх или вниз"},
+    {"Move it to another track", "Перенести его на другую дорожку"},
     {"Join with the next region", "Склеить со следующим регионом"},
     {"Join all regions of the track", "Склеить все регионы дорожки"},
     {"Drag a region close to another", "Подтащите регион к другому"},

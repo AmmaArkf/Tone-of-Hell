@@ -202,6 +202,10 @@ public:
 
     /// Moves a region so that it begins at `start` (not before the start of the timeline).
     bool move_region(std::size_t track, std::size_t region, std::int64_t start);
+    /// Moves a region to another track, beginning at `start`. It is added at the end of that
+    /// track's region list; `moved` receives its new index.
+    bool move_region_to_track(std::size_t track, std::size_t region, std::size_t target,
+                              std::int64_t start, std::size_t* moved = nullptr);
     /// Moves the beginning of a region to `start`, keeping its end and the audio in place.
     bool trim_region_start(std::size_t track, std::size_t region, std::int64_t start);
     /// Moves the end of a region to `end`, keeping its beginning in place.

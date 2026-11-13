@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.15
+
+- Regions can be dragged onto other tracks: drag a region up or down over another lane. It keeps its place in time (and still sticks to edges with the magnet).
+
 ## 0.0.14
 
 - Audio is played from disk instead of being held in memory. Imported files, recordings and joined regions are written to a cache folder and read in pages of 1 MB: at most six pages per file are in memory, loaded by a separate thread ahead of the playhead (backwards too, and at the loop start). Exports read the disk directly.

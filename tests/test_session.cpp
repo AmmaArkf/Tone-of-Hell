@@ -153,6 +153,32 @@ TEST_CASE("Session adds empty tracks that can be recorded onto") {
     CHECK(session.add_empty_track("one too many") == session.tracks().size());
 }
 
+TEST_CASE("Session moves regions between tracks") {
+    Session session;
+    REQUIRE(session.add_track("one", stereo_clip(1000, 0.5f)));
+    session.add_empty_track("two");
+    REQUIRE(session.split_region(0, 0, 400));  // two regions on track 1
+
+    std::size_t moved = 99;
+    REQUIRE(session.move_region_to_track(0, 1, 1, 2000, &moved));
+    CHECK(moved == 0);
+    REQUIRE(session.tracks()[0].regions.size() == 1);
+    REQUIRE(session.tracks()[1].regions.size() == 1);
+    CHECK(session.tracks()[1].regions[0].start == 2000);
+    CHECK(session.tracks()[1].regions[0].offset == 400);
+    CHECK(session.tracks()[1].regions[0].length == 600);
+    CHECK(session.length_frames() == 2600);
+
+    // The same track: just a move.
+    REQUIRE(session.move_region_to_track(1, 0, 1, 100, &moved));
+    CHECK(moved == 0);
+    CHECK(session.tracks()[1].regions[0].start == 100);
+
+    CHECK_FALSE(session.move_region_to_track(0, 5, 1, 0));
+    CHECK_FALSE(session.move_region_to_track(0, 0, 7, 0));
+    CHECK(session.tracks()[0].regions.size() == 1);
+}
+
 TEST_CASE("Session can play only the selected tracks") {
     Session session;
     session.add_empty_track("one");
