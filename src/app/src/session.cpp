@@ -1343,6 +1343,44 @@ std::string Session::state_text() const {
 bool Session::modified() const { return state_text() != saved_state_; }
 
 bool Session::save_project(const std::filesystem::path& file, std::string* error) {
+    if (!write_project(file, error, std::string(), MZ_BEST_SPEED)) {
+        return false;
+    }
+    project_file_ = file;
+    saved_state_ = state_text();
+    autosaved_state_ = saved_state_;
+    return true;
+}
+
+bool Session::needs_recovery_save() const {
+    const std::string state = state_text();
+    return state != saved_state_ && state != autosaved_state_;
+}
+
+bool Session::save_recovery(const std::filesystem::path& file, std::string* error) {
+    std::error_code code;
+    std::filesystem::create_directories(file.parent_path(), code);
+    // Fast rather than small: an autosave should not hold up the program.
+    if (!write_project(file, error, "original_file=" + project_file_.u8string() + "\n",
+                       MZ_NO_COMPRESSION)) {
+        return false;
+    }
+    autosaved_state_ = state_text();
+    return true;
+}
+
+bool Session::restore_recovery(const std::filesystem::path& file, std::string* error) {
+    if (!open_project(file, error)) {
+        return false;
+    }
+    project_file_ = recovered_original_;
+    saved_state_.clear();  // not saved yet
+    autosaved_state_ = state_text();
+    return true;
+}
+
+bool Session::write_project(const std::filesystem::path& file, std::string* error,
+                            const std::string& head, int audio_level) {
     const std::vector<std::shared_ptr<const Source>> sources = used_sources();
     std::vector<std::string> names;
     for (std::size_t i = 0; i < sources.size(); ++i) {
@@ -1370,7 +1408,8 @@ bool Session::save_project(const std::filesystem::path& file, std::string* error
         icons[track.icon] = "embedded:" + name;
         pictures.emplace_back(name, std::move(bytes));
     }
-    const std::string text = project_text(sources, names, &icons);
+    std::string text = project_text(sources, names, &icons);
+    text.insert(text.find('\n') + 1, head);
 
     // The archive is written under another name first, so a failed save never destroys the
     // project that was there.
@@ -1401,13 +1440,15 @@ bool Session::save_project(const std::filesystem::path& file, std::string* error
                 std::FILE* audio = core::open_file(clip.disk->path(), "rb");
                 ok = audio != nullptr &&
                      mz_zip_writer_add_cfile(&zip.zip, entry.c_str(), audio, bytes, nullptr, nullptr,
-                                             0, MZ_BEST_SPEED, nullptr, 0, nullptr, 0) != 0;
+                                             0, static_cast<mz_uint>(audio_level), nullptr, 0,
+                                             nullptr, 0) != 0;
                 if (audio != nullptr) {
                     std::fclose(audio);
                 }
             } else {
                 ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), clip.samples.data(),
-                                           static_cast<std::size_t>(bytes), MZ_BEST_SPEED) != 0;
+                                           static_cast<std::size_t>(bytes),
+                                           static_cast<mz_uint>(audio_level)) != 0;
             }
         }
         ok = ok && mz_zip_writer_finalize_archive(&zip.zip) != 0;
@@ -1436,8 +1477,6 @@ bool Session::save_project(const std::filesystem::path& file, std::string* error
         set_error(error, "cannot replace " + file.u8string() + ": " + code.message());
         return false;
     }
-    project_file_ = file;
-    saved_state_ = state_text();
     return true;
 }
 
@@ -1509,6 +1548,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     bool loop = false;
     MetronomeSettings metronome = metronome_;
     long long grid = static_cast<long long>(grid_step_);
+    std::filesystem::path original;  // in recovery files: the project file they belong to
     enum class Section { Head, Source, Track, Region } section = Section::Head;
 
     while (std::getline(in, line)) {
@@ -1564,6 +1604,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     metronome.volume = static_cast<float>(real);
                 } else if (key == "grid_step") {
                     grid = integer;
+                } else if (key == "original_file") {
+                    original = std::filesystem::u8path(value);
                 }
                 break;
             case Section::Source:
@@ -1745,6 +1787,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     seek_frames(0);
     project_file_ = file;
     saved_state_ = state_text();
+    autosaved_state_ = saved_state_;
+    recovered_original_ = original;
     clear_history();
     return true;
 }
@@ -1762,6 +1806,7 @@ void Session::new_project() {
     seek_frames(0);
     project_file_.clear();
     saved_state_ = state_text();
+    autosaved_state_ = saved_state_;
     clear_history();
 }
 

@@ -187,6 +187,11 @@ struct UiState {
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::filesystem::path logs_folder;
+    std::filesystem::path recovery_file;  // where autosave writes
+    bool recovery_written = false;        // the recovery file holds unsaved changes
+    bool ask_recovery = false;            // offer to restore it (after a crash)
+    std::uint64_t last_autosave_ticks = 0;
+    std::uint64_t last_recovery_check = 0;
     std::string dropped_picture;  // a picture file dropped on the window (UTF-8)
     float dropped_y = 0.0f;       // where it was dropped
     std::string logged_error;           // the last error and notice written to the log
@@ -1285,6 +1290,80 @@ void apply_dropped_picture(Session& session, UiState& ui) {
     ui.dropped_picture.clear();
 }
 
+// ---- Autosave ----------------------------------------------------------------------------
+
+// Every few minutes, unsaved changes go to the recovery file. Once nothing is unsaved any more
+// (saved, or a new project), the recovery file goes.
+void autosave_tick(Session& session, UiState& ui) {
+    if (ui.recovery_file.empty() || ui.ask_recovery) {
+        return;
+    }
+    const std::uint64_t now = SDL_GetTicks();
+    if (now - ui.last_recovery_check < 1000) {
+        return;
+    }
+    ui.last_recovery_check = now;
+    if (!session.modified()) {
+        if (ui.recovery_written) {
+            std::error_code code;
+            std::filesystem::remove(ui.recovery_file, code);
+            ui.recovery_written = false;
+        }
+        return;
+    }
+    const std::uint64_t interval = static_cast<std::uint64_t>(ui.settings.autosave_minutes) * 60000u;
+    if (!ui.settings.autosave || session.is_recording() || now - ui.last_autosave_ticks < interval) {
+        return;
+    }
+    ui.last_autosave_ticks = now;
+    if (!session.needs_recovery_save()) {
+        return;
+    }
+    std::string error;
+    if (session.save_recovery(ui.recovery_file, &error)) {
+        ui.recovery_written = true;
+        toh::app::logging::info("Autosaved the unsaved changes");
+    } else {
+        toh::app::logging::warning("Autosave failed: " + error);
+    }
+}
+
+// After a crash: offers the project that autosave kept.
+void draw_recovery_popup(Session& session, UiState& ui) {
+    if (ui.ask_recovery && !ImGui::IsPopupOpen("###recovery")) {
+        ImGui::OpenPopup("###recovery");
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    const std::string title = std::string(T_("Restore the project?")) + "###recovery";
+    if (ImGui::BeginPopupModal(title.c_str(), nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::TextUnformatted(T_("Last time the program did not close properly.\n"
+                                  "Autosave kept the changes that were not saved."));
+        ImGui::Spacing();
+        if (ImGui::Button(T_("Restore"))) {
+            std::string error;
+            if (session.restore_recovery(ui.recovery_file, &error)) {
+                ui.recovery_written = true;
+                ui.notice = T_("The project was restored. Save it to keep it.");
+                fit_view(session, ui.view);
+            } else {
+                ui.error = std::string(T_("Restore: ")) + error;
+            }
+            ui.ask_recovery = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T_("Discard"))) {
+            std::error_code code;
+            std::filesystem::remove(ui.recovery_file, code);
+            toh::app::logging::info("The recovery file was discarded");
+            ui.ask_recovery = false;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 // The window title names the project and shows a star while it has unsaved changes.
 void update_window_title(const Session& session, UiState& ui) {
     std::string title = "Tone of Hell";
@@ -1488,6 +1567,20 @@ void draw_settings_window(Session& session, UiState& ui) {
             }
             ImGui::TextDisabled("%s", T_("Click a track name to select it, Ctrl+click to select several. "
                                          "With nothing selected, every track plays."));
+
+            ImGui::SeparatorText(T_("Autosave"));
+            if (ImGui::Checkbox(T_("Keep unsaved changes in a recovery file"), &ui.settings.autosave)) {
+                ui.settings_changed = true;
+            }
+            tooltip(T_("If the program closes unexpectedly, the next start offers to restore them.\n"
+                       "Your project file changes only when you save."));
+            ImGui::BeginDisabled(!ui.settings.autosave);
+            ImGui::SetNextItemWidth(12.0f * ImGui::GetFontSize());
+            if (ImGui::SliderInt("##autosave minutes", &ui.settings.autosave_minutes, 1, 30,
+                                 T_("every %d min"), ImGuiSliderFlags_AlwaysClamp)) {
+                ui.settings_changed = true;
+            }
+            ImGui::EndDisabled();
 
             ImGui::SeparatorText(T_("Logs"));
             if (ImGui::Checkbox(T_("Write a log file for every session"), &ui.settings.write_logs)) {
@@ -3423,6 +3516,15 @@ int main(int argc, char* argv[]) {
             }
         }
         toh::app::logging::install_crash_handler();
+        // A recovery file that is still there means the last session did not end properly.
+        if (!ui.settings_path.empty()) {
+            ui.recovery_file = ui.settings_path.parent_path() / "recovery" / "recovery.tohp";
+            std::error_code code;
+            ui.ask_recovery = std::filesystem::exists(ui.recovery_file, code);
+            if (ui.ask_recovery) {
+                toh::app::logging::warning("A recovery file was found: the last session ended early");
+            }
+        }
         {
             const toh::app::BuildInfo& build = toh::app::build_info();
             toh::app::logging::info(std::string("Tone of Hell ") + build.version + " (commit " +
@@ -3519,6 +3621,7 @@ int main(int argc, char* argv[]) {
             }
             handle_path_request(session, ui);
             apply_dropped_picture(session, ui);
+            autosave_tick(session, ui);
             update_window_title(session, ui);
             log_events(session, ui);
             // A picture file arrived from the "track picture" dialog.
@@ -3546,6 +3649,7 @@ int main(int argc, char* argv[]) {
                              ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_MenuBar);
             draw_menu_bar(session, pending, exports, window, ui);
             draw_unsaved_popup(session, ui);
+            draw_recovery_popup(session, ui);
             draw_toolbar(session, pending, window, ui);
             ImGui::Separator();
             // The track area leaves room below for the timeline scrollbar and the status bar.
@@ -3583,6 +3687,11 @@ int main(int argc, char* argv[]) {
 
         save_settings(session, ui);
         toh::app::logging::info("The program closes normally");
+        if (!ui.recovery_file.empty() && !ui.ask_recovery) {
+            // Closing normally: the changes were saved or deliberately not saved.
+            std::error_code code;
+            std::filesystem::remove(ui.recovery_file, code);
+        }
         for (const auto& entry : ui.textures) {
             if (entry.second != nullptr) {
                 SDL_DestroyTexture(entry.second);

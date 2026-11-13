@@ -62,6 +62,8 @@ TEST_CASE("Settings survive saving and loading") {
     saved.start_window = 2;
     saved.write_logs = false;
     saved.metronome_endless = false;
+    saved.autosave = false;
+    saved.autosave_minutes = 7;
     saved.projects_folder = "D:/Music/\xD0\x9F\xD1\x80\xD0\xBE\xD0\xB5\xD0\xBA\xD1\x82\xD1\x8B";
     saved.reverse_starts_playback = false;
     saved.shortcuts[static_cast<std::size_t>(Action::Record)] = "";
@@ -81,6 +83,8 @@ TEST_CASE("Settings survive saving and loading") {
     CHECK(loaded.start_window == 2);
     CHECK_FALSE(loaded.write_logs);
     CHECK_FALSE(loaded.metronome_endless);
+    CHECK_FALSE(loaded.autosave);
+    CHECK(loaded.autosave_minutes == 7);
     CHECK(loaded.projects_folder == saved.projects_folder);
     CHECK_FALSE(loaded.reverse_starts_playback);
     CHECK(loaded.reverse_off_at_start);

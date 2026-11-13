@@ -108,6 +108,13 @@ bool Settings::load(const std::filesystem::path& path) {
             if (end != value.c_str()) {
                 record_offset_frames = number;
             }
+        } else if (key == "autosave") {
+            autosave = value == "1" || value == "true";
+        } else if (key == "autosave_minutes") {
+            const int number = std::atoi(value.c_str());
+            if (number >= 1 && number <= 60) {
+                autosave_minutes = number;
+            }
         } else if (key == "metronome_endless") {
             metronome_endless = value == "1" || value == "true";
         } else if (key == "write_logs") {
@@ -158,6 +165,8 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "projects_folder=" << projects_folder << "\n";
     file << "write_logs=" << (write_logs ? 1 : 0) << "\n";
     file << "metronome_endless=" << (metronome_endless ? 1 : 0) << "\n";
+    file << "autosave=" << (autosave ? 1 : 0) << "\n";
+    file << "autosave_minutes=" << autosave_minutes << "\n";
     file << "reverse_starts_playback=" << (reverse_starts_playback ? 1 : 0) << "\n";
     file << "reverse_off_at_start=" << (reverse_off_at_start ? 1 : 0) << "\n";
     for (std::size_t i = 0; i < kActionCount; ++i) {

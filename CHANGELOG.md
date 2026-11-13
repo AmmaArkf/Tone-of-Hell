@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.1.7
+
+- Autosave: every 3 minutes (1 to 30, Edit > Settings > General > Autosave), unsaved changes go to a recovery file next to the settings. Your project file changes only when you save. If the program closes unexpectedly, the next start offers to restore the project; Ctrl+S then saves it to its own file again. Closing normally or saving removes the recovery file.
+
 ## 0.1.6
 
 - Every region has a speed of its own (right-click a region > Region speed, 25 % to 400 %), also parts of one recording. Like a tape, the region gets shorter or longer and the pitch follows; its name shows the speed. Cutting, trimming, joining, projects and undo keep it. The playback speed of the whole project stays separate.

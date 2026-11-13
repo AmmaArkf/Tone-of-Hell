@@ -83,6 +83,9 @@ struct Settings {
     bool write_logs = true;
     /// With the metronome on, playback goes on past the end of the project.
     bool metronome_endless = true;
+    /// Write unsaved changes to a recovery file every `autosave_minutes` minutes.
+    bool autosave = true;
+    int autosave_minutes = 3;
     std::array<std::string, kActionCount> shortcuts;
 
     const std::string& shortcut(Action action) const noexcept {

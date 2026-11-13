@@ -313,6 +313,17 @@ public:
     /// True when the project differs from what was last saved, opened or started.
     bool modified() const;
 
+    // ---- Autosave ------------------------------------------------------------------------
+
+    /// True when there are unsaved changes that the last save_recovery() did not cover.
+    bool needs_recovery_save() const;
+    /// Writes the project to a recovery file (for autosave) without changing project_file()
+    /// or modified(). The recovery file also remembers the project file.
+    bool save_recovery(const std::filesystem::path& file, std::string* error = nullptr);
+    /// Opens a recovery file: the project comes back as it was, with its project file, and
+    /// counts as modified until it is saved.
+    bool restore_recovery(const std::filesystem::path& file, std::string* error = nullptr);
+
     // ---- Undo ----------------------------------------------------------------------------
     // Edits of tracks and regions are recorded as steps. A user interface calls
     // commit_edits() whenever a gesture has ended (for example every frame while no mouse
@@ -407,6 +418,10 @@ private:
     void sync_track_regions(std::size_t index);
     /// Empties one track slot of the engine.
     void clear_engine_slot(std::size_t slot);
+    /// Writes the project archive. `head` adds lines to the description; `audio_level` is the
+    /// zip compression level of the audio.
+    bool write_project(const std::filesystem::path& file, std::string* error,
+                       const std::string& head, int audio_level);
     /// Every source that a region uses, in the order of the tracks.
     std::vector<std::shared_ptr<const Source>> used_sources() const;
     /// The text that describes the project, with `files[i]` naming the audio of `sources[i]`.
@@ -485,6 +500,8 @@ private:
 
     std::filesystem::path project_file_;
     std::string saved_state_;  // state_text() when the project was saved, opened or started
+    std::string autosaved_state_;               // state_text() at the last recovery save
+    std::filesystem::path recovered_original_;  // "original_file" of the last opened project
 
     std::vector<Snapshot> undo_;  // oldest first
     std::vector<Snapshot> redo_;  // the most recently undone step last

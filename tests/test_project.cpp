@@ -178,6 +178,46 @@ TEST_CASE("A saved project opens again exactly as it was") {
     CHECK_FALSE(opened.modified());
 }
 
+TEST_CASE("Autosave writes a recovery file that brings the unsaved project back") {
+    const std::filesystem::path folder = test_folder("toh_test_recovery");
+    const std::filesystem::path file = folder / "Song.tohp";
+    const std::filesystem::path recovery = folder / "recovery" / "recovery.tohp";
+    std::string error;
+    {
+        Session session;
+        CHECK_FALSE(session.needs_recovery_save());
+        REQUIRE(session.add_track("Guitar", counting_clip(1000, 0.001f)));
+        REQUIRE(session.save_project(file, &error));
+        CHECK_FALSE(session.needs_recovery_save());
+
+        REQUIRE(session.split_region(0, 0, 400));
+        REQUIRE(session.set_track_name(0, "Changed after saving"));
+        CHECK(session.needs_recovery_save());
+        REQUIRE_MESSAGE(session.save_recovery(recovery, &error), error);
+        CHECK_FALSE(session.needs_recovery_save());  // nothing new since the autosave
+        CHECK(session.modified());                   // but still not saved
+        CHECK(session.project_file() == file);
+        REQUIRE(session.set_track_gain(0, 0.5f));
+        CHECK(session.needs_recovery_save());
+    }  // the program "crashes" here: the last changes after the autosave are gone
+
+    Session restored;
+    REQUIRE_MESSAGE(restored.restore_recovery(recovery, &error), error);
+    CHECK(restored.project_file() == file);  // Ctrl+S saves to the project again
+    CHECK(restored.modified());
+    REQUIRE(restored.tracks().size() == 1);
+    CHECK(restored.tracks()[0].name == "Changed after saving");
+    CHECK(restored.tracks()[0].regions.size() == 2);
+    CHECK(restored.tracks()[0].gain == doctest::Approx(1.0f));
+
+    REQUIRE(restored.save_project(file, &error));
+    CHECK_FALSE(restored.modified());
+
+    Session reopened;
+    REQUIRE(reopened.open_project(file, &error));
+    CHECK(reopened.tracks()[0].name == "Changed after saving");
+}
+
 TEST_CASE("Opening refuses files that are not projects or do not fit") {
     const std::filesystem::path folder = test_folder("toh_test_project_bad");
     Session session;

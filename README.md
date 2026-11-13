@@ -20,7 +20,7 @@ Ready-made builds for Windows and Linux are on the [Releases](https://github.com
 - **Recording** from any input with input gain, monitoring, latency correction and a live waveform; a take goes straight to disk.
 - **Playback:** loop, reverse, a metronome with any time signature, a playback speed from 25 % to 400 %; audio is streamed from disk in 1 MB pages, so long files do not fill the memory.
 - **Import** of WAV, FLAC and MP3; **export** to WAV (16-bit, 24-bit, 32-bit float) and MP3 (CBR or VBR).
-- **Projects** in one file (`.tohp`, a zip archive with all the audio and pictures), undo and redo, a question about unsaved changes.
+- **Projects** in one file (`.tohp`, a zip archive with all the audio and pictures), undo and redo, a question about unsaved changes, autosave with recovery after a crash.
 - **Interface** in English and Russian, shortcuts that you can change, full screen, a log file for every session to help find errors.
 
 ## Goals
@@ -47,7 +47,7 @@ The status of every stage is tracked in [ROADMAP.md](ROADMAP.md). In short:
 
 | Level | What it includes | Status |
 | --- | --- | --- |
-| 0. Core | Audio engine, transport, tracks, regions, mixer, recording, import and export, projects, undo/redo | Pre-release 0.1 (autosave still to come) |
+| 0. Core | Audio engine, transport, tracks, regions, mixer, recording, import and export, projects, undo/redo | Pre-release 0.1, stabilization next |
 | 1. Working minimum | MIDI and piano roll, CLAP/VST3 plugins, automation, tempo map, basic effects and instruments | Next |
 | 2. Advanced | Comping, time-stretch, groups, sidechain, controllers, score editor, clip grid | Idea |
 | 3. Distinctive | ML features, sound library, surround sound, mastering assistant | Idea |
@@ -114,7 +114,7 @@ The project is released under the MIT license, see [LICENSE](LICENSE). Third-par
 - **Запись** с любого входа: чувствительность входа, мониторинг, коррекция задержки, волна прямо во время записи; дубль сразу пишется на диск.
 - **Воспроизведение:** цикл, реверс, метроном с любым размером, скорость от 25 % до 400 %; звук читается с диска кусками по 1 МБ, поэтому длинные файлы не занимают память.
 - **Импорт** WAV, FLAC и MP3; **экспорт** в WAV (16 бит, 24 бита, 32 бита float) и MP3 (постоянный или переменный битрейт).
-- **Проекты** в одном файле (`.tohp`, zip-архив со всем звуком и картинками), отмена и повтор действий, вопрос о несохранённых изменениях.
+- **Проекты** в одном файле (`.tohp`, zip-архив со всем звуком и картинками), отмена и повтор действий, вопрос о несохранённых изменениях, автосохранение с восстановлением после сбоя.
 - **Интерфейс** на русском и английском, настраиваемые горячие клавиши, полноэкранный режим, лог каждого сеанса для поиска ошибок.
 
 ### Цели
@@ -141,7 +141,7 @@ The project is released under the MIT license, see [LICENSE](LICENSE). Third-par
 
 | Уровень | Что входит | Статус |
 | --- | --- | --- |
-| 0. Ядро | Аудиодвижок, транспорт, дорожки, регионы, микшер, запись, импорт и экспорт, проекты, отмена и повтор | Пре-релиз 0.1 (осталось автосохранение) |
+| 0. Ядро | Аудиодвижок, транспорт, дорожки, регионы, микшер, запись, импорт и экспорт, проекты, отмена и повтор | Пре-релиз 0.1, дальше стабилизация |
 | 1. Рабочий минимум | MIDI и пиано-ролл, плагины CLAP/VST3, автоматизация, карта темпа, базовые эффекты и инструменты | Следующий |
 | 2. Расширенный | Компинг, растяжение времени, группы, сайдчейн, контроллеры, нотный редактор, сетка клипов | Идея |
 | 3. Особенный | Функции на основе машинного обучения, библиотека звуков, объёмный звук, помощник по мастерингу | Идея |
