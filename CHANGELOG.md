@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.1.1
+
+- With the metronome on, playback goes on past the end of the project until you stop it (Edit > Settings > General > Metronome; on by default). A loop still loops.
+
 ## 0.1.0
 
 The first pre-release. Everything since 0.0.1 in short: playback, recording, a multitrack mixer with regions, fades, splitting, joining and moving between tracks, a metronome and grid, reverse playback, WAV and MP3 export, projects, and an interface in English and Russian.

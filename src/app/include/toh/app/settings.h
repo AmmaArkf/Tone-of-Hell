@@ -76,6 +76,8 @@ struct Settings {
     std::string projects_folder;
     /// Write a log file for every session.
     bool write_logs = true;
+    /// With the metronome on, playback goes on past the end of the project.
+    bool metronome_endless = true;
     std::array<std::string, kActionCount> shortcuts;
 
     const std::string& shortcut(Action action) const noexcept {

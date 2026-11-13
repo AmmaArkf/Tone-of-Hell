@@ -111,6 +111,14 @@ public:
     /// metronome on, playback also runs when no clip is loaded.
     bool set_metronome(bool enabled, double bpm = 120.0, std::uint32_t beats_per_bar = 4,
                        std::uint32_t beat_unit = 4, float volume = 0.5f);
+    /// With the metronome on, playback goes on past the end of the project until it is
+    /// stopped (unless it loops). On by default. Any thread.
+    void set_metronome_endless(bool endless) noexcept {
+        metronome_endless_.store(endless, std::memory_order_relaxed);
+    }
+    bool metronome_endless() const noexcept {
+        return metronome_endless_.load(std::memory_order_relaxed);
+    }
 
     // ---- Input: monitoring and recording (control thread) -------------------------------
 
@@ -310,6 +318,7 @@ private:
     bool reverse_ = false;
     bool wanted_reverse_ = false;  // takes effect at the bottom of the next fade
     bool metronome_enabled_ = false;
+    std::atomic<bool> metronome_endless_{true};
     double metronome_beat_frames_ = 24000.0;
     std::int64_t metronome_beats_per_bar_ = 4;
     float metronome_volume_ = 0.5f;

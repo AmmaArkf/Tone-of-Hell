@@ -1429,6 +1429,14 @@ void draw_settings_window(Session& session, UiState& ui) {
             }
             ImGui::TextDisabled("%s", T_("F11 switches full screen on and off at any time."));
 
+            ImGui::SeparatorText(T_("Metronome"));
+            if (ImGui::Checkbox(T_("With the metronome on, keep playing past the end"),
+                                &ui.settings.metronome_endless)) {
+                session.set_metronome_endless(ui.settings.metronome_endless);
+                ui.settings_changed = true;
+            }
+            tooltip(T_("Handy for practising: playback goes on until you stop it. A loop still loops."));
+
             ImGui::SeparatorText(T_("Reverse"));
             if (ImGui::Checkbox(T_("The Reverse button starts playback"),
                                 &ui.settings.reverse_starts_playback)) {
@@ -3188,6 +3196,7 @@ int main(int argc, char* argv[]) {
         session.set_play_selected_only(ui.settings.play_selected_only);
         session.set_reverse_starts_playback(ui.settings.reverse_starts_playback);
         session.set_reverse_off_at_start(ui.settings.reverse_off_at_start);
+        session.set_metronome_endless(ui.settings.metronome_endless);
         if (ui.settings.record_offset_frames >= 0) {
             session.set_record_offset_frames(ui.settings.record_offset_frames);
         }

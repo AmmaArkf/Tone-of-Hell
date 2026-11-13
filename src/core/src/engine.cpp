@@ -433,7 +433,9 @@ void Engine::apply(const Command& command) noexcept {
                 break;
             }
             if (state_ == State::Stopped) {
-                if (!reverse_ && !record_armed_ && project_frames_ > 0 &&
+                const bool endless =
+                    metronome_enabled_ && metronome_endless_.load(std::memory_order_relaxed);
+                if (!reverse_ && !record_armed_ && !endless && project_frames_ > 0 &&
                     pos_ >= project_frames_) {
                     pos_ = 0;  // the project had ended: start again
                 } else if (reverse_ && pos_ <= 0) {
@@ -928,8 +930,11 @@ void Engine::render(const float* in, float* out, std::uint32_t frames) noexcept 
     const bool looping = loop_region(loop_start, loop_end);
     const std::int64_t begin_pos = looping ? loop_start : 0;
     std::int64_t end_pos = looping ? loop_end : project_frames_;
-    if (record_armed_ || (project_frames_ <= 0 && metronome_enabled_)) {
-        // Recording, or nothing loaded but the metronome is on: run until stopped.
+    const bool endless_metronome =
+        metronome_enabled_ &&
+        (project_frames_ <= 0 || (!looping && metronome_endless_.load(std::memory_order_relaxed)));
+    if (record_armed_ || endless_metronome) {
+        // Recording, or the metronome is on (and set to go on past the end): run until stopped.
         end_pos = std::numeric_limits<std::int64_t>::max();
     }
 

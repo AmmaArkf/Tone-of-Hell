@@ -218,6 +218,29 @@ TEST_CASE("Metronome is mixed on top of the tracks and ignores the master fader"
     CHECK(peak(out, 26000, 48000) == 0.0f);  // the track is not
 }
 
+TEST_CASE("With the metronome on, playback can go on past the end") {
+    for (const bool endless : {true, false}) {
+        Engine engine(kRate, 1);
+        REQUIRE(engine.set_clip(constant_clip(1000, 0.5f)));
+        engine.set_metronome_endless(endless);
+        REQUIRE(engine.set_metronome(true, 120.0));
+        REQUIRE(engine.play());
+        std::vector<float> out(3000);
+        engine.render(out.data(), 3000);
+        CHECK(engine.is_playing() == endless);
+        CHECK(engine.position_frames() == (endless ? 3000 : 1000));
+        if (endless) {
+            // Paused past the end, playback goes on from there instead of starting anew.
+            REQUIRE(engine.pause());
+            engine.render(out.data(), 1000);
+            const std::int64_t paused_at = engine.position_frames();
+            REQUIRE(engine.play());
+            engine.render(out.data(), 100);
+            CHECK(engine.position_frames() == paused_at + 100);
+        }
+    }
+}
+
 TEST_CASE("Metronome rejects values out of range") {
     Engine engine(kRate, 2);
     CHECK_FALSE(engine.set_metronome(true, 10.0));

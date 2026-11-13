@@ -103,6 +103,8 @@ bool Settings::load(const std::filesystem::path& path) {
             if (end != value.c_str()) {
                 record_offset_frames = number;
             }
+        } else if (key == "metronome_endless") {
+            metronome_endless = value == "1" || value == "true";
         } else if (key == "write_logs") {
             write_logs = value == "1" || value == "true";
         } else if (key == "projects_folder") {
@@ -150,6 +152,7 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "start_window=" << start_window << "\n";
     file << "projects_folder=" << projects_folder << "\n";
     file << "write_logs=" << (write_logs ? 1 : 0) << "\n";
+    file << "metronome_endless=" << (metronome_endless ? 1 : 0) << "\n";
     file << "reverse_starts_playback=" << (reverse_starts_playback ? 1 : 0) << "\n";
     file << "reverse_off_at_start=" << (reverse_off_at_start ? 1 : 0) << "\n";
     for (std::size_t i = 0; i < kActionCount; ++i) {

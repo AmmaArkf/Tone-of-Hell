@@ -348,6 +348,10 @@ public:
     const MetronomeSettings& metronome() const noexcept { return metronome_; }
     /// Returns false (and changes nothing) when a value is out of range.
     bool set_metronome(const MetronomeSettings& settings);
+    /// With the metronome on, playback goes on past the end of the project (see
+    /// core::Engine::set_metronome_endless). On by default.
+    bool metronome_endless() const noexcept { return engine_.metronome_endless(); }
+    void set_metronome_endless(bool endless) noexcept { engine_.set_metronome_endless(endless); }
 
     bool is_playing() const noexcept { return engine_.is_playing(); }
     std::int64_t position_frames() const noexcept { return engine_.position_frames(); }
