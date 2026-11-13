@@ -479,6 +479,9 @@ bool Session::start_recording(std::size_t track) {
     take_.clear();
     drain_recording();  // throw away input left over from an earlier take
     take_.clear();
+    take_overview_ = Overview();
+    take_bucket_fill_ = 0;
+    take_clipped_ = false;
 
     record_track_ = track;
     record_seen_ = false;
@@ -510,6 +513,35 @@ void Session::drain_recording() {
         }
         take_.insert(take_.end(), drain_buffer_.begin(),
                      drain_buffer_.begin() + static_cast<std::ptrdiff_t>(frames * channels));
+        extend_take_overview(drain_buffer_.data(), frames);
+    }
+}
+
+// Adds recorded frames to the waveform of the running take and notes overloads.
+void Session::extend_take_overview(const float* interleaved, std::size_t frames) {
+    const std::size_t channels = config_.channels;
+    const std::size_t bucket = take_overview_.frames_per_bucket;
+    for (std::size_t i = 0; i < frames; ++i) {
+        const float* frame = interleaved + i * channels;
+        float low = frame[0];
+        float high = frame[0];
+        for (std::size_t c = 1; c < channels; ++c) {
+            low = std::min(low, frame[c]);
+            high = std::max(high, frame[c]);
+        }
+        if (high >= 0.999f || low <= -0.999f) {
+            take_clipped_ = true;
+        }
+        if (take_bucket_fill_ == 0) {
+            take_overview_.minimum.push_back(low);
+            take_overview_.maximum.push_back(high);
+        } else {
+            take_overview_.minimum.back() = std::min(take_overview_.minimum.back(), low);
+            take_overview_.maximum.back() = std::max(take_overview_.maximum.back(), high);
+        }
+        if (++take_bucket_fill_ == bucket) {
+            take_bucket_fill_ = 0;
+        }
     }
 }
 

@@ -1094,6 +1094,10 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
         draw_record_settings(session, ui);
         ImGui::EndPopup();
     }
+    if (session.input_enabled()) {
+        ImGui::SameLine();
+        draw_meter(session.input_peak(), 5.0f * ImGui::GetFontSize(), ImGui::GetFrameHeight());
+    }
     ImGui::SameLine();
     if (toggle_button(T_("Reverse"), session.reverse(), ImVec4(0.80f, 0.45f, 0.20f, 1.0f), false)) {
         session.toggle_reverse();
@@ -1605,11 +1609,48 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     }
     // The take that is being recorded onto this track, growing with the playhead.
     if (session.is_recording() && session.record_track() == track_index) {
-        const std::int64_t position = session.position_frames();
-        const float x0 = frame_to_x(session, view, position - session.recorded_frames());
-        const float x1 = frame_to_x(session, view, position);
-        draw_list->AddRectFilled(ImVec2(x0, origin.y + 1.0f), ImVec2(std::max(x1, x0 + 1.0f), corner.y - 1.0f),
-                                 IM_COL32(200, 50, 50, 130), 3.0f);
+        const std::int64_t recorded = session.recorded_frames();
+        std::int64_t take_start = session.engine().record_start_frame();
+        if (take_start < 0) {
+            take_start = session.position_frames() - recorded;
+        }
+        const float x0 = frame_to_x(session, view, take_start);
+        const float x1 = frame_to_x(session, view, take_start + recorded);
+        draw_list->AddRectFilled(ImVec2(x0, origin.y + 1.0f),
+                                 ImVec2(std::max(x1, x0 + 1.0f), corner.y - 1.0f),
+                                 IM_COL32(120, 30, 30, 170), 3.0f);
+
+        // The waveform of what is being recorded. Columns that reach full scale are red.
+        const toh::app::Overview& wave = session.take_overview();
+        const float middle = (origin.y + corner.y) * 0.5f;
+        const float half = (corner.y - origin.y) * 0.5f - 3.0f;
+        const int first_column = static_cast<int>(std::floor(std::max(x0, view.lane_origin_x)));
+        const int last_column =
+            static_cast<int>(std::ceil(std::min(x1, view.lane_origin_x + view.lane_width)));
+        for (int column = first_column; column < last_column; ++column) {
+            std::int64_t first = x_to_frame(session, view, static_cast<float>(column)) - take_start;
+            const std::int64_t last =
+                x_to_frame(session, view, static_cast<float>(column + 1)) - 1 - take_start;
+            if (last < 0) {
+                continue;
+            }
+            first = std::max<std::int64_t>(first, 0);
+            float low = 0.0f;
+            float high = 0.0f;
+            if (!wave.range(first, std::max(first, last), low, high)) {
+                continue;
+            }
+            const bool clipped = high >= 0.999f || low <= -0.999f;
+            low = std::clamp(low, -1.0f, 1.0f);
+            high = std::clamp(high, -1.0f, 1.0f);
+            const float px = static_cast<float>(column) + 0.5f;
+            draw_list->AddLine(ImVec2(px, middle - high * half), ImVec2(px, middle - low * half + 1.0f),
+                               clipped ? IM_COL32(255, 70, 60, 255) : IM_COL32(255, 205, 200, 255));
+        }
+        if (session.take_clipped()) {
+            draw_list->AddText(ImVec2(std::max(x0, view.lane_origin_x) + 6.0f, origin.y + 3.0f),
+                               IM_COL32(255, 90, 80, 255), T_("Input overloaded"));
+        }
     }
     draw_playhead(session, view, draw_list, origin.y, corner.y);
     draw_list->PopClipRect();

@@ -339,3 +339,40 @@ TEST_CASE("Export writes the project as it sounds") {
     std::error_code ignored;
     std::filesystem::remove(path, ignored);
 }
+
+TEST_CASE("The waveform of a take grows while recording and shows overloads") {
+    Session session;
+    session.set_record_offset_frames(0);
+    REQUIRE(session.start_recording());
+    session.update();
+
+    // Quiet input first: a waveform, but no overload.
+    std::vector<float> quiet(2 * 2000, 0.3f);
+    std::vector<float> out(quiet.size());
+    session.engine().render(quiet.data(), out.data(), 2000);
+    session.update();
+    const auto& wave = session.take_overview();
+    CHECK(wave.maximum.size() == (2000 + 255) / 256);
+    float low = 0.0f;
+    float high = 0.0f;
+    REQUIRE(wave.range(0, 1999, low, high));
+    CHECK(high == doctest::Approx(0.3f));
+    CHECK_FALSE(session.take_clipped());
+
+    // Then full scale: the take is marked as overloaded.
+    std::vector<float> loud(2 * 1000, 1.0f);
+    session.engine().render(loud.data(), out.data(), 1000);
+    session.update();
+    CHECK(session.take_overview().maximum.size() == (3000 + 255) / 256);
+    CHECK(session.take_clipped());
+
+    // A new take starts with a clean waveform.
+    session.stop_recording();
+    session.update();
+    session.engine().render(quiet.data(), out.data(), 1000);
+    session.update();
+    CHECK_FALSE(session.is_recording());
+    REQUIRE(session.start_recording(0));
+    CHECK(session.take_overview().maximum.empty());
+    CHECK_FALSE(session.take_clipped());
+}

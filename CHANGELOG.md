@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.8
+
+- While recording, the take shows its waveform as it grows, so you can see what is being recorded. Parts that reach full scale are drawn red, and the take is marked "Input overloaded".
+- An input level meter appears next to the Record button while the input device is open.
+
 ## 0.0.7
 
 - A double-click on a slider returns it to its normal value: track volume and master volume to 100%, pan to the centre, input sensitivity to 100%, metronome click volume to 50%.

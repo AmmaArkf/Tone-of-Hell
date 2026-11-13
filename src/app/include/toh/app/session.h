@@ -190,6 +190,11 @@ public:
     std::size_t record_track() const noexcept { return record_track_; }
     /// Length of the running take so far, in frames.
     std::int64_t recorded_frames() const noexcept;
+    /// Waveform of the running take, growing while it is recorded. Frame 0 is the first frame
+    /// of the take.
+    const Overview& take_overview() const noexcept { return take_overview_; }
+    /// True when the running take reached full scale: the input was overloaded.
+    bool take_clipped() const noexcept { return take_clipped_; }
 
     // ---- Export --------------------------------------------------------------------------
 
@@ -248,6 +253,7 @@ private:
     /// returns false as soon as `sink` returns false.
     bool render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const;
     void finish_take();
+    void extend_take_overview(const float* interleaved, std::size_t frames);
 
     audio::DeviceConfig config_;
     core::Engine engine_;
@@ -270,6 +276,9 @@ private:
     std::int64_t record_offset_ = 0;
     std::vector<float> take_;          // the input recorded so far
     std::vector<float> drain_buffer_;
+    Overview take_overview_;
+    std::size_t take_bucket_fill_ = 0;  // frames already in the last bucket of take_overview_
+    bool take_clipped_ = false;
     int take_count_ = 0;
 };
 

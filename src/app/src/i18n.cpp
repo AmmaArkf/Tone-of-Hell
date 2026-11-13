@@ -95,6 +95,7 @@ const Entry kRussian[] = {
     {"Double-click: back to 100%", "Двойной клик: вернуть 100%"},
     {"Double-click: back to the centre", "Двойной клик: вернуть в центр"},
     {"Double-click a slider", "Двойной клик по ползунку"},
+    {"Input overloaded", "Перегрузка входа"},
     {"Back to its normal value", "Вернуть обычное значение"},
     {"The mix went above full scale. Lower the faders. Click to reset.",
      "Микс превысил полную шкалу. Убавьте громкость. Клик сбрасывает индикатор."},
