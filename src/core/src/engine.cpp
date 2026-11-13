@@ -814,12 +814,14 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                     const std::int64_t remaining = end - 1 - position;
                     float region_fade = 1.0f;
                     if (into < region.fade_in) {
-                        region_fade =
-                            (static_cast<float>(into) + 0.5f) / static_cast<float>(region.fade_in);
+                        region_fade = fade_curve(
+                            region.fade_shape,
+                            (static_cast<float>(into) + 0.5f) / static_cast<float>(region.fade_in));
                     }
                     if (remaining < region.fade_out) {
-                        region_fade *= (static_cast<float>(remaining) + 0.5f) /
-                                       static_cast<float>(region.fade_out);
+                        region_fade *= fade_curve(region.fade_shape,
+                                                  (static_cast<float>(remaining) + 0.5f) /
+                                                      static_cast<float>(region.fade_out));
                     }
                     const float* src = nullptr;
                     if (disk != nullptr) {

@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.1.5
+
+- Fades are curved by default: the level rises slowly, then faster (and a fade-out falls fast, then slowly), which sounds even to the ear. The right-click menu of a region chooses the shape: curve, straight line or S-curve. The waveform shows the curve, and projects keep the shape.
+
 ## 0.1.4
 
 - Playback speed from 25 % to 400 %: right-click the Play button, or Playback > Speed in the right-click menus of the tracks and regions, or Transport > Speed. Ctrl+Up and Ctrl+Down change it by 5 %, Ctrl+0 returns to normal. Like a tape, the pitch changes with the speed. A button next to Play shows a speed that is not normal; a click on it returns to normal. Recording and export always run at the normal speed.

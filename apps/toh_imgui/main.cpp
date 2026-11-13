@@ -2544,15 +2544,27 @@ void draw_region(const Session& session, const View& view, const TrackInfo& trac
     const float fade_out_x = frame_to_x(session, view, region.end() - region.fade_out);
     const ImU32 shade = IM_COL32(10, 12, 16, 150);
     const ImU32 fade_line = IM_COL32(235, 235, 245, 200);
+    // The fade follows its shape: level 0 at high.y, full level at low.y.
+    const auto draw_fade = [&](float from_x, float to_x, bool rising) {
+        constexpr int kSteps = 24;
+        ImVec2 points[kSteps + 1];
+        for (int k = 0; k <= kSteps; ++k) {
+            const float t = static_cast<float>(k) / static_cast<float>(kSteps);
+            const float level = toh::core::fade_curve(region.fade_shape, rising ? t : 1.0f - t);
+            points[k] = ImVec2(from_x + (to_x - from_x) * t, high.y + (low.y - high.y) * level);
+        }
+        for (int k = 0; k < kSteps; ++k) {
+            // The turned-down part, between the curve and the full level.
+            draw_list->AddQuadFilled(points[k], points[k + 1], ImVec2(points[k + 1].x, low.y),
+                                     ImVec2(points[k].x, low.y), shade);
+        }
+        draw_list->AddPolyline(points, kSteps + 1, fade_line, ImDrawFlags_None, 1.5f);
+    };
     if (region.fade_in > 0) {
-        draw_list->AddTriangleFilled(ImVec2(x0, low.y), ImVec2(fade_in_x, low.y), ImVec2(x0, high.y),
-                                     shade);
-        draw_list->AddLine(ImVec2(x0, high.y), ImVec2(fade_in_x, low.y), fade_line);
+        draw_fade(x0, fade_in_x, true);
     }
     if (region.fade_out > 0) {
-        draw_list->AddTriangleFilled(ImVec2(x1, low.y), ImVec2(fade_out_x, low.y), ImVec2(x1, high.y),
-                                     shade);
-        draw_list->AddLine(ImVec2(fade_out_x, low.y), ImVec2(x1, high.y), fade_line);
+        draw_fade(fade_out_x, x1, false);
     }
 
     draw_list->AddRect(low, high, selected ? IM_COL32(210, 228, 255, 255) : IM_COL32(84, 104, 134, 255),
@@ -2664,6 +2676,20 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         if (ImGui::MenuItem(T_("Remove fades"), nullptr, false,
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
+        }
+        if (ImGui::BeginMenu(T_("Fade shape"), region != nullptr)) {
+            static const struct {
+                const char* name;
+                toh::core::FadeShape shape;
+            } shapes[] = {{"Curve (sounds even)", toh::core::FadeShape::Curve},
+                          {"Straight line", toh::core::FadeShape::Linear},
+                          {"S-curve (soft at both ends)", toh::core::FadeShape::SCurve}};
+            for (const auto& choice : shapes) {
+                if (ImGui::MenuItem(T_(choice.name), nullptr, region->fade_shape == choice.shape)) {
+                    session.set_region_fade_shape(ui.selected_track, ui.selected_region, choice.shape);
+                }
+            }
+            ImGui::EndMenu();
         }
         if (ImGui::MenuItem(T_("Remove the region"), key_label(ui, Action::RemoveRegion), false, region != nullptr)) {
             remove_selected_region(session, ui);

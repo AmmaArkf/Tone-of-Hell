@@ -44,6 +44,7 @@ std::vector<core::Region> engine_regions(const TrackInfo& track) {
         region.length = info.length;
         region.fade_in = info.fade_in;
         region.fade_out = info.fade_out;
+        region.fade_shape = info.fade_shape;
         regions.push_back(std::move(region));
     }
     return regions;
@@ -489,6 +490,7 @@ void Session::sync_track_regions(std::size_t index) {
         region.length = info.length;
         region.fade_in = info.fade_in;
         region.fade_out = info.fade_out;
+        region.fade_shape = info.fade_shape;
         regions.push_back(std::move(region));
     }
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions);
@@ -736,6 +738,16 @@ bool Session::set_region_fades(std::size_t track, std::size_t region, std::int64
     return true;
 }
 
+bool Session::set_region_fade_shape(std::size_t track, std::size_t region, core::FadeShape shape) {
+    RegionInfo* info = find_region(track, region);
+    if (info == nullptr) {
+        return false;
+    }
+    info->fade_shape = shape;
+    sync_track_regions(track);
+    return true;
+}
+
 bool Session::split_region(std::size_t track, std::size_t region, std::int64_t frame) {
     RegionInfo* info = find_region(track, region);
     if (info == nullptr || frame <= info->start || frame >= info->end()) {
@@ -817,11 +829,14 @@ bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
                 const std::int64_t f = from - region.start + static_cast<std::int64_t>(k);
                 float gain = 1.0f;
                 if (f < fade_in) {
-                    gain = (static_cast<float>(f) + 0.5f) / static_cast<float>(fade_in);
+                    gain = core::fade_curve(region.fade_shape, (static_cast<float>(f) + 0.5f) /
+                                                                   static_cast<float>(fade_in));
                 }
                 const std::int64_t remaining = region.length - 1 - f;
                 if (remaining < fade_out) {
-                    gain *= (static_cast<float>(remaining) + 0.5f) / static_cast<float>(fade_out);
+                    gain *= core::fade_curve(region.fade_shape,
+                                             (static_cast<float>(remaining) + 0.5f) /
+                                                 static_cast<float>(fade_out));
                 }
                 float* dst = mix.data() + static_cast<std::size_t>(from - at + static_cast<std::int64_t>(k)) * channels;
                 const float* src = piece.data() + k * channels;
@@ -852,6 +867,7 @@ bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
     merged.length = length;
     merged.fade_in = first->fade_in;
     merged.fade_out = last->fade_out;
+    merged.fade_shape = first->fade_shape;
     limit_fades(merged);
 
     // `first` and `last` point into the list: they are not used after this.
@@ -1250,6 +1266,7 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
             out << "length=" << region.length << "\n";
             out << "fade_in=" << region.fade_in << "\n";
             out << "fade_out=" << region.fade_out << "\n";
+            out << "fade_shape=" << static_cast<int>(region.fade_shape) << "\n";
         }
     }
     return out.str();
@@ -1419,6 +1436,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         std::int64_t length = 0;
         std::int64_t fade_in = 0;
         std::int64_t fade_out = 0;
+        long long fade_shape = static_cast<long long>(core::FadeShape::Curve);
     };
     struct TrackEntry {
         std::string name;
@@ -1529,6 +1547,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     region.fade_in = integer;
                 } else if (key == "fade_out") {
                     region.fade_out = integer;
+                } else if (key == "fade_shape") {
+                    region.fade_shape = integer;
                 }
                 break;
             }
@@ -1638,6 +1658,10 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             info.length = region.length;
             info.fade_in = region.fade_in;
             info.fade_out = region.fade_out;
+            if (region.fade_shape >= 0 &&
+                region.fade_shape <= static_cast<long long>(core::FadeShape::SCurve)) {
+                info.fade_shape = static_cast<core::FadeShape>(region.fade_shape);
+            }
             limit_fades(info);
             track.regions.push_back(std::move(info));
         }
@@ -1738,7 +1762,7 @@ std::string Session::edit_text() const {
         for (const RegionInfo& region : track.regions) {
             out << "R|" << static_cast<const void*>(region.source.get()) << "|" << region.start
                 << "|" << region.offset << "|" << region.length << "|" << region.fade_in << "|"
-                << region.fade_out << "\n";
+                << region.fade_out << "|" << static_cast<int>(region.fade_shape) << "\n";
         }
     }
     return out.str();

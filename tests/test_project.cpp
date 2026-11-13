@@ -75,6 +75,7 @@ TEST_CASE("A saved project opens again exactly as it was") {
         REQUIRE(session.split_region(0, 0, 1000));
         REQUIRE(session.move_region(0, 1, 5000));
         REQUIRE(session.set_region_fades(0, 0, 100, 200));
+        REQUIRE(session.set_region_fade_shape(0, 0, toh::core::FadeShape::SCurve));
         REQUIRE(session.set_track_icon(0, "guitar"));
         {
             std::ofstream picture(folder / "picture.png", std::ios::binary);
@@ -146,6 +147,8 @@ TEST_CASE("A saved project opens again exactly as it was") {
     CHECK(first.length == 1000);
     CHECK(first.fade_in == 100);
     CHECK(first.fade_out == 200);
+    CHECK(first.fade_shape == toh::core::FadeShape::SCurve);
+    CHECK(second.fade_shape == toh::core::FadeShape::Curve);
     CHECK(second.start == 5000);
     CHECK(second.offset == 1000);
     CHECK(second.length == 2000);

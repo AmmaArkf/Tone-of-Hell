@@ -99,6 +99,7 @@ struct RegionInfo {
     std::int64_t length = 0;    // number of frames that are used
     std::int64_t fade_in = 0;
     std::int64_t fade_out = 0;
+    core::FadeShape fade_shape = core::FadeShape::Curve;
 
     std::int64_t end() const noexcept { return start + length; }
 };
@@ -213,6 +214,7 @@ public:
     bool trim_region_end(std::size_t track, std::size_t region, std::int64_t end);
     bool set_region_fades(std::size_t track, std::size_t region, std::int64_t fade_in,
                           std::int64_t fade_out);
+    bool set_region_fade_shape(std::size_t track, std::size_t region, core::FadeShape shape);
     /// Cuts a region in two at a timeline frame. The second part is added at the end of the
     /// track's region list. Returns false when `frame` is not inside the region.
     bool split_region(std::size_t track, std::size_t region, std::int64_t frame);

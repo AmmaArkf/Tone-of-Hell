@@ -13,6 +13,27 @@
 namespace toh::core {
 
 /// A piece of a clip placed on the timeline of a track.
+/// The shape of a fade: how the level rises from silence (t = 0) to full (t = 1). A fade-out
+/// uses the same shape seen from the other side.
+enum class FadeShape : std::uint8_t {
+    Linear,  ///< A straight line.
+    Curve,   ///< Slow at first, then fast (t squared): sounds even to the ear.
+    SCurve,  ///< Slow at both ends (smoothstep).
+};
+
+/// The level of a fade with `shape` at `t` (0 to 1).
+inline float fade_curve(FadeShape shape, float t) noexcept {
+    switch (shape) {
+        case FadeShape::Curve:
+            return t * t;
+        case FadeShape::SCurve:
+            return t * t * (3.0f - 2.0f * t);
+        case FadeShape::Linear:
+            break;
+    }
+    return t;
+}
+
 struct Region {
     std::shared_ptr<const ClipData> clip;
     std::int64_t start = 0;     ///< Where it begins on the timeline, in frames.
@@ -20,6 +41,7 @@ struct Region {
     std::int64_t length = 0;    ///< Number of frames that are used.
     std::int64_t fade_in = 0;   ///< Length of the fade at its beginning, in frames.
     std::int64_t fade_out = 0;  ///< Length of the fade at its end, in frames.
+    FadeShape fade_shape = FadeShape::Linear;
 };
 
 /// The audio engine: a transport (play, pause, stop, seek, loop) and a mixer.

@@ -72,8 +72,9 @@ TEST_CASE("Joining applies the inner fades and mixes overlaps") {
     const RegionInfo& region = session.tracks()[0].regions[0];
     CHECK(region.length == 950);
     CHECK(region.fade_out == 0);
-    // The last frame of the first part is faded to almost nothing, plus the second part.
-    const float faded = 0.5f * (0.5f / 100.0f);
+    // The last frame of the first part is faded to almost nothing (a curved fade), plus the
+    // second part.
+    const float faded = 0.5f * (0.005f * 0.005f);
     CHECK(joined_sample(region, 499) == doctest::Approx(faded + 0.550f));
     CHECK(joined_sample(region, 100) == doctest::Approx(0.101f));
 }

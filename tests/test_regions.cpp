@@ -105,6 +105,33 @@ TEST_CASE("Regions on one track are mixed where they overlap") {
     CHECK(engine.length_frames() == 1600);
 }
 
+TEST_CASE("Fade shapes") {
+    using toh::core::FadeShape;
+    using toh::core::fade_curve;
+    for (const FadeShape shape : {FadeShape::Linear, FadeShape::Curve, FadeShape::SCurve}) {
+        CHECK(fade_curve(shape, 0.0f) == 0.0f);
+        CHECK(fade_curve(shape, 1.0f) == 1.0f);
+        float previous = 0.0f;
+        for (int i = 1; i <= 100; ++i) {
+            const float level = fade_curve(shape, static_cast<float>(i) / 100.0f);
+            CHECK(level >= previous);  // never goes back
+            previous = level;
+        }
+    }
+    CHECK(fade_curve(FadeShape::Linear, 0.5f) == doctest::Approx(0.5f));
+    CHECK(fade_curve(FadeShape::Curve, 0.5f) == doctest::Approx(0.25f));
+    CHECK(fade_curve(FadeShape::SCurve, 0.5f) == doctest::Approx(0.5f));
+    CHECK(fade_curve(FadeShape::SCurve, 0.1f) < 0.1f);
+
+    // New regions get the curve.
+    Session session;
+    REQUIRE(session.add_track("one", constant_clip(1000, 2, 0.5f)));
+    CHECK(session.tracks()[0].regions[0].fade_shape == FadeShape::Curve);
+    REQUIRE(session.set_region_fade_shape(0, 0, FadeShape::Linear));
+    CHECK(session.tracks()[0].regions[0].fade_shape == FadeShape::Linear);
+    CHECK_FALSE(session.set_region_fade_shape(0, 3, FadeShape::Linear));
+}
+
 TEST_CASE("Region fades rise and fall smoothly") {
     Engine engine(kRate, 1);
     REQUIRE(engine.set_track_regions(
