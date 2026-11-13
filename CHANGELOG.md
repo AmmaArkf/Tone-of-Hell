@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.11
+
+- Regions can be glued into one: "Join with the next region" (J) and "Join all regions of the track", in the Edit menu and in the right-click menu of a region. Overlaps are mixed, gaps become silence, and the outer fades stay adjustable.
+- Dragged regions and edges stick to the edges of other regions (on every track), to the playhead and to the start of the timeline; a yellow line shows where. Edges come before the grid, and Alt switches both off.
+
 ## 0.0.10
 
 - Tracks can be renamed: double-click the name of a track.

@@ -147,6 +147,7 @@ struct UiState {
     std::size_t drag_track = 0;
     std::size_t drag_region = 0;
     std::int64_t drag_grab = 0;    // distance from the region start to the grabbed frame
+    std::int64_t magnet_frame = -1;  // the edge a dragged region sticks to, or -1
     float scroll_grab = 0.0f;      // where the timeline scrollbar thumb was grabbed
 
     bool quit = false;             // "Exit" was chosen in the menu
@@ -332,6 +333,62 @@ void remove_selected_region(Session& session, UiState& ui) {
         session.remove_region(ui.selected_track, ui.selected_region);
         ui.selected = false;
     }
+}
+
+// The region of the same track that comes after the given one: the nearest one that starts
+// later. Returns the number of regions when there is none.
+std::size_t next_region(const TrackInfo& track, std::size_t index) {
+    const std::int64_t start = track.regions[index].start;
+    std::size_t best = track.regions.size();
+    for (std::size_t r = 0; r < track.regions.size(); ++r) {
+        const std::int64_t other = track.regions[r].start;
+        if (r == index || other < start || (other == start && r < index)) {
+            continue;
+        }
+        if (best == track.regions.size() || other < track.regions[best].start) {
+            best = r;
+        }
+    }
+    return best;
+}
+
+bool can_join_next(const Session& session, const UiState& ui) {
+    if (selected_region(session, ui) == nullptr) {
+        return false;
+    }
+    const TrackInfo& track = session.tracks()[ui.selected_track];
+    return next_region(track, ui.selected_region) < track.regions.size();
+}
+
+void join_with_next(Session& session, UiState& ui) {
+    if (!can_join_next(session, ui)) {
+        return;
+    }
+    const std::size_t next = next_region(session.tracks()[ui.selected_track], ui.selected_region);
+    std::size_t joined = 0;
+    if (session.join_regions(ui.selected_track, {ui.selected_region, next}, &joined)) {
+        ui.selected_region = joined;
+    }
+}
+
+// Glues every region of the track with the selected region into one.
+void join_selected_track(Session& session, UiState& ui) {
+    if (selected_region(session, ui) == nullptr) {
+        return;
+    }
+    std::vector<std::size_t> all(session.tracks()[ui.selected_track].regions.size());
+    for (std::size_t r = 0; r < all.size(); ++r) {
+        all[r] = r;
+    }
+    std::size_t joined = 0;
+    if (session.join_regions(ui.selected_track, all, &joined)) {
+        ui.selected_region = joined;
+    }
+}
+
+bool selected_track_has_regions_to_join(const Session& session, const UiState& ui) {
+    return selected_region(session, ui) != nullptr &&
+           session.tracks()[ui.selected_track].regions.size() >= 2;
 }
 
 // ---- Menu bar ----------------------------------------------------------------------------
@@ -826,6 +883,9 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
         case Action::RemoveRegion:
             remove_selected_region(session, ui);
             break;
+        case Action::JoinRegions:
+            join_with_next(session, ui);
+            break;
         case Action::Deselect:
             ui.selected = false;
             break;
@@ -1122,6 +1182,14 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         if (ImGui::MenuItem(T_("Split at the playhead"), key_label(ui, Action::Split), false, !session.tracks().empty())) {
             split_at_playhead(session, ui);
         }
+        if (ImGui::MenuItem(T_("Join with the next region"), key_label(ui, Action::JoinRegions), false,
+                            can_join_next(session, ui))) {
+            join_with_next(session, ui);
+        }
+        if (ImGui::MenuItem(T_("Join all regions of the track"), nullptr, false,
+                            selected_track_has_regions_to_join(session, ui))) {
+            join_selected_track(session, ui);
+        }
         if (ImGui::MenuItem(T_("Remove fades"), nullptr, false,
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
@@ -1247,6 +1315,8 @@ void draw_dialogs(UiState& ui) {
                 {"Click the ruler or an empty lane", "Move the playhead"},
                 {"Double-click a slider", "Back to its normal value"},
                 {"Right-click empty track space", "Menu: add a track"},
+                {"Drag a region close to another", "Its edge sticks to the other edge"},
+                {"J", "Join the selected region with the next one"},
                 {"Double-click a track name", "Rename the track"},
                 {"Click the picture of a track", "Choose a picture for it"},
             };
@@ -1678,6 +1748,38 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
     draw_list->PopClipRect();
 }
 
+// Edges of other regions (on every track), the playhead and the start of the timeline attract
+// a dragged edge that comes within a few pixels. Returns the nearest such frame, or -1.
+std::int64_t nearest_magnet(const Session& session, const View& view, std::size_t track_index,
+                            std::size_t region_index, std::int64_t frame, float* distance = nullptr) {
+    const float x = frame_to_x(session, view, frame);
+    float best_distance = 0.6f * ImGui::GetFontSize();
+    std::int64_t best = -1;
+    const auto consider = [&](std::int64_t candidate) {
+        const float d = std::fabs(frame_to_x(session, view, candidate) - x);
+        if (d <= best_distance) {
+            best_distance = d;
+            best = candidate;
+        }
+    };
+    consider(0);
+    consider(session.position_frames());
+    for (std::size_t t = 0; t < session.tracks().size(); ++t) {
+        const auto& regions = session.tracks()[t].regions;
+        for (std::size_t r = 0; r < regions.size(); ++r) {
+            if (t == track_index && r == region_index) {
+                continue;
+            }
+            consider(regions[r].start);
+            consider(regions[r].end());
+        }
+    }
+    if (distance != nullptr) {
+        *distance = best_distance;
+    }
+    return best;
+}
+
 // What is under the mouse inside a lane.
 struct Hit {
     DragKind kind = DragKind::None;
@@ -1854,6 +1956,14 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         if (ImGui::MenuItem(T_("Split at the playhead"), key_label(ui, Action::Split), false, can_split)) {
             split_at_playhead(session, ui);
         }
+        if (ImGui::MenuItem(T_("Join with the next region"), key_label(ui, Action::JoinRegions), false,
+                            can_join_next(session, ui))) {
+            join_with_next(session, ui);
+        }
+        if (ImGui::MenuItem(T_("Join all regions of the track"), nullptr, false,
+                            selected_track_has_regions_to_join(session, ui))) {
+            join_selected_track(session, ui);
+        }
         if (ImGui::MenuItem(T_("Remove fades"), nullptr, false,
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
@@ -1872,6 +1982,20 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         };
         const bool moved = ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f);
         const bool region_exists = ui.drag_region < track.regions.size();
+        // A dragged edge sticks to a nearby edge first; otherwise it follows the grid.
+        const auto stuck = [&](std::int64_t frame) {
+            ui.magnet_frame = -1;
+            if (io.KeyAlt) {
+                return frame;
+            }
+            const std::int64_t magnet =
+                nearest_magnet(session, view, track_index, ui.drag_region, frame);
+            if (magnet >= 0) {
+                ui.magnet_frame = magnet;
+                return magnet;
+            }
+            return session.snap_frame(frame);
+        };
         switch (ui.drag) {
             case DragKind::Seek:
                 if (io.MouseDelta.x != 0.0f) {
@@ -1880,20 +2004,42 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                 break;
             case DragKind::Move:
                 if (moved && region_exists) {
-                    session.move_region(track_index, ui.drag_region,
-                                        snapped(mouse_frame - ui.drag_grab));
+                    // Either end of the region may stick; the closer one wins.
+                    const std::int64_t length = track.regions[ui.drag_region].length;
+                    std::int64_t start = mouse_frame - ui.drag_grab;
+                    float start_distance = 0.0f;
+                    float end_distance = 0.0f;
+                    const std::int64_t to_start =
+                        io.KeyAlt ? -1
+                                  : nearest_magnet(session, view, track_index, ui.drag_region,
+                                                   start, &start_distance);
+                    const std::int64_t to_end =
+                        io.KeyAlt ? -1
+                                  : nearest_magnet(session, view, track_index, ui.drag_region,
+                                                   start + length, &end_distance);
+                    ui.magnet_frame = -1;
+                    if (to_start >= 0 && (to_end < 0 || start_distance <= end_distance)) {
+                        start = to_start;
+                        ui.magnet_frame = to_start;
+                    } else if (to_end >= 0 && to_end - length >= 0) {
+                        start = to_end - length;
+                        ui.magnet_frame = to_end;
+                    } else {
+                        start = snapped(start);
+                    }
+                    session.move_region(track_index, ui.drag_region, start);
                 }
                 break;
             case DragKind::TrimStart:
                 if (moved && region_exists) {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                    session.trim_region_start(track_index, ui.drag_region, snapped(mouse_frame));
+                    session.trim_region_start(track_index, ui.drag_region, stuck(mouse_frame));
                 }
                 break;
             case DragKind::TrimEnd:
                 if (moved && region_exists) {
                     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-                    session.trim_region_end(track_index, ui.drag_region, snapped(mouse_frame));
+                    session.trim_region_end(track_index, ui.drag_region, stuck(mouse_frame));
                 }
                 break;
             case DragKind::FadeIn:
@@ -1920,6 +2066,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     }
     if (dragging_here && ImGui::IsItemDeactivated()) {
         ui.drag = DragKind::None;
+        ui.magnet_frame = -1;
     }
 
     // Drawing.
@@ -1985,6 +2132,12 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
             draw_list->AddText(ImVec2(std::max(x0, view.lane_origin_x) + 6.0f, origin.y + 3.0f),
                                IM_COL32(255, 90, 80, 255), T_("Input overloaded"));
         }
+    }
+    // Where a dragged edge sticks, across every lane.
+    if (ui.drag != DragKind::None && ui.magnet_frame >= 0) {
+        const float x = std::floor(frame_to_x(session, view, ui.magnet_frame)) + 0.5f;
+        draw_list->AddLine(ImVec2(x, origin.y), ImVec2(x, corner.y), IM_COL32(255, 215, 60, 230),
+                           2.0f);
     }
     draw_playhead(session, view, draw_list, origin.y, corner.y);
     draw_list->PopClipRect();

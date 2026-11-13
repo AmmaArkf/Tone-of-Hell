@@ -17,6 +17,7 @@ const ActionInfo kActions[kActionCount] = {
     {Action::Metronome, "metronome", "Metronome on or off", "K"},
     {Action::Split, "split", "Split at the playhead", "S"},
     {Action::RemoveRegion, "remove_region", "Remove the selected region", "Delete"},
+    {Action::JoinRegions, "join_regions", "Join with the next region", "J"},
     {Action::Deselect, "deselect", "Deselect", "Escape"},
     {Action::AddFiles, "add_files", "Add audio files", "Ctrl+O"},
     {Action::ZoomIn, "zoom_in", "Zoom in", ""},

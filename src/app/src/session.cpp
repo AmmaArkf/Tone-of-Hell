@@ -424,6 +424,92 @@ bool Session::split_region(std::size_t track, std::size_t region, std::int64_t f
     return true;
 }
 
+bool Session::join_regions(std::size_t track, std::vector<std::size_t> regions,
+                           std::size_t* joined) {
+    if (track >= tracks_.size()) {
+        return false;
+    }
+    std::vector<RegionInfo>& list = tracks_[track].regions;
+    std::sort(regions.begin(), regions.end());
+    regions.erase(std::unique(regions.begin(), regions.end()), regions.end());
+    if (regions.size() < 2 || regions.back() >= list.size()) {
+        return false;
+    }
+
+    // The span that the new region covers, and the regions that give it its outer fades.
+    const RegionInfo* first = &list[regions.front()];
+    const RegionInfo* last = first;
+    for (const std::size_t index : regions) {
+        const RegionInfo& region = list[index];
+        if (region.start < first->start) {
+            first = &region;
+        }
+        if (region.end() > last->end()) {
+            last = &region;
+        }
+    }
+    const std::int64_t begin = first->start;
+    const std::int64_t length = last->end() - begin;
+    if (length <= 0 || length > static_cast<std::int64_t>(config_.sample_rate) * 3600) {
+        return false;
+    }
+
+    const std::size_t channels = config_.channels;
+    auto clip = std::make_shared<core::ClipData>();
+    clip->channels = config_.channels;
+    clip->sample_rate = config_.sample_rate;
+    clip->samples.assign(static_cast<std::size_t>(length) * channels, 0.0f);
+    for (const std::size_t index : regions) {
+        const RegionInfo& region = list[index];
+        // The same fade shapes as the engine uses; the outer fades are kept, not applied.
+        const std::int64_t fade_in = &region == first ? 0 : region.fade_in;
+        const std::int64_t fade_out = &region == last ? 0 : region.fade_out;
+        const float* src =
+            region.source->clip->samples.data() + static_cast<std::size_t>(region.offset) * channels;
+        float* dst = clip->samples.data() + static_cast<std::size_t>(region.start - begin) * channels;
+        for (std::int64_t f = 0; f < region.length; ++f) {
+            float gain = 1.0f;
+            if (f < fade_in) {
+                gain = (static_cast<float>(f) + 0.5f) / static_cast<float>(fade_in);
+            }
+            const std::int64_t remaining = region.length - 1 - f;
+            if (remaining < fade_out) {
+                gain *= (static_cast<float>(remaining) + 0.5f) / static_cast<float>(fade_out);
+            }
+            const std::size_t at = static_cast<std::size_t>(f) * channels;
+            for (std::size_t c = 0; c < channels; ++c) {
+                dst[at + c] += src[at + c] * gain;
+            }
+        }
+    }
+
+    auto source = std::make_shared<Source>();
+    source->name = first->source->name;
+    source->overview = make_overview(*clip);
+    source->clip = std::move(clip);
+
+    RegionInfo merged;
+    merged.source = std::move(source);
+    merged.start = begin;
+    merged.length = length;
+    merged.fade_in = first->fade_in;
+    merged.fade_out = last->fade_out;
+    limit_fades(merged);
+
+    // `first` and `last` point into the list: they are not used after this.
+    const std::size_t position = regions.front();
+    for (auto it = regions.rbegin(); it != regions.rend(); ++it) {
+        list.erase(list.begin() + static_cast<std::ptrdiff_t>(*it));
+    }
+    list.insert(list.begin() + static_cast<std::ptrdiff_t>(position), std::move(merged));
+    if (joined != nullptr) {
+        *joined = position;
+    }
+    sync_track_regions(track);
+    update_length();
+    return true;
+}
+
 bool Session::remove_region(std::size_t track, std::size_t region) {
     if (find_region(track, region) == nullptr) {
         return false;

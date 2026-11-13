@@ -142,6 +142,13 @@ public:
     /// track's region list. Returns false when `frame` is not inside the region.
     bool split_region(std::size_t track, std::size_t region, std::int64_t frame);
     bool remove_region(std::size_t track, std::size_t region);
+    /// Glues regions of one track into a single new region. The audio from the first start to
+    /// the last end becomes a new source: overlaps are mixed, gaps become silence and the fades
+    /// inside are applied, while the outer fade-in and fade-out stay adjustable. The new region
+    /// takes the place of the lowest index; `joined` receives that index. Returns false for
+    /// fewer than two regions, an index that does not exist, or more than an hour of audio.
+    bool join_regions(std::size_t track, std::vector<std::size_t> regions,
+                      std::size_t* joined = nullptr);
 
     // ---- Grid ----------------------------------------------------------------------------
 

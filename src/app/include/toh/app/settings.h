@@ -21,6 +21,7 @@ enum class Action {
     Metronome,
     Split,
     RemoveRegion,
+    JoinRegions,
     Deselect,
     AddFiles,
     ZoomIn,
