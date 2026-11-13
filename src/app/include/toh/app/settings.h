@@ -36,6 +36,9 @@ enum class Action {
     CutTool,
     Undo,
     Redo,
+    Faster,
+    Slower,
+    NormalSpeed,
     Count
 };
 

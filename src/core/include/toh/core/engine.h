@@ -104,6 +104,13 @@ public:
     /// Plays backwards when enabled. While playing, the sound fades out and back in around the
     /// change of direction. Starting backwards from the very beginning starts at the end.
     bool set_reverse(bool reverse);
+    /// Playback speed from kMinSpeed to kMaxSpeed (1 = normal). Like a tape, the pitch
+    /// changes with the speed; frames in between are blended. Recording always runs at the
+    /// normal speed. Any thread; returns false for a value out of range.
+    bool set_speed(double speed) noexcept;
+    double speed() const noexcept { return speed_.load(std::memory_order_relaxed); }
+    static constexpr double kMinSpeed = 0.25;
+    static constexpr double kMaxSpeed = 4.0;
     /// Configures the built-in metronome click, which follows the timeline position.
     /// `bpm` counts quarter notes per minute (20 to 400). The time signature is
     /// `beats_per_bar` / `beat_unit` (for example 6/8); the first beat of every bar sounds
@@ -308,6 +315,8 @@ private:
     Pending pending_ = Pending::None;
     std::int64_t pending_seek_ = 0;
     std::int64_t pos_ = 0;
+    double frac_ = 0.0;  // how far playback is between pos_ and pos_ + 1 (speeds other than 1)
+    std::atomic<double> speed_{1.0};
     bool loop_enabled_ = false;
     std::int64_t loop_start_ = 0;
     std::int64_t loop_end_ = -1;
@@ -338,6 +347,7 @@ private:
     // Work buffers, allocated once in the constructor.
     std::vector<std::int64_t> frame_pos_;  // timeline frame for every output frame, -1 = silence
     std::vector<float> frame_fade_;
+    std::vector<float> frame_frac_;  // for every output frame: the part of the next frame
     std::vector<float> master_mix_;
     std::vector<float> track_mix_;
     std::vector<float> bus_mix_;

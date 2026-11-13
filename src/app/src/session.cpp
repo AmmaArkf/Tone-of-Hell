@@ -1993,6 +1993,14 @@ void Session::set_reverse(bool reverse) {
     }
 }
 
+bool Session::set_speed(double speed) {
+    return engine_.set_speed(std::clamp(speed, core::Engine::kMinSpeed, core::Engine::kMaxSpeed));
+}
+
+void Session::faster() { set_speed(std::round(speed() * 100.0 + 5.0) / 100.0); }
+
+void Session::slower() { set_speed(std::round(speed() * 100.0 - 5.0) / 100.0); }
+
 void Session::toggle_reverse() {
     set_reverse(!reverse_);
     if (reverse_starts_playback_) {

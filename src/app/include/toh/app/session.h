@@ -356,6 +356,12 @@ public:
     bool reverse() const noexcept { return reverse_; }
     /// Plays backwards when enabled.
     void set_reverse(bool reverse);
+    /// Playback speed (0.25 to 4, 1 = normal); the pitch changes with it, like on a tape.
+    double speed() const noexcept { return engine_.speed(); }
+    bool set_speed(double speed);
+    /// 5 % faster or slower, rounded to whole percents.
+    void faster();
+    void slower();
     /// What a "reverse" button does: changes the direction and, when reverse_starts_playback()
     /// is on, makes sure playback is running, starting from the current position.
     void toggle_reverse();

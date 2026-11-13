@@ -218,6 +218,37 @@ TEST_CASE("Metronome is mixed on top of the tracks and ignores the master fader"
     CHECK(peak(out, 26000, 48000) == 0.0f);  // the track is not
 }
 
+TEST_CASE("Playback speed moves the playhead faster or slower and blends frames") {
+    Engine engine(kRate, 1);
+    REQUIRE(engine.set_clip(index_clip(20000)));
+    CHECK(engine.speed() == 1.0);
+    REQUIRE(engine.set_speed(2.0));
+    REQUIRE(engine.play());
+    auto out = render(engine, 1000);
+    CHECK(engine.position_frames() == 2000);
+    CHECK(out[600] == doctest::Approx(1200.0f));
+
+    REQUIRE(engine.set_speed(0.5));
+    out = render(engine, 1000);
+    CHECK(engine.position_frames() == 2500);
+    CHECK(out[0] == doctest::Approx(2000.0f));
+    CHECK(out[1] == doctest::Approx(2000.5f));  // half way between two frames
+
+    CHECK_FALSE(engine.set_speed(0.1));
+    CHECK_FALSE(engine.set_speed(5.0));
+    CHECK(engine.speed() == 0.5);
+
+    toh::app::Session session;
+    CHECK(session.speed() == doctest::Approx(1.0));
+    session.faster();
+    CHECK(session.speed() == doctest::Approx(1.05));
+    session.slower();
+    session.slower();
+    CHECK(session.speed() == doctest::Approx(0.95));
+    CHECK(session.set_speed(10.0));  // limited to the fastest speed
+    CHECK(session.speed() == doctest::Approx(4.0));
+}
+
 TEST_CASE("With the metronome on, playback can go on past the end") {
     for (const bool endless : {true, false}) {
         Engine engine(kRate, 1);

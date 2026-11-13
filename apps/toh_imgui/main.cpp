@@ -972,6 +972,61 @@ void draw_icon_popup(Session& session, UiState& ui, std::size_t track) {
     ImGui::EndPopup();
 }
 
+// ---- Playback speed ----------------------------------------------------------------------
+
+// The speed slider and choices, for menus and popups.
+void draw_speed_items(Session& session, UiState& ui) {
+    const double speed = session.speed();
+    float percent = static_cast<float>(speed * 100.0);
+    ImGui::SetNextItemWidth(14.0f * ImGui::GetFontSize());
+    if (ImGui::SliderFloat("##speed", &percent, 25.0f, 400.0f, T_("Speed: %.0f%%"),
+                           ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp)) {
+        session.set_speed(std::round(percent) / 100.0);
+    }
+    if (double_clicked()) {
+        session.set_speed(1.0);
+    }
+    tooltip(T_("Double-click: back to 100%"));
+    ImGui::Separator();
+    static const int presets[] = {50, 75, 100, 125, 150, 200};
+    for (const int preset : presets) {
+        char label[32];
+        std::snprintf(label, sizeof(label), "%d%%", preset);
+        if (ImGui::MenuItem(label, nullptr, std::lround(speed * 100.0) == preset)) {
+            session.set_speed(preset / 100.0);
+        }
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem(T_("Play faster"), key_label(ui, Action::Faster))) {
+        session.faster();
+    }
+    if (ImGui::MenuItem(T_("Play slower"), key_label(ui, Action::Slower))) {
+        session.slower();
+    }
+    if (ImGui::MenuItem(T_("Normal speed"), key_label(ui, Action::NormalSpeed), false, speed != 1.0)) {
+        session.set_speed(1.0);
+    }
+    ImGui::TextDisabled("%s", T_("The pitch changes with the speed, like on a tape."));
+}
+
+// "Playback" in the right-click menus: speed, play or pause, reverse.
+void draw_playback_menu(Session& session, UiState& ui) {
+    ImGui::Separator();
+    if (ImGui::BeginMenu(T_("Playback"))) {
+        if (ImGui::BeginMenu(T_("Speed"))) {
+            draw_speed_items(session, ui);
+            ImGui::EndMenu();
+        }
+        if (ImGui::MenuItem(T_(session.is_playing() ? "Pause" : "Play"), key_label(ui, Action::PlayPause))) {
+            session.toggle_play();
+        }
+        if (ImGui::MenuItem(T_("Reverse"), key_label(ui, Action::Reverse), session.reverse())) {
+            session.toggle_reverse();
+        }
+        ImGui::EndMenu();
+    }
+}
+
 // ---- Projects ----------------------------------------------------------------------------
 
 // The folder where project dialogs start: the one from the settings, or "Tone of Hell" in the
@@ -1312,6 +1367,15 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
             break;
         case Action::CutTool:
             ui.cut_tool = !ui.cut_tool;
+            break;
+        case Action::Faster:
+            session.faster();
+            break;
+        case Action::Slower:
+            session.slower();
+            break;
+        case Action::NormalSpeed:
+            session.set_speed(1.0);
             break;
         case Action::Undo:
             if (ui.drag == DragKind::None && session.undo()) {
@@ -1787,6 +1851,10 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         if (ImGui::MenuItem(T_("Play only the selected tracks"), nullptr, &selected_only)) {
             set_play_selected_only(session, ui, selected_only);
         }
+        if (ImGui::BeginMenu(T_("Speed"))) {
+            draw_speed_items(session, ui);
+            ImGui::EndMenu();
+        }
         ImGui::Separator();
         if (ImGui::MenuItem(T_(session.is_playing() ? "Pause" : "Play"),
                             key_label(ui, Action::PlayPause))) {
@@ -2018,6 +2086,27 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     // Row 1: transport, metronome, master.
     if (ImGui::Button(T_(session.is_playing() ? "Pause" : "Play"))) {
         session.toggle_play();
+    }
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+        ImGui::OpenPopup("play menu");
+    }
+    tooltip(T_("Right-click: playback speed"));
+    if (ImGui::BeginPopup("play menu")) {
+        ImGui::TextDisabled("%s", T_("Playback"));
+        draw_speed_items(session, ui);
+        ImGui::EndPopup();
+    }
+    if (session.speed() != 1.0) {
+        // The speed stands out while it is not normal; a click returns to normal.
+        ImGui::SameLine();
+        char speed_text[32];
+        std::snprintf(speed_text, sizeof(speed_text), "x%.2f", session.speed());
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.40f, 0.10f, 1.0f));
+        if (ImGui::Button(speed_text)) {
+            session.set_speed(1.0);
+        }
+        ImGui::PopStyleColor();
+        tooltip(T_("Playback speed. Click: back to normal. Right-click Play for more."));
     }
     ImGui::SameLine();
     if (ImGui::Button(T_("Stop"))) {
@@ -2579,6 +2668,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         if (ImGui::MenuItem(T_("Remove the region"), key_label(ui, Action::RemoveRegion), false, region != nullptr)) {
             remove_selected_region(session, ui);
         }
+        draw_playback_menu(session, ui);
         ImGui::EndPopup();
     }
 
@@ -3052,6 +3142,7 @@ void draw_tracks(Session& session, UiState& ui) {
         if (ImGui::MenuItem(T_("New track for recording"))) {
             add_new_track(session, ui, true);
         }
+        draw_playback_menu(session, ui);
         ImGui::EndPopup();
     }
 

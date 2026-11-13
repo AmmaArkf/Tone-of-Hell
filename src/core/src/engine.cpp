@@ -52,6 +52,7 @@ Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
     const std::size_t block_samples = static_cast<std::size_t>(kBlockFrames) * channels_;
     frame_pos_.assign(kBlockFrames, -1);
     frame_fade_.assign(kBlockFrames, 0.0f);
+    frame_frac_.assign(kBlockFrames, 0.0f);
     master_mix_.assign(block_samples, 0.0f);
     track_mix_.assign(block_samples, 0.0f);
     input_frame_.assign(channels_, 0.0f);
@@ -304,6 +305,14 @@ bool Engine::set_input_gain(float linear) {
 bool Engine::start_recording() { return commands_.try_push(Command(CommandType::StartRecording)); }
 
 bool Engine::stop_recording() { return commands_.try_push(Command(CommandType::StopRecording)); }
+
+bool Engine::set_speed(double speed) noexcept {
+    if (!(speed >= kMinSpeed && speed <= kMaxSpeed)) {
+        return false;
+    }
+    speed_.store(speed, std::memory_order_relaxed);
+    return true;
+}
 
 std::size_t Engine::read_recorded(float* destination, std::size_t max_frames) {
     // The audio thread writes whole frames, so the amount read is always a whole number of them.
@@ -575,9 +584,15 @@ bool Engine::loop_region(std::int64_t& start, std::int64_t& end) const noexcept 
 bool Engine::run_transport(std::uint32_t frames, std::int64_t begin_pos, std::int64_t end_pos,
                            bool looping) noexcept {
     bool audible = false;
+    // Recording keeps the normal speed, so the take lines up with the timeline.
+    const double speed = record_armed_ ? 1.0 : speed_.load(std::memory_order_relaxed);
+    if (record_armed_) {
+        frac_ = 0.0;
+    }
     for (std::uint32_t i = 0; i < frames; ++i) {
         frame_pos_[i] = -1;
         frame_fade_[i] = 0.0f;
+        frame_frac_[i] = 0.0f;
 
         if (state_ == State::Stopped) {
             continue;
@@ -620,12 +635,23 @@ bool Engine::run_transport(std::uint32_t frames, std::int64_t begin_pos, std::in
             fade_ = std::min(1.0f, fade_ + fade_step_);
         }
 
+        // The playhead moves `speed` frames per output frame. At speed 1 this is exactly one.
         if (reverse_) {
-            --pos_;
+            frac_ -= speed;
+            while (frac_ < 0.0) {
+                --pos_;
+                frac_ += 1.0;
+            }
             frame_pos_[i] = pos_;
+            frame_frac_[i] = static_cast<float>(frac_);
         } else {
             frame_pos_[i] = pos_;
-            ++pos_;
+            frame_frac_[i] = static_cast<float>(frac_);
+            frac_ += speed;
+            while (frac_ >= 1.0) {
+                ++pos_;
+                frac_ -= 1.0;
+            }
         }
         frame_fade_[i] = fade_;
         audible = true;
@@ -778,6 +804,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 const float* clip_samples = region.clip->samples.data();
                 PagedFile* const disk = region.clip->disk.get();
                 std::array<float, 16> from_disk{};
+                std::array<float, 16> from_disk_next{};
                 for (std::uint32_t i = 0; i < frames; ++i) {
                     const std::int64_t position = frame_pos_[i];
                     if (position < begin || position >= end) {
@@ -811,9 +838,32 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                     } else {
                         src = clip_samples + static_cast<std::size_t>(region.offset + into) * channels;
                     }
+                    // Between two frames (playback faster or slower than normal): blend them.
+                    const float frac = frame_frac_[i];
+                    const float* next = nullptr;
+                    if (frac > 0.0f && into + 1 < region.length) {
+                        if (disk != nullptr) {
+                            const std::int64_t frame = region.offset + into + 1;
+                            const bool read =
+                                blocking_reads_
+                                    ? disk->read_frame_blocking(frame, from_disk_next.data())
+                                    : disk->read_frame(frame, from_disk_next.data());
+                            if (read) {
+                                next = from_disk_next.data();
+                            }
+                        } else {
+                            next = src + channels;
+                        }
+                    }
                     float* dst = scratch + static_cast<std::size_t>(i) * channels;
-                    for (std::size_t c = 0; c < channels; ++c) {
-                        dst[c] += src[c] * region_fade;
+                    if (next != nullptr) {
+                        for (std::size_t c = 0; c < channels; ++c) {
+                            dst[c] += (src[c] + (next[c] - src[c]) * frac) * region_fade;
+                        }
+                    } else {
+                        for (std::size_t c = 0; c < channels; ++c) {
+                            dst[c] += src[c] * region_fade;
+                        }
                     }
                 }
             }

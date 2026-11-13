@@ -32,6 +32,9 @@ const ActionInfo kActions[kActionCount] = {
     {Action::CutTool, "cut_tool", "Scissors on or off", "C"},
     {Action::Undo, "undo", "Undo", "Ctrl+Z"},
     {Action::Redo, "redo", "Redo", "Ctrl+Y"},
+    {Action::Faster, "faster", "Play faster", "Ctrl+UpArrow"},
+    {Action::Slower, "slower", "Play slower", "Ctrl+DownArrow"},
+    {Action::NormalSpeed, "normal_speed", "Normal speed", "Ctrl+0"},
 };
 
 std::string trimmed(const std::string& text) {
