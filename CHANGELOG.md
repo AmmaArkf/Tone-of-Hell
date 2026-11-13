@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.10
+
+- Tracks can be renamed: double-click the name of a track.
+- Every track has a picture on the left of its controls. Click it to choose one of ten built-in pictures (voice, guitar, bass, drums, keys, synth, strings, brass, sample, other) or your own PNG or BMP image.
+
 ## 0.0.9
 
 - Empty tracks for recording: right-click empty space in the track area (below the tracks, an empty part of a lane or of a track header) and choose "New track" or "New track for recording", which also arms it. The same is in the Edit menu, Ctrl+T adds a track, and an empty project shows a button for it.

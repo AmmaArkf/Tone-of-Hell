@@ -152,3 +152,22 @@ TEST_CASE("Session adds empty tracks that can be recorded onto") {
     }
     CHECK(session.add_empty_track("one too many") == session.tracks().size());
 }
+
+TEST_CASE("Session renames tracks and gives them pictures") {
+    Session session;
+    session.add_empty_track("Track 1");
+    REQUIRE(session.set_track_name(0, "  \xD0\x93\xD0\xB8\xD1\x82\xD0\xB0\xD1\x80\xD0\xB0 solo \t"));
+    CHECK(session.tracks()[0].name == "\xD0\x93\xD0\xB8\xD1\x82\xD0\xB0\xD1\x80\xD0\xB0 solo");
+    CHECK_FALSE(session.set_track_name(0, "   "));
+    CHECK(session.tracks()[0].name == "\xD0\x93\xD0\xB8\xD1\x82\xD0\xB0\xD1\x80\xD0\xB0 solo");
+    CHECK_FALSE(session.set_track_name(1, "No such track"));
+
+    CHECK(session.tracks()[0].icon.empty());
+    REQUIRE(session.set_track_icon(0, "guitar"));
+    CHECK(session.tracks()[0].icon == "guitar");
+    REQUIRE(session.set_track_icon(0, "file:C:/Pictures/\xD0\xB3\xD0\xB8\xD1\x82\xD0\xB0\xD1\x80\xD0\xB0.png"));
+    CHECK(session.tracks()[0].icon.rfind("file:", 0) == 0);
+    REQUIRE(session.set_track_icon(0, ""));
+    CHECK(session.tracks()[0].icon.empty());
+    CHECK_FALSE(session.set_track_icon(5, "drums"));
+}

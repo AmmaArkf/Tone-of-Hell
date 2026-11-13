@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <map>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -98,6 +99,27 @@ void SDLCALL export_dialog_callback(void* user_data, const char* const* file_lis
     wake_main_loop();
 }
 
+// A picture chosen in the "track picture" file dialog, waiting to be applied by the main loop.
+struct PendingIcon {
+    std::mutex mutex;
+    bool ready = false;
+    std::size_t track = 0;
+    std::string path;  // UTF-8
+};
+
+void SDLCALL icon_dialog_callback(void* user_data, const char* const* file_list, int /*filter*/) {
+    auto* request = static_cast<PendingIcon*>(user_data);
+    if (file_list == nullptr || file_list[0] == nullptr) {
+        return;  // the dialog failed or was cancelled
+    }
+    {
+        const std::lock_guard<std::mutex> lock(request->mutex);
+        request->path = file_list[0];
+        request->ready = true;
+    }
+    wake_main_loop();
+}
+
 // Which part of the timeline is visible.
 struct View {
     double pixels_per_second = 100.0;
@@ -138,6 +160,15 @@ struct UiState {
     toh::audio::DeviceList devices;
     bool devices_listed = false;
     bool open_track_menu = false;  // open the "add a track" menu in the track area
+
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    PendingIcon icon_request;
+    std::map<std::string, SDL_Texture*> textures;  // track pictures from files; null if unreadable
+
+    bool rename_open = false;  // open the rename box for rename_track
+    std::size_t rename_track = 0;
+    char rename_buffer[256] = {};
     bool armed = false;            // a track is chosen to record onto
     std::size_t armed_track = 0;
     bool show_help = false;
@@ -491,6 +522,272 @@ void add_new_track(Session& session, UiState& ui, bool arm) {
         ui.armed = true;
         ui.armed_track = index;
     }
+}
+
+// ---- Track pictures ----------------------------------------------------------------------
+
+namespace icons {
+
+constexpr ImU32 kInk = IM_COL32(245, 245, 250, 255);
+constexpr ImU32 kShade = IM_COL32(0, 0, 0, 90);
+constexpr float kPi = 3.14159265f;
+
+// Maps (0..1, 0..1) inside the picture's square to the screen.
+struct Frame {
+    ImVec2 origin;
+    float size;
+    ImVec2 operator()(float u, float v) const {
+        return ImVec2(origin.x + u * size, origin.y + v * size);
+    }
+};
+
+void voice(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    d->AddRectFilled(P(0.38f, 0.12f), P(0.62f, 0.52f), kInk, 0.12f * s);
+    d->PathArcTo(P(0.5f, 0.42f), 0.2f * s, 0.0f, kPi, 16);
+    d->PathStroke(kInk, ImDrawFlags_None, 0.05f * s);
+    d->AddLine(P(0.5f, 0.62f), P(0.5f, 0.8f), kInk, 0.05f * s);
+    d->AddLine(P(0.34f, 0.82f), P(0.66f, 0.82f), kInk, 0.05f * s);
+}
+
+void guitar(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    d->AddLine(P(0.48f, 0.5f), P(0.8f, 0.14f), kInk, 0.07f * s);
+    d->AddRectFilled(P(0.76f, 0.06f), P(0.9f, 0.18f), kInk, 0.03f * s);
+    d->AddCircleFilled(P(0.36f, 0.68f), 0.2f * s, kInk);
+    d->AddCircleFilled(P(0.5f, 0.52f), 0.14f * s, kInk);
+    d->AddCircleFilled(P(0.42f, 0.6f), 0.055f * s, kShade);
+}
+
+void bass(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    d->AddLine(P(0.46f, 0.56f), P(0.86f, 0.1f), kInk, 0.06f * s);
+    d->AddRectFilled(P(0.82f, 0.03f), P(0.94f, 0.14f), kInk, 0.03f * s);
+    d->AddEllipseFilled(P(0.34f, 0.7f), ImVec2(0.17f * s, 0.15f * s), kInk);
+    d->AddEllipseFilled(P(0.46f, 0.56f), ImVec2(0.12f * s, 0.1f * s), kInk);
+    d->AddLine(P(0.27f, 0.64f), P(0.39f, 0.76f), kShade, 0.04f * s);
+}
+
+void drums(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    d->AddRectFilled(P(0.2f, 0.5f), P(0.8f, 0.78f), kInk);
+    d->AddEllipseFilled(P(0.5f, 0.78f), ImVec2(0.3f * s, 0.08f * s), kInk);
+    d->AddEllipseFilled(P(0.5f, 0.5f), ImVec2(0.3f * s, 0.08f * s), kInk);
+    d->AddEllipse(P(0.5f, 0.5f), ImVec2(0.3f * s, 0.08f * s), kShade, 0.0f, 0, 0.03f * s);
+    for (const float u : {0.3f, 0.5f, 0.7f}) {
+        d->AddLine(P(u, 0.6f), P(u, 0.82f), kShade, 0.025f * s);
+    }
+    d->AddLine(P(0.22f, 0.12f), P(0.56f, 0.44f), kInk, 0.045f * s);
+    d->AddLine(P(0.78f, 0.12f), P(0.44f, 0.44f), kInk, 0.045f * s);
+}
+
+void keys(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    const float left = 0.12f;
+    const float right = 0.88f;
+    const float top = 0.28f;
+    const float bottom = 0.74f;
+    const float key = (right - left) / 7.0f;
+    d->AddRectFilled(P(left, top), P(right, bottom), kInk, 0.03f * s);
+    for (int k = 1; k < 7; ++k) {
+        const float x = left + key * static_cast<float>(k);
+        d->AddLine(P(x, top), P(x, bottom), kShade, 0.02f * s);
+    }
+    for (const int k : {1, 2, 4, 5, 6}) {
+        const float x = left + key * static_cast<float>(k);
+        d->AddRectFilled(P(x - key * 0.3f, top), P(x + key * 0.3f, top + (bottom - top) * 0.6f),
+                         IM_COL32(30, 30, 36, 255));
+    }
+}
+
+void synth(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    d->AddRect(P(0.1f, 0.24f), P(0.9f, 0.8f), kInk, 0.06f * s, 0, 0.045f * s);
+    ImVec2 wave[25];
+    for (int k = 0; k < 25; ++k) {
+        const float t = static_cast<float>(k) / 24.0f;
+        wave[k] = P(0.18f + 0.64f * t, 0.44f - 0.1f * std::sin(t * 3.0f * kPi));
+    }
+    d->AddPolyline(wave, 25, kInk, ImDrawFlags_None, 0.04f * s);
+    for (const float u : {0.3f, 0.5f, 0.7f}) {
+        d->AddCircleFilled(P(u, 0.66f), 0.045f * s, kInk);
+    }
+}
+
+void strings(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    d->AddLine(P(0.5f, 0.32f), P(0.5f, 0.1f), kInk, 0.05f * s);
+    d->AddCircleFilled(P(0.5f, 0.08f), 0.04f * s, kInk);
+    d->AddEllipseFilled(P(0.5f, 0.42f), ImVec2(0.13f * s, 0.11f * s), kInk);
+    d->AddEllipseFilled(P(0.5f, 0.66f), ImVec2(0.17f * s, 0.15f * s), kInk);
+    d->AddLine(P(0.44f, 0.56f), P(0.44f, 0.68f), kShade, 0.02f * s);
+    d->AddLine(P(0.56f, 0.56f), P(0.56f, 0.68f), kShade, 0.02f * s);
+    d->AddLine(P(0.12f, 0.86f), P(0.88f, 0.3f), IM_COL32(40, 30, 25, 230), 0.03f * s);
+}
+
+void brass(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    d->AddRectFilled(P(0.08f, 0.47f), P(0.14f, 0.57f), kInk);
+    d->AddLine(P(0.12f, 0.52f), P(0.62f, 0.52f), kInk, 0.06f * s);
+    d->AddLine(P(0.24f, 0.52f), P(0.24f, 0.66f), kInk, 0.05f * s);
+    d->AddLine(P(0.24f, 0.66f), P(0.6f, 0.66f), kInk, 0.05f * s);
+    d->AddTriangleFilled(P(0.58f, 0.52f), P(0.9f, 0.3f), P(0.9f, 0.74f), kInk);
+    for (const float u : {0.34f, 0.42f, 0.5f}) {
+        d->AddRectFilled(P(u - 0.025f, 0.34f), P(u + 0.025f, 0.5f), kInk);
+    }
+}
+
+void sample(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    static const float heights[] = {0.1f, 0.25f, 0.38f, 0.3f, 0.15f, 0.34f, 0.27f, 0.12f, 0.2f, 0.08f};
+    for (int k = 0; k < 10; ++k) {
+        const float u = 0.16f + 0.075f * static_cast<float>(k);
+        d->AddLine(P(u, 0.5f - heights[k]), P(u, 0.5f + heights[k]), kInk, 0.045f * s);
+    }
+}
+
+void other(ImDrawList* d, ImVec2 o, float s) {
+    const Frame P{o, s};
+    d->AddEllipseFilled(P(0.4f, 0.72f), ImVec2(0.13f * s, 0.09f * s), kInk, -0.4f);
+    d->AddLine(P(0.52f, 0.7f), P(0.52f, 0.16f), kInk, 0.05f * s);
+    d->AddBezierCubic(P(0.52f, 0.16f), P(0.62f, 0.24f), P(0.72f, 0.3f), P(0.66f, 0.46f), kInk,
+                      0.05f * s);
+}
+
+struct Builtin {
+    const char* id;    // stored in TrackInfo::icon
+    const char* name;  // shown to the user (translated)
+    ImU32 colour;      // background
+    void (*draw)(ImDrawList*, ImVec2, float);
+};
+
+const Builtin kBuiltins[] = {
+    {"voice", "Voice", IM_COL32(170, 60, 90, 255), &voice},
+    {"guitar", "Guitar", IM_COL32(200, 110, 40, 255), &guitar},
+    {"bass", "Bass", IM_COL32(150, 50, 40, 255), &bass},
+    {"drums", "Drums", IM_COL32(60, 110, 170, 255), &drums},
+    {"keys", "Keys", IM_COL32(90, 70, 150, 255), &keys},
+    {"synth", "Synth", IM_COL32(40, 140, 130, 255), &synth},
+    {"strings", "Strings", IM_COL32(140, 90, 50, 255), &strings},
+    {"brass", "Brass", IM_COL32(180, 150, 40, 255), &brass},
+    {"sample", "Sample", IM_COL32(70, 130, 70, 255), &sample},
+    {"other", "Other", IM_COL32(90, 95, 110, 255), &other},
+};
+
+const Builtin* find(const std::string& id) {
+    for (const Builtin& builtin : kBuiltins) {
+        if (id == builtin.id) {
+            return &builtin;
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace icons
+
+// The texture of a picture file, loaded once. Null when the file cannot be read.
+SDL_Texture* texture_for(UiState& ui, const std::string& path) {
+    const auto found = ui.textures.find(path);
+    if (found != ui.textures.end()) {
+        return found->second;
+    }
+    SDL_Texture* texture = nullptr;
+    if (ui.renderer != nullptr) {
+        if (SDL_Surface* surface = SDL_LoadSurface(path.c_str())) {  // PNG or BMP, UTF-8 path
+            texture = SDL_CreateTextureFromSurface(ui.renderer, surface);
+            SDL_DestroySurface(surface);
+        }
+    }
+    ui.textures[path] = texture;
+    return texture;
+}
+
+// Draws a track picture into a square: a built-in drawing, an image file, or an empty frame.
+void draw_track_icon(UiState& ui, const std::string& icon, ImVec2 origin, float size, bool hovered) {
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const ImVec2 corner(origin.x + size, origin.y + size);
+    const float rounding = 0.14f * size;
+    const icons::Builtin* builtin = icons::find(icon);
+    d->AddRectFilled(origin, corner, builtin != nullptr ? builtin->colour : IM_COL32(44, 47, 54, 255),
+                     rounding);
+
+    if (builtin != nullptr) {
+        builtin->draw(d, origin, size);
+    } else if (icon.rfind("file:", 0) == 0) {
+        SDL_Texture* texture = texture_for(ui, icon.substr(5));
+        float width = 0.0f;
+        float height = 0.0f;
+        if (texture != nullptr && SDL_GetTextureSize(texture, &width, &height) && width > 0.0f &&
+            height > 0.0f) {
+            const float scale = std::min(size / width, size / height);
+            const ImVec2 middle(origin.x + size * 0.5f, origin.y + size * 0.5f);
+            const ImVec2 half(width * scale * 0.5f, height * scale * 0.5f);
+            d->AddImage(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(texture)),
+                        ImVec2(middle.x - half.x, middle.y - half.y),
+                        ImVec2(middle.x + half.x, middle.y + half.y));
+        } else {
+            const ImVec2 text = ImGui::CalcTextSize("?");
+            d->AddText(ImVec2(origin.x + (size - text.x) * 0.5f, origin.y + (size - text.y) * 0.5f),
+                       IM_COL32(220, 120, 110, 255), "?");
+        }
+    } else {
+        // No picture yet: a faint "+" invites to choose one.
+        const icons::Frame P{origin, size};
+        d->AddLine(P(0.5f, 0.38f), P(0.5f, 0.62f), IM_COL32(150, 155, 170, 140), 0.04f * size);
+        d->AddLine(P(0.38f, 0.5f), P(0.62f, 0.5f), IM_COL32(150, 155, 170, 140), 0.04f * size);
+    }
+    if (hovered) {
+        d->AddRect(origin, corner, IM_COL32(220, 230, 255, 220), rounding, 0, 2.0f);
+    }
+}
+
+void open_icon_dialog(UiState& ui, std::size_t track) {
+    {
+        const std::lock_guard<std::mutex> lock(ui.icon_request.mutex);
+        ui.icon_request.track = track;
+        ui.icon_request.ready = false;
+    }
+    static const SDL_DialogFileFilter filters[] = {{"Images", "png;bmp"}};
+    SDL_ShowOpenFileDialog(&icon_dialog_callback, &ui.icon_request, ui.window, filters, 1, nullptr,
+                           false);
+}
+
+// The popup that chooses the picture of a track.
+void draw_icon_popup(Session& session, UiState& ui, std::size_t track) {
+    if (!ImGui::BeginPopup("track icon")) {
+        return;
+    }
+    ImGui::TextUnformatted(T_("Track picture"));
+    const float size = 3.0f * ImGui::GetFontSize();
+    int column = 0;
+    for (const icons::Builtin& builtin : icons::kBuiltins) {
+        ImGui::PushID(builtin.id);
+        if (column % 5 != 0) {
+            ImGui::SameLine();
+        }
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("##picture", ImVec2(size, size))) {
+            session.set_track_icon(track, builtin.id);
+            ImGui::CloseCurrentPopup();
+        }
+        const bool hovered = ImGui::IsItemHovered();
+        tooltip(T_(builtin.name));
+        draw_track_icon(ui, builtin.id, origin, size, hovered);
+        ImGui::PopID();
+        ++column;
+    }
+    ImGui::Separator();
+    if (ImGui::Button(T_("Choose an image..."))) {
+        open_icon_dialog(ui, track);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(T_("No picture"))) {
+        session.set_track_icon(track, "");
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::TextDisabled("%s", T_("PNG or BMP. The picture is scaled to fit."));
+    ImGui::EndPopup();
 }
 
 void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Window* window,
@@ -950,6 +1247,8 @@ void draw_dialogs(UiState& ui) {
                 {"Click the ruler or an empty lane", "Move the playhead"},
                 {"Double-click a slider", "Back to its normal value"},
                 {"Right-click empty track space", "Menu: add a track"},
+                {"Double-click a track name", "Rename the track"},
+                {"Click the picture of a track", "Choose a picture for it"},
             };
             if (ImGui::BeginTable("shortcuts", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV)) {
                 // The keyboard shortcuts as they are set right now, then the fixed mouse actions.
@@ -1700,6 +1999,20 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
 
     ImGui::BeginChild("header", ImVec2(header_width, row_height), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_NoScrollbar);
+
+    // The picture on the left of the controls: click it to choose another.
+    const float icon_size = row_height - 2.0f * ImGui::GetStyle().WindowPadding.y - 2.0f;
+    const ImVec2 icon_origin = ImGui::GetCursorScreenPos();
+    if (ImGui::InvisibleButton("icon", ImVec2(icon_size, icon_size))) {
+        ImGui::OpenPopup("track icon");
+    }
+    const bool icon_hovered = ImGui::IsItemHovered();
+    tooltip(T_("Click to choose a picture for this track"));
+    draw_track_icon(ui, track.icon, icon_origin, icon_size, icon_hovered);
+    draw_icon_popup(session, ui, i);
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    const float group_x = ImGui::GetCursorPosX();  // SameLine positions are relative to this
     if (toggle_button(T_("M"), track.mute, ImVec4(0.75f, 0.55f, 0.15f, 1.0f))) {
         session.set_track_mute(i, !track.mute);
     }
@@ -1727,9 +2040,16 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     const std::string title = std::to_string(i + 1) + ". " + track.name;
     const float title_width = remove_x - ImGui::GetCursorPosX() - style.ItemSpacing.x;
     ImGui::TextUnformatted(fit_text(title, title_width).c_str());
-    tooltip(title.c_str());
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::SetTooltip(T_("%s\n(double-click to rename)"), title.c_str());
+    }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        ui.rename_open = true;
+        ui.rename_track = i;
+        std::snprintf(ui.rename_buffer, sizeof(ui.rename_buffer), "%s", track.name.c_str());
+    }
 
-    ImGui::SameLine(remove_x);
+    ImGui::SameLine(remove_x - group_x);
     if (ImGui::SmallButton(T_("X"))) {
         ImGui::OpenPopup("remove track");
     }
@@ -1748,7 +2068,7 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     }
 
     // The name and the value are written on the sliders, like on the master slider.
-    const float slider_width = header_width - 2.0f * font;
+    const float slider_width = ImGui::GetContentRegionAvail().x - 0.25f * font;
     float volume = track.gain * 100.0f;
     ImGui::SetNextItemWidth(slider_width);
     if (ImGui::SliderFloat("##gain", &volume, 0.0f, 200.0f, T_("Volume: %.0f%%"),
@@ -1780,6 +2100,32 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     tooltip(T_("Double-click: back to the centre"));
 
     draw_meter(session.track_peak(i), slider_width, 0.75f * font);
+    ImGui::EndGroup();
+
+    // The box that renames the track.
+    if (ui.rename_open && ui.rename_track == i) {
+        ImGui::OpenPopup("rename track");
+        ui.rename_open = false;
+    }
+    if (ImGui::BeginPopup("rename track")) {
+        ImGui::TextUnformatted(T_("Track name"));
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::SetNextItemWidth(16.0f * font);
+        const bool entered = ImGui::InputText(
+            "##name", ui.rename_buffer, sizeof(ui.rename_buffer),
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        if (entered || ImGui::Button(T_("OK"))) {
+            session.set_track_name(i, ui.rename_buffer);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T_("Cancel"))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
     if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         ui.open_track_menu = true;  // empty part of the track header
@@ -1792,7 +2138,7 @@ void draw_tracks(Session& session, UiState& ui) {
     View& view = ui.view;
     const ImGuiIO& io = ImGui::GetIO();
     const float font = ImGui::GetFontSize();
-    const float header_width = 17.0f * font;
+    const float header_width = 22.5f * font;
     const float row_height = 6.2f * font;
 
     // Mouse wheel over the timeline: Ctrl zooms around the mouse, Shift scrolls sideways.
@@ -2084,6 +2430,8 @@ int main(int argc, char* argv[]) {
             SDL_free(folder);
             ui.settings.load(ui.settings_path);
         }
+        ui.window = window;
+        ui.renderer = renderer;
         toh::app::set_language(ui.settings.language);
         session.set_devices(ui.settings.output_device, ui.settings.input_device);
         session.set_master_gain(ui.settings.master_gain);
@@ -2165,6 +2513,14 @@ int main(int argc, char* argv[]) {
                     }
                 }
             }
+            // A picture file arrived from the "track picture" dialog.
+            {
+                const std::lock_guard<std::mutex> lock(ui.icon_request.mutex);
+                if (ui.icon_request.ready) {
+                    session.set_track_icon(ui.icon_request.track, "file:" + ui.icon_request.path);
+                    ui.icon_request.ready = false;
+                }
+            }
             session.update();
 
             ImGui_ImplSDLRenderer3_NewFrame();
@@ -2212,6 +2568,11 @@ int main(int argc, char* argv[]) {
         }
 
         save_settings(session, ui);
+        for (const auto& entry : ui.textures) {
+            if (entry.second != nullptr) {
+                SDL_DestroyTexture(entry.second);
+            }
+        }
     }  // the session (and the audio device) is closed here, before the window goes away
 
     ImGui_ImplSDLRenderer3_Shutdown();

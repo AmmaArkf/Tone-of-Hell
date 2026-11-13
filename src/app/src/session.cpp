@@ -316,6 +316,24 @@ bool Session::set_track_solo(std::size_t index, bool solo) {
     return true;
 }
 
+bool Session::set_track_name(std::size_t index, const std::string& name) {
+    const char* const blanks = " \t\r\n";
+    const std::size_t first = name.find_first_not_of(blanks);
+    if (index >= tracks_.size() || first == std::string::npos) {
+        return false;
+    }
+    tracks_[index].name = name.substr(first, name.find_last_not_of(blanks) - first + 1);
+    return true;
+}
+
+bool Session::set_track_icon(std::size_t index, std::string icon) {
+    if (index >= tracks_.size()) {
+        return false;
+    }
+    tracks_[index].icon = std::move(icon);
+    return true;
+}
+
 float Session::track_peak(std::size_t index) const noexcept {
     return index < tracks_.size() ? engine_.track_peak(static_cast<std::uint32_t>(index)) : 0.0f;
 }

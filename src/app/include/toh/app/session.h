@@ -57,6 +57,9 @@ struct RegionInfo {
 /// What a user interface needs to know about one track.
 struct TrackInfo {
     std::string name;  // UTF-8
+    /// The picture shown next to the track: empty for none, the name of a built-in picture
+    /// (for example "guitar"), or "file:" followed by the path of an image file (UTF-8).
+    std::string icon;
     std::vector<RegionInfo> regions;  // in the order they were created
     float gain = 1.0f;
     float pan = 0.0f;
@@ -117,6 +120,10 @@ public:
     bool set_track_pan(std::size_t index, float pan);
     bool set_track_mute(std::size_t index, bool mute);
     bool set_track_solo(std::size_t index, bool solo);
+    /// Renames a track. Spaces at either end are removed; an empty name is refused.
+    bool set_track_name(std::size_t index, const std::string& name);
+    /// Sets the picture of a track (see TrackInfo::icon).
+    bool set_track_icon(std::size_t index, std::string icon);
     float track_peak(std::size_t index) const noexcept;
 
     // ---- Regions -------------------------------------------------------------------------
