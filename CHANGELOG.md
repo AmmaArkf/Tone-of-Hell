@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.9
+
+- Note (MIDI) regions can be made longer: drag either edge of the region further out than its notes went, or use + bar and - bar in the piano roll. The notes stay where they are.
+- Scrolling by itself: while a part of the tracks is selected, or notes are dragged or selected with a box in the piano roll, the view moves on when the mouse comes near or beyond its edge, faster the further out.
+
 ## 0.2.8
 
 - Piano roll: dragging on an empty place draws a box that selects the notes it touches; with Ctrl they are added to the selection. The selected notes then move together.

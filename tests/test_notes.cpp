@@ -167,6 +167,25 @@ TEST_CASE("Exports include the instruments") {
     std::filesystem::remove(file);
 }
 
+TEST_CASE("Note regions can be made longer at both ends") {
+    Session session;
+    session.add_instrument_track("Long", Instrument::Keys, kRate, kRate);
+    REQUIRE(session.set_region_notes(0, 0, {toh::core::Note{100, 200, 60, 0.8f}}));
+    REQUIRE(session.trim_region_end(0, 0, 4 * kRate));
+    const auto& region = session.tracks()[0].regions[0];
+    CHECK(region.end() == 4 * kRate);
+    CHECK(region.source->clip->frames() >= 3 * kRate);
+
+    REQUIRE(session.trim_region_start(0, 0, kRate / 2));
+    const auto& longer = session.tracks()[0].regions[0];
+    CHECK(longer.start == kRate / 2);
+    CHECK(longer.end() == 4 * kRate);
+    // The note stays at the same place on the timeline.
+    const auto& notes = longer.source->clip->notes->notes;
+    REQUIRE(notes.size() == 1);
+    CHECK(longer.start + (notes[0].start - longer.offset) == kRate + 100);
+}
+
 TEST_CASE("Live notes sound while stopped and end after their release") {
     Session session;
     session.add_instrument_track("Live", Instrument::Organ, 0, kRate);

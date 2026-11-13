@@ -3024,6 +3024,23 @@ std::size_t lane_under(const UiState& ui, float y, std::size_t count) {
 // The strip along the top of a region that shows its name; dragging it moves the region.
 float region_header_height() { return ImGui::GetFontSize() + 4.0f; }
 
+// How far to scroll in this frame while a drag holds the mouse near or beyond an edge of
+// [low, high]: nothing inside, faster the further out (negative: towards `low`).
+float edge_scroll(float mouse, float low, float high) {
+    const float margin = 1.5f * ImGui::GetFontSize();
+    float distance = 0.0f;
+    if (mouse > high - margin) {
+        distance = mouse - (high - margin);
+    } else if (mouse < low + margin) {
+        distance = mouse - (low + margin);
+    } else {
+        return 0.0f;
+    }
+    distance = std::clamp(distance, -300.0f, 300.0f);
+    const float push = distance + (distance > 0.0f ? 30.0f : -30.0f);
+    return push * 8.0f * ImGui::GetIO().DeltaTime;
+}
+
 // The frame under x for an edge of a selected part. With the magnet on it sticks to grid
 // lines, region edges of `track` and the playhead nearby (Alt: no sticking).
 std::int64_t range_frame(const Session& session, const UiState& ui, float x, std::size_t track) {
@@ -3490,6 +3507,18 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                     if (ui.has_range) {
                         ui.selected = false;
                     }
+                    // Near an edge the view moves on by itself, so the selection can grow.
+                    const float dx = edge_scroll(io.MousePos.x, ui.view.lane_origin_x,
+                                                 ui.view.lane_origin_x + ui.view.lane_width);
+                    if (dx != 0.0f) {
+                        ui.view.start_seconds = std::max(
+                            ui.view.start_seconds + static_cast<double>(dx) / ui.view.pixels_per_second, 0.0);
+                    }
+                    const float dy = edge_scroll(io.MousePos.y, ImGui::GetWindowPos().y,
+                                                 ImGui::GetWindowPos().y + ImGui::GetWindowHeight());
+                    if (dy != 0.0f) {
+                        ImGui::SetScrollY(ImGui::GetScrollY() + dy);
+                    }
                 }
                 break;
             case DragKind::Move:
@@ -3922,7 +3951,7 @@ void draw_piano_roll(Session& session, UiState& ui) {
         }
         ui.roll_source = source_id;
     }
-    const std::int64_t frames = region->source->clip->frames();
+    std::int64_t frames = region->source->clip->frames();
     const double beat = std::max(session.beat_frames(), 1.0);
     const double step = std::max(grid_step_frames(session), 1.0);
     if (ui.roll_last_length <= 0) {
@@ -3936,6 +3965,23 @@ void draw_piano_roll(Session& session, UiState& ui) {
     if (ImGui::Button("+##roll zoom")) {
         ui.roll_beat_px = std::min(ui.roll_beat_px * 1.5f, 600.0f);
     }
+    ImGui::SameLine();
+    // Longer or shorter by a bar (the edges of the region on its track can be dragged, too).
+    const auto refresh_frames = [&]() { frames = session.tracks()[ui.roll_track].regions[ui.roll_region].source->clip->frames(); };
+    if (ImGui::Button(T_("+ bar"))) {
+        session.trim_region_end(ui.roll_track, ui.roll_region,
+                                region->end() + std::llround(session.bar_frames()));
+    }
+    tooltip(T_("Make the region a bar longer. Its edges on the track can be dragged further out, too."));
+    ImGui::SameLine();
+    if (ImGui::Button(T_("- bar"))) {
+        session.trim_region_end(ui.roll_track, ui.roll_region,
+                                region->end() - std::llround(session.bar_frames()));
+    }
+    tooltip(T_("Make the region a bar shorter (the notes after its end are kept, but not heard)."));
+    // The buttons may have given the region a new source: look it up again.
+    region = &session.tracks()[ui.roll_track].regions[ui.roll_region];
+    refresh_frames();
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::Text(T_("Notes: %d"), static_cast<int>(ui.roll_notes.size()));
@@ -4159,6 +4205,20 @@ void draw_piano_roll(Session& session, UiState& ui) {
         if (differs) {
             ui.roll_notes = std::move(moved);
             changed = true;
+        }
+    }
+    // While notes are dragged or a box is drawn, the canvas scrolls on by itself near its edges.
+    if ((ui.roll_mode == 1 || ui.roll_mode == 2 || ui.roll_mode == 5) && active &&
+        ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) {
+        const ImVec2 window_pos = ImGui::GetWindowPos();
+        const ImVec2 window_size = ImGui::GetWindowSize();
+        const float dx = edge_scroll(io.MousePos.x, window_pos.x + keys_w, window_pos.x + window_size.x);
+        const float dy = edge_scroll(io.MousePos.y, window_pos.y + ruler_h, window_pos.y + window_size.y);
+        if (dx != 0.0f) {
+            ImGui::SetScrollX(ImGui::GetScrollX() + dx);
+        }
+        if (dy != 0.0f) {
+            ImGui::SetScrollY(ImGui::GetScrollY() + dy);
         }
     }
     if (ui.roll_mode != 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {

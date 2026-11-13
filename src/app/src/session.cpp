@@ -910,6 +910,22 @@ bool Session::trim_region_start(std::size_t track, std::size_t region, std::int6
     if (info == nullptr) {
         return false;
     }
+    // A note region grows to the left as far as wanted: its notes move right inside a longer
+    // source, so that they stay where they are on the timeline.
+    if (info->has_notes() && start < info->start - info->offset) {
+        const std::int64_t wanted = std::max<std::int64_t>(start, 0);
+        const std::int64_t extra = (info->start - info->offset) - wanted;
+        const std::int64_t frames = info->source->clip->frames() + extra;
+        if (extra > 0 && frames <= static_cast<std::int64_t>(config_.sample_rate) * 3600) {
+            std::vector<core::Note> notes = info->source->clip->notes->notes;
+            for (core::Note& note : notes) {
+                note.start += extra;
+            }
+            info->source = note_source(info->source->name, std::move(notes), frames,
+                                       config_.channels, config_.sample_rate);
+            info->offset += extra;
+        }
+    }
     // Not before the start of the source or of the timeline, and at least one frame must stay.
     // The source moves `rate` frames for every frame on the timeline.
     const auto source_before = static_cast<std::int64_t>(static_cast<double>(info->offset) / info->rate);
@@ -931,6 +947,13 @@ bool Session::trim_region_end(std::size_t track, std::size_t region, std::int64_
     RegionInfo* info = find_region(track, region);
     if (info == nullptr) {
         return false;
+    }
+    // A note region grows to the right as far as wanted (up to an hour): its source gets longer.
+    const std::int64_t frames_needed = info->offset + (end - info->start);
+    if (info->has_notes() && frames_needed > info->source->clip->frames() &&
+        frames_needed <= static_cast<std::int64_t>(config_.sample_rate) * 3600) {
+        info->source = note_source(info->source->name, info->source->clip->notes->notes, frames_needed,
+                                   config_.channels, config_.sample_rate);
     }
     const auto available = static_cast<std::int64_t>(
         static_cast<double>(info->source->clip->frames() - info->offset) / info->rate);
