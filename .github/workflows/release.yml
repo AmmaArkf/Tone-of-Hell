@@ -1,7 +1,8 @@
 name: Release
 
-# Pushing a tag such as "v0.1.0" builds the program for Windows and Linux, runs the tests and
-# publishes the packages as a GitHub release. Versions below 1.0.0 are marked as pre-releases.
+# Pushing a tag such as "v0.2.0" builds the program for Windows and Linux, runs the tests and
+# publishes the packages as the latest GitHub release (so it shows on the main page). A tag
+# with a suffix such as "v0.3.0-beta" is published as a pre-release instead.
 
 on:
   push:
@@ -105,14 +106,14 @@ jobs:
           **Windows:** unpack the zip and start `Tone of Hell.exe`. The program is not signed yet, so Windows SmartScreen may warn the first time ("More info" > "Run anyway").
           **Linux:** unpack the archive and start `./tone-of-hell` (built on Ubuntu; older distributions may lack a new enough C library).
 
-          This is a pre-release: expect rough edges, and keep copies of projects that matter.
+          This is an early version (0.x): expect rough edges, and keep copies of projects that matter. Problems and ideas are welcome in the Issues tab; attach the session log (Help > Open the logs folder).
           EOF
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          prerelease=""
-          case "$version" in 0.*) prerelease="--prerelease" ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* $prerelease \
+          kind="--latest"
+          case "$version" in *-*) kind="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* $kind \
             --title "Tone of Hell $version" --notes-file notes.md
