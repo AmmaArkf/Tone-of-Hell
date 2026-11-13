@@ -408,6 +408,14 @@ void Session::update() {
     }
     was_playing_backwards_ = playing && reverse_;
 
+    if (notes_recording_) {
+        // Notes are recorded until playback stops (Stop, pause, the end of a loop-less song).
+        if (engine_.is_playing()) {
+            notes_seen_playing_ = true;
+        } else if (notes_seen_playing_) {
+            finish_note_take();
+        }
+    }
     if (recording_) {
         drain_recording();
         if (engine_.is_recording()) {
@@ -530,6 +538,90 @@ bool Session::set_region_notes(std::size_t track, std::size_t region, std::vecto
                                config_.channels, config_.sample_rate);
     sync_track_regions(track);
     return true;
+}
+
+bool Session::is_instrument_track(std::size_t index) const noexcept {
+    if (index >= tracks_.size()) {
+        return false;
+    }
+    for (const RegionInfo& region : tracks_[index].regions) {
+        if (region.has_notes()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Session::note_on(int pitch, float velocity) {
+    if (pitch < 0 || pitch > 127) {
+        return false;
+    }
+    int program = -1;
+    core::Instrument instrument = core::Instrument::Keys;
+    if (live_track_ < tracks_.size()) {
+        program = tracks_[live_track_].program;
+        instrument = tracks_[live_track_].instrument;
+    }
+    engine_.live_note_on(pitch, velocity, program, instrument);
+    if (notes_recording_) {
+        const auto key = static_cast<std::size_t>(pitch);
+        if (open_note_start_[key] >= 0) {
+            note_off(pitch);  // the same key again: the earlier note ends here
+        }
+        open_note_start_[key] = engine_.position_frames();
+        open_note_velocity_[key] = std::clamp(velocity, 0.0f, 1.0f);
+    }
+    return true;
+}
+
+void Session::note_off(int pitch) {
+    if (pitch < 0 || pitch > 127) {
+        return;
+    }
+    engine_.live_note_off(pitch);
+    const auto key = static_cast<std::size_t>(pitch);
+    if (notes_recording_ && open_note_start_[key] >= 0) {
+        core::Note note;
+        note.start = open_note_start_[key];
+        note.length = std::max<std::int64_t>(engine_.position_frames() - note.start,
+                                             static_cast<std::int64_t>(config_.sample_rate / 100));
+        note.pitch = static_cast<std::uint8_t>(pitch);
+        note.velocity = open_note_velocity_[key];
+        recorded_notes_.push_back(note);
+        open_note_start_[key] = -1;
+    }
+}
+
+void Session::finish_note_take() {
+    for (int pitch = 0; pitch < 128; ++pitch) {
+        note_off(pitch);  // keys still held end now (and fall silent)
+    }
+    notes_recording_ = false;
+    if (recorded_notes_.empty() || record_track_ >= tracks_.size()) {
+        recorded_notes_.clear();
+        return;
+    }
+    std::int64_t begin = recorded_notes_.front().start;
+    std::int64_t end = 0;
+    for (const core::Note& note : recorded_notes_) {
+        begin = std::min(begin, note.start);
+        end = std::max(end, note.start + note.length);
+    }
+    std::vector<core::Note> notes = recorded_notes_;
+    for (core::Note& note : notes) {
+        note.start -= begin;
+    }
+    recorded_notes_.clear();
+    // Half a second more, so the last release is heard.
+    const std::int64_t length = end - begin + static_cast<std::int64_t>(config_.sample_rate / 2);
+    RegionInfo region;
+    region.source = note_source(tracks_[record_track_].name, std::move(notes), length,
+                                config_.channels, config_.sample_rate);
+    region.start = begin;
+    region.length = length;
+    tracks_[record_track_].regions.push_back(std::move(region));
+    sync_track_regions(record_track_);
+    update_length();
 }
 
 bool Session::set_track_program(std::size_t index, int program) {
@@ -1137,11 +1229,27 @@ void Session::set_record_offset_frames(std::int64_t frames) noexcept {
     record_offset_ = std::clamp(frames, -limit, limit);
 }
 
-std::int64_t Session::recorded_frames() const noexcept { return take_writer_.frames(); }
+std::int64_t Session::recorded_frames() const noexcept {
+    if (notes_recording_) {
+        return std::max<std::int64_t>(engine_.position_frames() - notes_record_start_, 0);
+    }
+    return take_writer_.frames();
+}
 
 bool Session::start_recording(std::size_t track) {
-    if (recording_) {
+    if (recording_ || notes_recording_) {
         return false;
+    }
+    if (is_instrument_track(track)) {
+        // Notes, not sound: what is played on a keyboard becomes a note region.
+        notes_recording_ = true;
+        notes_seen_playing_ = false;
+        record_track_ = track;
+        recorded_notes_.clear();
+        open_note_start_.fill(-1);
+        notes_record_start_ = engine_.position_frames();
+        play();
+        return true;
     }
     // The take goes straight to a cache file. Input left over from an earlier take is thrown
     // away first, while no file is open.
@@ -1173,6 +1281,11 @@ bool Session::start_recording(std::size_t track) {
 }
 
 void Session::stop_recording() {
+    if (notes_recording_) {
+        finish_note_take();
+        engine_.pause();
+        return;
+    }
     if (!recording_) {
         return;
     }

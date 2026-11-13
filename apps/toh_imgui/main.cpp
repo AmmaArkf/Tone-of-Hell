@@ -23,6 +23,7 @@
 #include "toh/app/build_info.h"
 #include "toh/app/i18n.h"
 #include "toh/app/log.h"
+#include "toh/app/midi_input.h"
 #include "toh/app/settings.h"
 #include "toh/app/session.h"
 #include "toh/core/clip.h"
@@ -186,6 +187,11 @@ struct UiState {
     Then pending_then = Then::Nothing;  // waits for the answer about unsaved changes
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
+    toh::app::MidiInput midi;            // MIDI keyboards
+    std::vector<toh::app::MidiEvent> midi_events;
+    bool musical_keyboard = false;       // the letter keys play notes
+    int keyboard_octave = 4;             // the A key plays C of this octave
+    std::array<int, 16> key_pitch{};     // the note each letter key started (-1: none)
 
     // The piano roll: one note region, edited on a working copy of its notes.
     bool roll_open = false;
@@ -560,16 +566,17 @@ void toggle_recording(Session& session, UiState& ui) {
         session.stop_recording();
         return;
     }
-    if (!session.input_enabled()) {
+    const std::size_t track = ui.armed && ui.armed_track < session.tracks().size()
+                                  ? ui.armed_track
+                                  : Session::kNewTrack;
+    // An instrument track records notes from the keyboards; only sound needs the input.
+    if (!session.is_instrument_track(track) && !session.input_enabled()) {
         std::string error;
         if (!session.set_input_enabled(true, &error)) {
             ui.error = "Recording: " + error;
             return;
         }
     }
-    const std::size_t track = ui.armed && ui.armed_track < session.tracks().size()
-                                  ? ui.armed_track
-                                  : Session::kNewTrack;
     if (!session.start_recording(track)) {
         ui.error = "Recording could not be started.";
     }
@@ -1441,6 +1448,68 @@ void import_midi_file(Session& session, UiState& ui, const std::string& path) {
     }
 }
 
+// ---- Playing notes -----------------------------------------------------------------------
+
+// The track that keyboard notes play: the armed instrument track, else a selected one, else the
+// track of the selected region, else the first instrument track.
+std::size_t live_target(const Session& session, const UiState& ui) {
+    const auto& tracks = session.tracks();
+    if (ui.armed && session.is_instrument_track(ui.armed_track)) {
+        return ui.armed_track;
+    }
+    for (std::size_t t = 0; t < tracks.size(); ++t) {
+        if (tracks[t].selected && session.is_instrument_track(t)) {
+            return t;
+        }
+    }
+    if (ui.selected && session.is_instrument_track(ui.selected_track)) {
+        return ui.selected_track;
+    }
+    for (std::size_t t = 0; t < tracks.size(); ++t) {
+        if (session.is_instrument_track(t)) {
+            return t;
+        }
+    }
+    return Session::kNewTrack;
+}
+
+// Notes from MIDI keyboards and, when switched on, from the letter keys:
+//   A W S E D F T G Y H U J K O L P  =  C C# D D# E F F# G G# A A# B C C# D D#,  Z / X: octave.
+void play_live_notes(Session& session, UiState& ui) {
+    session.set_live_track(live_target(session, ui));
+    ui.midi.take(ui.midi_events);
+    for (const toh::app::MidiEvent& event : ui.midi_events) {
+        if (event.on) {
+            session.note_on(event.pitch, event.velocity);
+        } else {
+            session.note_off(event.pitch);
+        }
+    }
+    static const ImGuiKey keys[16] = {ImGuiKey_A, ImGuiKey_W, ImGuiKey_S, ImGuiKey_E,
+                                      ImGuiKey_D, ImGuiKey_F, ImGuiKey_T, ImGuiKey_G,
+                                      ImGuiKey_Y, ImGuiKey_H, ImGuiKey_U, ImGuiKey_J,
+                                      ImGuiKey_K, ImGuiKey_O, ImGuiKey_L, ImGuiKey_P};
+    const bool typing = ImGui::GetIO().WantTextInput || ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyAlt;
+    for (std::size_t k = 0; k < 16; ++k) {
+        const bool down = ui.musical_keyboard && !typing && ImGui::IsKeyDown(keys[k]);
+        if (down && ui.key_pitch[k] < 0) {
+            ui.key_pitch[k] = std::clamp(12 * (ui.keyboard_octave + 1) + static_cast<int>(k), 0, 127);
+            session.note_on(ui.key_pitch[k], 0.8f);
+        } else if (!down && ui.key_pitch[k] >= 0) {
+            session.note_off(ui.key_pitch[k]);
+            ui.key_pitch[k] = -1;
+        }
+    }
+    if (ui.musical_keyboard && !typing) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+            ui.keyboard_octave = std::max(ui.keyboard_octave - 1, 0);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_X, false)) {
+            ui.keyboard_octave = std::min(ui.keyboard_octave + 1, 8);
+        }
+    }
+}
+
 // Picture files are given to tracks when they are dropped on the window; other files are audio.
 bool is_picture_file(const std::string& path) {
     std::string extension = std::filesystem::u8path(path).extension().u8string();
@@ -1641,6 +1710,9 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
         case Action::NormalSpeed:
             session.set_speed(1.0);
             break;
+        case Action::MusicalKeyboard:
+            ui.musical_keyboard = !ui.musical_keyboard;
+            break;
         case Action::PianoRoll:
             if (const RegionInfo* region = selected_region(session, ui)) {
                 if (region->has_notes()) {
@@ -1680,6 +1752,13 @@ void handle_shortcuts(Session& session, UiState& ui, PendingFiles& pending, SDL_
     }
     for (std::size_t i = 0; i < toh::app::kActionCount; ++i) {
         const auto action = static_cast<Action>(i);
+        // While the letters play notes, shortcuts made of a single letter wait.
+        if (ui.musical_keyboard) {
+            const Chord chord = parse_chord(ui.settings.shortcut(action));
+            if (!chord.ctrl && !chord.alt && chord.key >= ImGuiKey_A && chord.key <= ImGuiKey_Z) {
+                continue;
+            }
+        }
         // While the piano roll has the keyboard, its keys edit notes, not regions.
         if (ui.roll_focused && (action == Action::RemoveRegion || action == Action::Split ||
                                 action == Action::JoinRegions || action == Action::Deselect)) {
@@ -1848,6 +1927,16 @@ void draw_settings_window(Session& session, UiState& ui) {
                 load_soundfont(session, ui, default_soundfont_path());
             }
             ImGui::EndDisabled();
+            if (ui.midi.devices().empty()) {
+                ImGui::TextDisabled("%s", T_("No MIDI keyboard found."));
+            } else {
+                for (const std::string& device : ui.midi.devices()) {
+                    ImGui::Text(T_("MIDI keyboard: %s"), device.c_str());
+                }
+            }
+            if (ImGui::Button(T_("Look for MIDI keyboards again"))) {
+                ui.midi.open_all();
+            }
 
             ImGui::SeparatorText(T_("Metronome"));
             if (ImGui::Checkbox(T_("With the metronome on, keep playing past the end"),
@@ -2248,6 +2337,8 @@ void draw_dialogs(UiState& ui) {
                 {"Drag a region close to another", "Its edge sticks to the other edge"},
                 {"Drag a region up or down", "Move it to another track"},
                 {"Double-click in an instrument region", "Add a note there, or remove the one under the mouse"},
+                {"Piano keys on: A W S E D F T G Y H U J K", "Play the notes C to C; Z and X change the octave"},
+                {"R on an instrument track, then Record", "Write down the notes you play"},
                 {"Scissors on, click a region", "Cut it where the mouse is"},
                 {"J", "Join the selected region with the next one"},
                 {"Click a track name", "Select the track (Ctrl: several)"},
@@ -2515,6 +2606,17 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     tooltip(T_(ui.cut_tool ? "Scissors on: click a region to cut it where the mouse is.\n"
                              "Click to switch them off."
                            : "Scissors off. Click to switch them on, then click a region to cut it."));
+    ImGui::SameLine();
+    if (toggle_button(T_("Piano keys"), ui.musical_keyboard, ImVec4(0.55f, 0.35f, 0.80f, 1.0f), false)) {
+        ui.musical_keyboard = !ui.musical_keyboard;
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::SetTooltip(T_("Play notes with the letter keys (Ctrl+K): A W S E D F T G Y H U J K = "
+                             "C to C, Z and X: octave down and up (now C%d).\n"
+                             "MIDI keyboards play all the time. Notes go to the armed or selected "
+                             "instrument track;\narm it (R) and press Record to write them down."),
+                          ui.keyboard_octave);
+    }
     ImGui::SameLine();
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted(T_("Grid:"));
@@ -4207,6 +4309,11 @@ int main(int argc, char* argv[]) {
             }
         }
         toh::app::logging::install_crash_handler();
+        ui.key_pitch.fill(-1);
+        ui.midi.open_all();
+        for (const std::string& device : ui.midi.devices()) {
+            toh::app::logging::info("MIDI keyboard: " + device);
+        }
         // A recovery file that is still there means the last session did not end properly.
         if (!ui.settings_path.empty()) {
             ui.recovery_file = ui.settings_path.parent_path() / "recovery" / "recovery.tohp";
@@ -4337,6 +4444,7 @@ int main(int argc, char* argv[]) {
             ImGui::NewFrame();
 
             handle_shortcuts(session, ui, pending, window);
+            play_live_notes(session, ui);
 
             const ImGuiViewport* viewport = ImGui::GetMainViewport();
             ImGui::SetNextWindowPos(viewport->WorkPos);

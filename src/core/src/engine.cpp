@@ -307,6 +307,67 @@ bool Engine::start_recording() { return commands_.try_push(Command(CommandType::
 
 bool Engine::stop_recording() { return commands_.try_push(Command(CommandType::StopRecording)); }
 
+bool Engine::live_note_on(int pitch, float velocity, int program, Instrument instrument) {
+    if (pitch < 0 || pitch > 127) {
+        return false;
+    }
+    Command command(CommandType::LiveNoteOn);
+    command.index = pitch;
+    command.value = std::clamp(velocity, 0.0f, 1.0f);
+    command.a = program;
+    command.b = static_cast<std::int64_t>(instrument);
+    return commands_.try_push(command);
+}
+
+bool Engine::live_note_off(int pitch) {
+    Command command(CommandType::LiveNoteOff);
+    command.index = pitch;
+    return commands_.try_push(command);
+}
+
+bool Engine::live_all_notes_off() { return commands_.try_push(Command(CommandType::LiveAllOff)); }
+
+void Engine::render_live(float* out, std::uint32_t frames) noexcept {
+    const SoundFont* const font = soundfont_.load(std::memory_order_acquire);
+    const double rate = static_cast<double>(sample_rate_);
+    const std::size_t channels = channels_;
+    for (LiveVoice& voice : live_) {
+        if (!voice.active) {
+            continue;
+        }
+        const SoundFont::Preset* const preset =
+            font != nullptr && voice.program >= 0 ? font->find(voice.program) : nullptr;
+        Note note;
+        note.pitch = static_cast<std::uint8_t>(voice.pitch);
+        note.velocity = voice.velocity;
+        // Held: as good as endless; released: it ended when the key went up.
+        note.length = voice.released ? static_cast<std::int64_t>(voice.released_at)
+                                     : (std::int64_t{1} << 40);
+        for (std::uint32_t i = 0; i < frames; ++i) {
+            float left = 0.0f;
+            float right = 0.0f;
+            if (preset != nullptr) {
+                font->add_note(*preset, note, voice.time, rate, left, right);
+            } else {
+                left = right = note_sample(voice.instrument, note, voice.time, rate);
+            }
+            float* dst = out + static_cast<std::size_t>(i) * channels;
+            if (channels >= 2) {
+                dst[0] += left * gain_;
+                dst[1] += right * gain_;
+            } else {
+                dst[0] += 0.5f * (left + right) * gain_;
+            }
+            voice.time += 1.0;
+        }
+        const double release =
+            (preset != nullptr ? preset->release : instrument_release_seconds(voice.instrument)) * rate;
+        if (voice.released && voice.time > voice.released_at + release + 1.0) {
+            voice.active = false;
+        }
+    }
+}
+
 void Engine::set_soundfont(std::shared_ptr<const SoundFont> soundfont) {
     soundfont_.store(soundfont.get(), std::memory_order_release);
     if (soundfont) {
@@ -551,6 +612,53 @@ void Engine::apply(const Command& command) noexcept {
             record_armed_ = false;
             record_active_ = false;
             break;
+        case CommandType::LiveNoteOn: {
+            // The same key again ends the earlier note; otherwise a free voice, or the oldest.
+            LiveVoice* target = nullptr;
+            for (LiveVoice& voice : live_) {
+                if (voice.active && !voice.released && voice.pitch == command.index) {
+                    voice.released = true;
+                    voice.released_at = voice.time;
+                }
+            }
+            for (LiveVoice& voice : live_) {
+                if (!voice.active) {
+                    target = &voice;
+                    break;
+                }
+            }
+            if (target == nullptr) {
+                target = &live_[0];
+                for (LiveVoice& voice : live_) {
+                    if (voice.time > target->time) {
+                        target = &voice;
+                    }
+                }
+            }
+            *target = LiveVoice();
+            target->active = true;
+            target->pitch = command.index;
+            target->velocity = command.value;
+            target->program = static_cast<int>(command.a);
+            target->instrument = static_cast<Instrument>(command.b);
+            break;
+        }
+        case CommandType::LiveNoteOff:
+            for (LiveVoice& voice : live_) {
+                if (voice.active && !voice.released && voice.pitch == command.index) {
+                    voice.released = true;
+                    voice.released_at = voice.time;
+                }
+            }
+            break;
+        case CommandType::LiveAllOff:
+            for (LiveVoice& voice : live_) {
+                if (voice.active && !voice.released) {
+                    voice.released = true;
+                    voice.released_at = voice.time;
+                }
+            }
+            break;
     }
 }
 
@@ -769,6 +877,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
         }
         master_meter_ = decayed_meter(master_meter_, decay, 0.0f);
         master_peak_.store(master_meter_, std::memory_order_relaxed);
+        render_live(out, frames);
         process_input(in, out, frames);
         return;
     }
@@ -1052,6 +1161,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
         master_clips_.store(master_clips_.load(std::memory_order_relaxed) + clips,
                             std::memory_order_relaxed);
     }
+    render_live(out, frames);
     process_input(in, out, frames);
 }
 

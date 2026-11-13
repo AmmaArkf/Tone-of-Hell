@@ -40,6 +40,7 @@ enum class Action {
     Slower,
     NormalSpeed,
     PianoRoll,
+    MusicalKeyboard,
     Count
 };
 

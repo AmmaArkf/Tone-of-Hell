@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -197,6 +198,19 @@ public:
     /// to 0..1. Returns false for an audio region.
     bool set_region_notes(std::size_t track, std::size_t region, std::vector<core::Note> notes);
     bool set_track_instrument(std::size_t index, core::Instrument instrument);
+    /// True for a track that holds note regions (an instrument track).
+    bool is_instrument_track(std::size_t index) const noexcept;
+
+    // ---- Playing notes live --------------------------------------------------------------
+
+    /// The track whose sound keyboard notes use (kNewTrack for the simple keys).
+    void set_live_track(std::size_t index) noexcept { live_track_ = index; }
+    std::size_t live_track() const noexcept { return live_track_; }
+    /// Plays a note from a keyboard right away. While notes are recorded (start_recording on
+    /// an instrument track) it is also written down.
+    bool note_on(int pitch, float velocity);
+    void note_off(int pitch);
+
     /// Chooses a program of the SoundFont for a track (-1: the built-in instrument).
     bool set_track_program(std::size_t index, int program);
     /// The recorded instruments that programs refer to (also used by exports).
@@ -303,13 +317,15 @@ public:
     std::int64_t record_offset_frames() const noexcept { return record_offset_; }
     void set_record_offset_frames(std::int64_t frames) noexcept;
 
-    /// Starts playback and records the input onto `track` (or a new track). The take ends
+    /// Starts playback and records the input onto `track` (or a new track). On an instrument
+    /// track it records the notes played with note_on() and note_off() instead, as a new note
+    /// region. The take ends
     /// with stop_recording(), or when playback stops, pauses or jumps; it then appears as a
     /// region. Returns false if a recording is already running or no track is available.
     bool start_recording(std::size_t track = kNewTrack);
     /// Ends the take and pauses playback. The region appears after the next update().
     void stop_recording();
-    bool is_recording() const noexcept { return recording_; }
+    bool is_recording() const noexcept { return recording_ || notes_recording_; }
     /// The track being recorded onto (only meaningful while is_recording()).
     std::size_t record_track() const noexcept { return record_track_; }
     /// Length of the running take so far, in frames.
@@ -481,6 +497,7 @@ private:
     /// returns false as soon as `sink` returns false.
     bool render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const;
     void finish_take();
+    void finish_note_take();
 
     // ---- Playing from disk ---------------------------------------------------------------
     // A loader thread keeps the pages around the playhead in memory for every region whose
@@ -532,6 +549,13 @@ private:
     int cache_count_ = 0;
 
     std::shared_ptr<const core::SoundFont> soundfont_;
+    std::size_t live_track_ = kNewTrack;
+    bool notes_recording_ = false;
+    bool notes_seen_playing_ = false;
+    std::int64_t notes_record_start_ = 0;
+    std::array<std::int64_t, 128> open_note_start_{};
+    std::array<float, 128> open_note_velocity_{};
+    std::vector<core::Note> recorded_notes_;  // with timeline positions
     std::filesystem::path project_file_;
     std::string saved_state_;  // state_text() when the project was saved, opened or started
     std::string autosaved_state_;               // state_text() at the last recovery save

@@ -2,6 +2,13 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.5
+
+- MIDI keyboards: every connected MIDI keyboard plays notes right away (Windows MIDI inputs, Linux raw MIDI devices). Edit > Settings > General lists them.
+- Piano keys on the toolbar (Ctrl+K): the letter keys play notes, A W S E D F T G Y H U J K for C to C, Z and X change the octave. Single-letter shortcuts pause meanwhile.
+- Notes sound with the instrument of the armed instrument track, else a selected one, else the first one; they sound also while playback is stopped.
+- Recording notes: arm an instrument track (R) and press Record. What you play becomes a new note region when you stop.
+
 ## 0.2.4
 
 - MIDI files: File > Import a MIDI file... (or drop a .mid onto the window). Every channel of every track becomes an instrument track with its General MIDI sound (channel 10 plays the drums), and the project takes the tempo and time signature of the file; tempo changes inside the file are followed.

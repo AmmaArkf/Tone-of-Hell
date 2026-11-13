@@ -166,3 +166,57 @@ TEST_CASE("Exports include the instruments") {
     CHECK(std::filesystem::file_size(file) > 44 + 2 * 2 * kRate / 2);
     std::filesystem::remove(file);
 }
+
+TEST_CASE("Live notes sound while stopped and end after their release") {
+    Session session;
+    session.add_instrument_track("Live", Instrument::Organ, 0, kRate);
+    session.set_live_track(0);
+    REQUIRE(session.note_on(69, 0.8f));
+    std::vector<float> out(2 * 2000);
+    session.engine().render(out.data(), 2000);
+    float loudest = 0.0f;
+    for (const float sample : out) {
+        loudest = std::max(loudest, std::fabs(sample));
+    }
+    CHECK(loudest > 0.05f);
+    CHECK_FALSE(session.is_playing());
+
+    session.note_off(69);
+    std::vector<float> tail(2 * 6000);
+    session.engine().render(tail.data(), 6000);  // longer than the organ's release
+    session.engine().render(out.data(), 2000);
+    for (const float sample : out) {
+        CHECK(sample == 0.0f);
+    }
+}
+
+TEST_CASE("Notes played while recording become a note region") {
+    Session session;
+    session.add_instrument_track("Lead", Instrument::Keys, 0, 2 * kRate);
+    session.set_live_track(0);
+    CHECK(session.is_instrument_track(0));
+    REQUIRE(session.start_recording(0));
+    CHECK(session.is_recording());
+    std::vector<float> out(2 * 4800);
+    session.engine().render(out.data(), 4800);
+    session.update();
+    REQUIRE(session.note_on(60, 0.7f));
+    session.engine().render(out.data(), 4800);
+    session.engine().render(out.data(), 4800);
+    session.note_off(60);
+    session.engine().render(out.data(), 4800);
+    session.stop_recording();
+    session.update();
+    CHECK_FALSE(session.is_recording());
+
+    REQUIRE(session.tracks()[0].regions.size() == 2);
+    const auto& region = session.tracks()[0].regions[1];
+    REQUIRE(region.has_notes());
+    CHECK(region.start == 4800);
+    const auto& notes = region.source->clip->notes->notes;
+    REQUIRE(notes.size() == 1);
+    CHECK(notes[0].start == 0);
+    CHECK(notes[0].length == 9600);
+    CHECK(notes[0].pitch == 60);
+    CHECK(notes[0].velocity == doctest::Approx(0.7f));
+}

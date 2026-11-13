@@ -151,6 +151,12 @@ public:
     /// The recorded instruments for note regions with a program. Control thread; the
     /// SoundFont stays alive as long as the engine.
     void set_soundfont(std::shared_ptr<const SoundFont> soundfont);
+
+    /// Live notes, played right away (from a keyboard) whether or not playback runs. `program`
+    /// and `instrument` choose the sound as for note regions. Control thread.
+    bool live_note_on(int pitch, float velocity, int program, Instrument instrument);
+    bool live_note_off(int pitch);
+    bool live_all_notes_off();
     static constexpr double kMinSpeed = 0.25;
     static constexpr double kMaxSpeed = 4.0;
     /// Configures the built-in metronome click, which follows the timeline position.
@@ -282,7 +288,10 @@ private:
         SetMonitoring,
         SetInputGain,
         StartRecording,
-        StopRecording
+        StopRecording,
+        LiveNoteOn,
+        LiveNoteOff,
+        LiveAllOff
     };
 
     // Messages from the control thread to the audio thread. Must stay trivially copyable.
@@ -338,6 +347,20 @@ private:
     float metronome_sample(std::int64_t frame) const noexcept;
     void mix_block(const float* in, float* out, std::uint32_t frames, bool audible) noexcept;
     void process_input(const float* in, float* out, std::uint32_t frames) noexcept;
+    void render_live(float* out, std::uint32_t frames) noexcept;
+
+    // Notes from a keyboard (audio thread only).
+    struct LiveVoice {
+        bool active = false;
+        bool released = false;
+        int pitch = 60;
+        float velocity = 0.8f;
+        int program = -1;
+        Instrument instrument = Instrument::Keys;
+        double time = 0.0;      // frames since the note began
+        double released_at = 0.0;
+    };
+    std::array<LiveVoice, 32> live_{};
 
     const std::uint32_t sample_rate_;
     const std::uint32_t channels_;
