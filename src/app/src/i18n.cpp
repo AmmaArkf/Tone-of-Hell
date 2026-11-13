@@ -136,6 +136,8 @@ const Entry kRussian[] = {
     {"Restore: ", "Восстановление: "},
     {"Wheel: zoom. Scrollbars: move. The strip on top: place the playhead. The keys on the left: listen.",
      "Колёсико: масштаб. Полосы прокрутки: перемещение. Полоса сверху: курсор воспроизведения. Клавиши слева: прослушать."},
+    {"Double-click: add a note. Drag a note: move it; its right end: length. Right-click or Delete: remove. Ctrl: select several. Alt: off the grid.",
+     "Двойной клик: добавить ноту. Тащить ноту: переместить; за правый край: длина. ПКМ или Delete: удалить. Ctrl: выбрать несколько. Alt: без сетки."},
     {"Cut", "Вырезать"},
     {"Copy", "Копировать"},
     {"Paste", "вставка"},

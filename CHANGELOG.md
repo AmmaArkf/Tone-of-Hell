@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.7
+
+- Piano roll: a single click moves and selects notes (on an empty place it clears the selection); a double-click adds a note, and dragging right after it sets its length.
+
 ## 0.2.6
 
 - Regions have a name strip on top: drag it to move the region, as before also onto another track.

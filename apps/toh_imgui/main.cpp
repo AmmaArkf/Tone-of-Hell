@@ -3938,8 +3938,8 @@ void draw_piano_roll(Session& session, UiState& ui) {
     ImGui::AlignTextToFramePadding();
     ImGui::Text(T_("Notes: %d"), static_cast<int>(ui.roll_notes.size()));
     ImGui::SameLine();
-    ImGui::TextDisabled("%s", T_("Click: add a note. Drag: move it; its right end: length. Right-click "
-                                 "or Delete: remove. Ctrl: select several. Alt: off the grid."));
+    ImGui::TextDisabled("%s", T_("Double-click: add a note. Drag a note: move it; its right end: length. "
+                                 "Right-click or Delete: remove. Ctrl: select several. Alt: off the grid."));
     ImGui::TextDisabled("%s", T_("Wheel: zoom. Scrollbars: move. The strip on top: place the playhead. "
                                  "The keys on the left: listen."));
 
@@ -4065,6 +4065,13 @@ void draw_piano_roll(Session& session, UiState& ui) {
             }
             ui.roll_anchor = under;
             ui.roll_mode = near_end ? 2 : 1;
+        } else if (!ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            // A single click on an empty place only clears the selection; notes are added with
+            // a double-click.
+            if (!io.KeyCtrl) {
+                std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 0);
+            }
+            ui.roll_mode = 0;
         } else {
             if (!io.KeyCtrl) {
                 std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 0);
