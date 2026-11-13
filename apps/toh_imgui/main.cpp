@@ -210,7 +210,7 @@ struct UiState {
     std::vector<toh::core::Note> roll_notes;
     std::vector<toh::core::Note> roll_origin;  // the notes when the drag began
     std::vector<char> roll_selected;           // one flag per note of roll_notes
-    int roll_mode = 0;  // 0 nothing, 1 moving, 2 changing the length, 3 playhead, 4 listening
+    int roll_mode = 0;  // 0 nothing, 1 moving, 2 length, 3 playhead, 4 listening, 5 selection box
     std::size_t roll_anchor = 0;               // the note the drag began on
     double roll_start_frame = 0.0;
     int roll_start_pitch = 0;
@@ -222,6 +222,8 @@ struct UiState {
     float roll_scroll_x = 0.0f;                // its scrolling and left edge in the last frame
     float roll_canvas_x = 0.0f;
     int roll_preview = -1;                     // the note sounding while a note is dragged
+    float roll_box_y = 0.0f;                   // where a selection box began, inside the canvas
+    std::vector<char> roll_box_base;           // the selection before the box (kept with Ctrl)
     std::filesystem::path logs_folder;
     std::filesystem::path recovery_file;  // where autosave writes
     bool recovery_written = false;        // the recovery file holds unsaved changes
@@ -3939,7 +3941,8 @@ void draw_piano_roll(Session& session, UiState& ui) {
     ImGui::Text(T_("Notes: %d"), static_cast<int>(ui.roll_notes.size()));
     ImGui::SameLine();
     ImGui::TextDisabled("%s", T_("Double-click: add a note. Drag a note: move it; its right end: length. "
-                                 "Right-click or Delete: remove. Ctrl: select several. Alt: off the grid."));
+                                 "Drag on an empty place: select with a box. Right-click or Delete: remove. "
+                                 "Ctrl: select several. Alt: off the grid."));
     ImGui::TextDisabled("%s", T_("Wheel: zoom. Scrollbars: move. The strip on top: place the playhead. "
                                  "The keys on the left: listen."));
 
@@ -4066,12 +4069,14 @@ void draw_piano_roll(Session& session, UiState& ui) {
             ui.roll_anchor = under;
             ui.roll_mode = near_end ? 2 : 1;
         } else if (!ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-            // A single click on an empty place only clears the selection; notes are added with
-            // a double-click.
+            // A single click on an empty place clears the selection, and dragging from there
+            // draws a box that selects the notes it touches. Notes are added with a double-click.
             if (!io.KeyCtrl) {
                 std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 0);
             }
-            ui.roll_mode = 0;
+            ui.roll_mode = 5;
+            ui.roll_box_base = ui.roll_selected;
+            ui.roll_box_y = io.MousePos.y - origin.y;
         } else {
             if (!io.KeyCtrl) {
                 std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 0);
@@ -4097,6 +4102,22 @@ void draw_piano_roll(Session& session, UiState& ui) {
 
     // Dragging: the anchor note follows the grid and the other selected notes keep their
     // distance to it.
+    // The selection box: from where the drag began to the mouse.
+    if (ui.roll_mode == 5 && active && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
+        ui.roll_box_base.size() == ui.roll_notes.size()) {
+        const double f0 = std::min(ui.roll_start_frame, mouse_frame);
+        const double f1 = std::max(ui.roll_start_frame, mouse_frame);
+        const float y_now = io.MousePos.y - origin.y;
+        const int high = 127 - static_cast<int>(std::floor(std::min(ui.roll_box_y, y_now) / key_h));
+        const int low = 127 - static_cast<int>(std::floor(std::max(ui.roll_box_y, y_now) / key_h));
+        for (std::size_t k = 0; k < ui.roll_notes.size(); ++k) {
+            const toh::core::Note& note = ui.roll_notes[k];
+            const bool inside = static_cast<double>(note.start) < f1 &&
+                                static_cast<double>(note.start + note.length) > f0 &&
+                                note.pitch >= low && note.pitch <= high;
+            ui.roll_selected[k] = (inside || ui.roll_box_base[k] != 0) ? 1 : 0;
+        }
+    }
     if ((ui.roll_mode == 1 || ui.roll_mode == 2) && active && ImGui::IsMouseDown(ImGuiMouseButton_Left) &&
         ui.roll_anchor < ui.roll_origin.size() && ui.roll_origin.size() == ui.roll_notes.size()) {
         const double dx = mouse_frame - ui.roll_start_frame;
@@ -4250,6 +4271,14 @@ void draw_piano_roll(Session& session, UiState& ui) {
         d->AddRectFilled(ImVec2(x0, y + 1.0f), ImVec2(x1, y + key_h - 1.0f),
                          selected ? IM_COL32(255, 225, 160, 255) : IM_COL32(240, 160, 80, 255), 2.0f);
         d->AddRect(ImVec2(x0, y + 1.0f), ImVec2(x1, y + key_h - 1.0f), IM_COL32(60, 35, 10, 255), 2.0f);
+    }
+    if (ui.roll_mode == 5 && ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f)) {
+        const ImVec2 a(frame_to_px(ui.roll_start_frame), origin.y + ui.roll_box_y);
+        const ImVec2 b = io.MousePos;
+        const ImVec2 lo(std::min(a.x, b.x), std::min(a.y, b.y));
+        const ImVec2 hi(std::max(a.x, b.x), std::max(a.y, b.y));
+        d->AddRectFilled(lo, hi, IM_COL32(150, 190, 255, 45));
+        d->AddRect(lo, hi, IM_COL32(170, 205, 255, 220));
     }
     // The strip on top, always in view: bar numbers; click or drag in it to place the playhead.
     const float strip_left = std::max(origin.x + keys_w, view_left);

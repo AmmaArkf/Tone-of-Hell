@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.8
+
+- Piano roll: dragging on an empty place draws a box that selects the notes it touches; with Ctrl they are added to the selection. The selected notes then move together.
+
 ## 0.2.7
 
 - Piano roll: a single click moves and selects notes (on an empty place it clears the selection); a double-click adds a note, and dragging right after it sets its length.
