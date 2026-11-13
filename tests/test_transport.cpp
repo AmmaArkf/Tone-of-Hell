@@ -243,6 +243,55 @@ TEST_CASE("Metronome rejects values out of range") {
     CHECK(session.reverse());
 }
 
+TEST_CASE("The reverse button can leave playback stopped") {
+    toh::app::Session session;
+    auto clip = std::make_shared<ClipData>();
+    clip->channels = 2;
+    clip->sample_rate = kRate;
+    clip->samples.assign(2 * 100000, 0.5f);
+    REQUIRE(session.add_track("track", clip));
+    std::vector<float> out(2 * 1000);
+
+    session.set_reverse_starts_playback(false);
+    session.seek_frames(50000);
+    session.toggle_reverse();
+    session.engine().render(out.data(), 1000);
+    CHECK(session.reverse());
+    CHECK_FALSE(session.is_playing());
+    session.toggle_reverse();
+    session.engine().render(out.data(), 1000);
+    CHECK_FALSE(session.reverse());
+    CHECK_FALSE(session.is_playing());
+    CHECK(session.position_frames() == 50000);
+}
+
+TEST_CASE("Reverse switches itself off at the start of the timeline") {
+    for (const bool option : {true, false}) {
+        toh::app::Session session;
+        auto clip = std::make_shared<ClipData>();
+        clip->channels = 2;
+        clip->sample_rate = kRate;
+        clip->samples.assign(2 * 10000, 0.5f);
+        REQUIRE(session.add_track("track", clip));
+        session.set_reverse_off_at_start(option);
+        std::vector<float> out(2 * 1000);
+
+        session.seek_frames(3000);
+        session.toggle_reverse();
+        session.engine().render(out.data(), 1000);
+        session.update();
+        CHECK(session.reverse());
+        CHECK(session.is_playing());
+        for (int block = 0; block < 5; ++block) {
+            session.engine().render(out.data(), 1000);
+            session.update();
+        }
+        CHECK_FALSE(session.is_playing());
+        CHECK(session.position_frames() == 0);
+        CHECK(session.reverse() == !option);
+    }
+}
+
 TEST_CASE("The reverse button starts playback from the playhead") {
     toh::app::Session session;
     auto clip = std::make_shared<ClipData>();

@@ -318,9 +318,16 @@ public:
     bool reverse() const noexcept { return reverse_; }
     /// Plays backwards when enabled.
     void set_reverse(bool reverse);
-    /// What a "reverse" button does: changes the direction and makes sure playback is running,
-    /// starting from the current position.
+    /// What a "reverse" button does: changes the direction and, when reverse_starts_playback()
+    /// is on, makes sure playback is running, starting from the current position.
     void toggle_reverse();
+    /// Whether toggle_reverse() starts playback when it is stopped or paused. On by default.
+    bool reverse_starts_playback() const noexcept { return reverse_starts_playback_; }
+    void set_reverse_starts_playback(bool enabled) noexcept { reverse_starts_playback_ = enabled; }
+    /// Whether reverse switches itself off when backwards playback reaches the start of the
+    /// timeline and stops there (checked in update()). On by default.
+    bool reverse_off_at_start() const noexcept { return reverse_off_at_start_; }
+    void set_reverse_off_at_start(bool enabled) noexcept { reverse_off_at_start_ = enabled; }
     const MetronomeSettings& metronome() const noexcept { return metronome_; }
     /// Returns false (and changes nothing) when a value is out of range.
     bool set_metronome(const MetronomeSettings& settings);
@@ -376,6 +383,9 @@ private:
     bool reverse_ = false;
     bool snap_ = true;
     bool play_selected_only_ = false;
+    bool reverse_starts_playback_ = true;
+    bool reverse_off_at_start_ = true;
+    bool was_playing_backwards_ = false;  // seen by the last update()
     GridStep grid_step_ = GridStep::Beat;
     MetronomeSettings metronome_;
     std::int64_t length_frames_ = 0;

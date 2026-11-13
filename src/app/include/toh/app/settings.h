@@ -59,6 +59,10 @@ struct Settings {
     bool play_selected_only = false;
     /// Dragged regions and edges stick to the edges of other regions.
     bool magnet = true;
+    /// The reverse button starts playback when it is stopped or paused.
+    bool reverse_starts_playback = true;
+    /// Reverse switches itself off when backwards playback reaches the start.
+    bool reverse_off_at_start = true;
     std::array<std::string, kActionCount> shortcuts;
 
     const std::string& shortcut(Action action) const noexcept {

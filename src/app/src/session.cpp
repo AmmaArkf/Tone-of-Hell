@@ -342,6 +342,14 @@ void Session::update() {
     }
     engine_.collect_retired();
 
+    // Backwards playback that ran into the start of the timeline: forwards again.
+    const bool playing = engine_.is_playing();
+    if (reverse_off_at_start_ && reverse_ && was_playing_backwards_ && !playing &&
+        engine_.position_frames() <= 0) {
+        set_reverse(false);
+    }
+    was_playing_backwards_ = playing && reverse_;
+
     if (recording_) {
         drain_recording();
         if (engine_.is_recording()) {
@@ -1277,7 +1285,9 @@ void Session::set_reverse(bool reverse) {
 
 void Session::toggle_reverse() {
     set_reverse(!reverse_);
-    play();  // no effect when it is already playing
+    if (reverse_starts_playback_) {
+        play();  // no effect when it is already playing
+    }
 }
 
 bool Session::set_metronome(const MetronomeSettings& settings) {

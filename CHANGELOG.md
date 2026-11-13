@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.0.16
+
+- New option "The Reverse button starts playback" (Edit > Settings > General). Switched off, the button only changes the direction, so reverse can be turned off while stopped without starting playback.
+- New option "Switch reverse off at the start of the timeline" (on by default): when backwards playback reaches the start and stops, reverse turns itself off.
+
 ## 0.0.15
 
 - Regions can be dragged onto other tracks: drag a region up or down over another lane. It keeps its place in time (and still sticks to edges with the magnet).

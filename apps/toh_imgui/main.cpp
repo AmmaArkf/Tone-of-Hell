@@ -1062,6 +1062,20 @@ void draw_settings_window(Session& session, UiState& ui) {
             ImGui::TextDisabled("%s", T_("Click a track name to select it, Ctrl+click to select several. "
                                          "With nothing selected, every track plays."));
 
+            ImGui::SeparatorText(T_("Reverse"));
+            if (ImGui::Checkbox(T_("The Reverse button starts playback"),
+                                &ui.settings.reverse_starts_playback)) {
+                session.set_reverse_starts_playback(ui.settings.reverse_starts_playback);
+                ui.settings_changed = true;
+            }
+            tooltip(T_("Off: the button only changes the direction, also while playback is stopped."));
+            if (ImGui::Checkbox(T_("Switch reverse off at the start of the timeline"),
+                                &ui.settings.reverse_off_at_start)) {
+                session.set_reverse_off_at_start(ui.settings.reverse_off_at_start);
+                ui.settings_changed = true;
+            }
+            tooltip(T_("When backwards playback reaches the start and stops, the next play goes forwards."));
+
             ImGui::SeparatorText(T_("Performance"));
             ImGui::BeginDisabled();
             bool gpu = false;
@@ -2751,6 +2765,8 @@ int main(int argc, char* argv[]) {
         session.set_master_gain(ui.settings.master_gain);
         session.set_input_gain(ui.settings.input_gain);
         session.set_play_selected_only(ui.settings.play_selected_only);
+        session.set_reverse_starts_playback(ui.settings.reverse_starts_playback);
+        session.set_reverse_off_at_start(ui.settings.reverse_off_at_start);
         if (ui.settings.record_offset_frames >= 0) {
             session.set_record_offset_frames(ui.settings.record_offset_frames);
         }
