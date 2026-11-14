@@ -41,6 +41,9 @@ const ActionInfo kActions[kActionCount] = {
     {Action::Copy, "copy", "Copy", "Ctrl+C"},
     {Action::Paste, "paste", "Paste at the playhead", "Ctrl+V"},
     {Action::KeepSelection, "keep_selection", "Keep only the selection", "Ctrl+E"},
+    {Action::AddMarker, "add_marker", "Add a marker at the playhead", "M"},
+    {Action::PreviousMarker, "previous_marker", "Go to the previous marker", "Ctrl+LeftArrow"},
+    {Action::NextMarker, "next_marker", "Go to the next marker", "Ctrl+RightArrow"},
 };
 
 std::string trimmed(const std::string& text) {

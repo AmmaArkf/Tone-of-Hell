@@ -83,6 +83,49 @@ TEST_CASE("Snapping and the metronome follow tempo changes, and they are saved")
     CHECK(session.tempo_changes().empty());
 }
 
+TEST_CASE("Markers stay in order, can be undone and are saved") {
+    Session session;
+    session.clear_history();
+    CHECK(session.add_marker(48000, "Chorus") == 0);
+    CHECK(session.add_marker(-5, "Intro\nline") == 0);  // before 0: at 0; one line only
+    CHECK(session.add_marker(96000, "Outro") == 2);
+    session.commit_edits();
+    CHECK(session.undo_label() == "Change the markers");
+    REQUIRE(session.markers().size() == 3);
+    CHECK(session.markers()[0].frame == 0);
+    CHECK(session.markers()[0].name.find('\n') == std::string::npos);
+    CHECK(session.previous_marker_frame(48000) == 0);
+    CHECK(session.next_marker_frame(48000) == 96000);
+    CHECK(session.next_marker_frame(96000) == -1);
+    CHECK(session.previous_marker_frame(0) == -1);
+
+    CHECK(session.move_marker(2, 10) == 1);  // "Outro" now comes second
+    CHECK(session.markers()[1].name == "Outro");
+    REQUIRE(session.rename_marker(1, "Bridge"));
+    REQUIRE(session.remove_marker(0));
+    session.commit_edits();
+    REQUIRE(session.markers().size() == 2);
+    REQUIRE(session.undo());
+    REQUIRE(session.markers().size() == 3);
+    CHECK(session.markers()[2].name == "Outro");
+    REQUIRE(session.redo());
+    REQUIRE(session.markers().size() == 2);
+
+    const auto folder = std::filesystem::temp_directory_path() / "toh_marker_test";
+    std::filesystem::create_directories(folder);
+    std::string error;
+    REQUIRE_MESSAGE(session.save_project(folder / "m.tohp", &error), error);
+    Session reopened;
+    REQUIRE_MESSAGE(reopened.open_project(folder / "m.tohp", &error), error);
+    REQUIRE(reopened.markers().size() == 2);
+    CHECK(reopened.markers()[0].name == "Bridge");
+    CHECK(reopened.markers()[0].frame == 10);
+    CHECK(reopened.markers()[1].name == "Chorus");
+    std::filesystem::remove_all(folder);
+    session.new_project();
+    CHECK(session.markers().empty());
+}
+
 TEST_CASE("Tempo changes can be taken back and done again") {
     Session session;
     toh::app::MetronomeSettings metronome = session.metronome();

@@ -2103,6 +2103,11 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
     out << "beat_unit=" << metronome_.beat_unit << "\n";
     out << "metronome_volume=" << metronome_.volume << "\n";
     out << "grid_step=" << static_cast<int>(grid_step_) << "\n";
+    for (const Marker& marker : markers_) {
+        out << "\n[marker]\n";
+        out << "frame=" << marker.frame << "\n";
+        out << "name=" << one_line(marker.name) << "\n";
+    }
     for (std::size_t i = 0; i < sources.size(); ++i) {
         out << "\n[source]\n";
         out << "file=" << files[i] << "\n";
@@ -2495,7 +2500,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     std::string tempo_text;
     long long grid = static_cast<long long>(grid_step_);
     std::filesystem::path original;  // in recovery files: the project file they belong to
-    enum class Section { Head, Source, Track, Region, Effect } section = Section::Head;
+    enum class Section { Head, Source, Track, Region, Effect, Marker } section = Section::Head;
+    std::vector<Marker> markers;
 
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') {
@@ -2520,6 +2526,11 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             }
             tracks.back().regions.emplace_back();
             section = Section::Region;
+            continue;
+        }
+        if (line == "[marker]") {
+            markers.emplace_back();
+            section = Section::Marker;
             continue;
         }
         if (line == "[effect]") {
@@ -2634,6 +2645,13 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                 }
                 break;
             }
+            case Section::Marker:
+                if (key == "frame") {
+                    markers.back().frame = std::max<long long>(integer, 0);
+                } else if (key == "name") {
+                    markers.back().name = value;
+                }
+                break;
             case Section::Effect: {
                 EffectEntry& effect = tracks.back().effects.back();
                 if (key == "kind") {
@@ -2961,6 +2979,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     update_length();
     set_loop(loop);
     set_metronome(metronome);  // ignored if a value is out of range
+    markers_ = std::move(markers);
+    sort_markers();
     tempo_changes_.clear();
     for (const core::CurvePoint& point : parse_curve(tempo_text, static_cast<float>(core::TempoMap::kMinBpm),
                                                      static_cast<float>(core::TempoMap::kMaxBpm))) {
@@ -2993,6 +3013,7 @@ void Session::new_project() {
     update_streaming();
     seek_frames(0);
     tempo_changes_.clear();
+    markers_.clear();
     rebuild_tempo();
     project_file_.clear();
     saved_state_ = state_text();
@@ -3086,7 +3107,10 @@ std::string Session::edit_text() const {
                 << region.rate << "\n";
         }
     }
-    // The tempo is part of the edits, too, so its changes can be taken back.
+    // Markers and the tempo are part of the edits, too, so their changes can be taken back.
+    for (const Marker& marker : markers_) {
+        out << "K|" << marker.frame << "|" << marker.name << "\n";
+    }
     out << "M|" << metronome_.bpm;
     for (const core::TempoChange& change : tempo_changes_) {
         out << "|" << change.frame << ":" << change.bpm;
@@ -3101,11 +3125,13 @@ Session::Snapshot Session::capture(std::string text, std::string label) const {
     snapshot.text = std::move(text);
     snapshot.label = std::move(label);
     snapshot.tempo = tempo_changes_;
+    snapshot.markers = markers_;
     snapshot.bpm = metronome_.bpm;
     return snapshot;
 }
 
 void Session::restore_tempo(const Snapshot& snapshot) {
+    markers_ = snapshot.markers;
     tempo_changes_ = snapshot.tempo;
     if (snapshot.bpm != metronome_.bpm) {
         MetronomeSettings settings = metronome_;
@@ -3146,7 +3172,13 @@ void Session::commit_edits() {
         return true;
     };
     if (label.empty()) {
-        previous.label = same_tempo(previous) ? describe_change(previous.tracks, tracks_) : "Change the tempo";
+        bool same_markers = previous.markers.size() == markers_.size();
+        for (std::size_t m = 0; same_markers && m < markers_.size(); ++m) {
+            same_markers = previous.markers[m].frame == markers_[m].frame && previous.markers[m].name == markers_[m].name;
+        }
+        previous.label = !same_markers         ? "Change the markers"
+                         : !same_tempo(previous) ? "Change the tempo"
+                                                 : describe_change(previous.tracks, tracks_);
     } else {
         previous.label = label;
     }
@@ -3581,6 +3613,68 @@ bool Session::set_tempo_change(std::int64_t frame, double bpm) {
     }
     rebuild_tempo();
     return true;
+}
+
+void Session::sort_markers() {
+    std::stable_sort(markers_.begin(), markers_.end(),
+                     [](const Marker& a, const Marker& b) { return a.frame < b.frame; });
+}
+
+std::size_t Session::add_marker(std::int64_t frame, std::string name) {
+    Marker marker;
+    marker.frame = std::max<std::int64_t>(frame, 0);
+    marker.name = one_line(name);
+    auto at = std::upper_bound(markers_.begin(), markers_.end(), marker.frame,
+                               [](std::int64_t f, const Marker& m) { return f < m.frame; });
+    at = markers_.insert(at, std::move(marker));
+    return static_cast<std::size_t>(at - markers_.begin());
+}
+
+bool Session::remove_marker(std::size_t index) {
+    if (index >= markers_.size()) {
+        return false;
+    }
+    markers_.erase(markers_.begin() + static_cast<std::ptrdiff_t>(index));
+    return true;
+}
+
+bool Session::rename_marker(std::size_t index, std::string name) {
+    if (index >= markers_.size()) {
+        return false;
+    }
+    markers_[index].name = one_line(name);
+    return true;
+}
+
+std::size_t Session::move_marker(std::size_t index, std::int64_t frame) {
+    if (index >= markers_.size()) {
+        return index;
+    }
+    Marker marker = markers_[index];
+    if (marker.frame == std::max<std::int64_t>(frame, 0)) {
+        return index;
+    }
+    markers_.erase(markers_.begin() + static_cast<std::ptrdiff_t>(index));
+    return add_marker(frame, std::move(marker.name));
+}
+
+std::int64_t Session::previous_marker_frame(std::int64_t frame) const noexcept {
+    std::int64_t found = -1;
+    for (const Marker& marker : markers_) {
+        if (marker.frame < frame) {
+            found = marker.frame;
+        }
+    }
+    return found;
+}
+
+std::int64_t Session::next_marker_frame(std::int64_t frame) const noexcept {
+    for (const Marker& marker : markers_) {
+        if (marker.frame > frame) {
+            return marker.frame;
+        }
+    }
+    return -1;
 }
 
 bool Session::remove_tempo_change(std::size_t index) {

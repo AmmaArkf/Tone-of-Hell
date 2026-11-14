@@ -190,6 +190,11 @@ struct UiState {
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
     std::int64_t tempo_frame = 0;       // the tempo menu of the ruler: where, which tempo, and
+    int marker_drag = -1;               // the marker held on the ruler (-1: none)
+    bool marker_moved = false;          // it has been dragged, not only clicked
+    float marker_grab_x = 0.0f;
+    int marker_menu = -1;               // the marker whose menu is open
+    char marker_name[96] = {};
     double tempo_bpm = 120.0;           // the tempo change under the mouse (-1: none)
     int tempo_index = -1;
     bool automation_mode = false;       // the lanes show and edit an automation curve
@@ -2092,6 +2097,8 @@ void update_window_title(const Session& session, UiState& ui) {
 }
 
 void open_piano_roll(UiState& ui, std::size_t track, std::size_t region);  // with the piano roll
+void add_marker_at(Session& session, std::int64_t frame);                  // with the ruler
+void go_to_marker(Session& session, bool next);
 
 void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Window* window,
                     Action action) {
@@ -2144,6 +2151,15 @@ void perform_action(Session& session, UiState& ui, PendingFiles& pending, SDL_Wi
             break;
         case Action::KeepSelection:
             keep_selection(session, ui);
+            break;
+        case Action::AddMarker:
+            add_marker_at(session, session.position_frames());
+            break;
+        case Action::PreviousMarker:
+            go_to_marker(session, false);
+            break;
+        case Action::NextMarker:
+            go_to_marker(session, true);
             break;
         case Action::JoinRegions:
             join_with_next(session, ui);
@@ -2788,6 +2804,17 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
             session.seek_frames(0);
             ui.view.start_seconds = 0.0;
         }
+        if (ImGui::MenuItem(T_("Add a marker at the playhead"), key_label(ui, Action::AddMarker))) {
+            add_marker_at(session, session.position_frames());
+        }
+        if (ImGui::MenuItem(T_("Go to the previous marker"), key_label(ui, Action::PreviousMarker), false,
+                            !session.markers().empty())) {
+            go_to_marker(session, false);
+        }
+        if (ImGui::MenuItem(T_("Go to the next marker"), key_label(ui, Action::NextMarker), false,
+                            !session.markers().empty())) {
+            go_to_marker(session, true);
+        }
         ImGui::Separator();
         if (ImGui::MenuItem(T_("Reverse"), key_label(ui, Action::Reverse), session.reverse())) {
             session.toggle_reverse();
@@ -3316,7 +3343,8 @@ void draw_grid(const Session& session, const View& view, ImDrawList* draw_list, 
 // Where a click or drag on the ruler or on an empty part of a lane puts the playhead. With the
 // magnet on (and Alt not held) it sticks to the starts and ends of regions, and to the start of
 // the project, when the mouse is within half a line of text of them.
-std::int64_t magnet_seek_frame(const Session& session, const UiState& ui, std::int64_t frame) {
+std::int64_t magnet_seek_frame(const Session& session, const UiState& ui, std::int64_t frame,
+                               int skip_marker = -1) {
     frame = std::max<std::int64_t>(frame, 0);
     if (!ui.settings.magnet || ImGui::GetIO().KeyAlt) {
         return frame;
@@ -3339,7 +3367,30 @@ std::int64_t magnet_seek_frame(const Session& session, const UiState& ui, std::i
             consider(region.end());
         }
     }
+    for (std::size_t m = 0; m < session.markers().size(); ++m) {
+        if (static_cast<int>(m) != skip_marker) {
+            consider(session.markers()[m].frame);
+        }
+    }
     return best;
+}
+
+// Adds a marker named "Marker N" where the playhead is.
+void add_marker_at(Session& session, std::int64_t frame) {
+    char name[64];
+    std::snprintf(name, sizeof(name), T_("Marker %d"), static_cast<int>(session.markers().size()) + 1);
+    session.add_marker(frame, name);
+}
+
+// Jumps to the marker before or after the playhead. While playing, "before" skips the marker
+// just passed, so pressing again goes on further back.
+void go_to_marker(Session& session, bool next) {
+    const std::int64_t at = session.position_frames();
+    const std::int64_t margin = session.is_playing() ? static_cast<std::int64_t>(session.sample_rate() / 3) : 0;
+    const std::int64_t frame = next ? session.next_marker_frame(at) : session.previous_marker_frame(at - margin);
+    if (frame >= 0) {
+        session.seek_frames(frame);
+    }
 }
 
 void draw_playhead(const Session& session, const View& view, ImDrawList* draw_list, float top,
@@ -3367,11 +3418,84 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
 
     ImGui::InvisibleButton("ruler", ImVec2(width, height));
     const ImGuiIO& io = ImGui::GetIO();
-    if (ImGui::IsItemActivated() || (ImGui::IsItemActive() && io.MouseDelta.x != 0.0f)) {
+    // Markers sit as flags in the time row: a click goes there, a drag moves the marker.
+    const float marker_top = grid ? origin.y + height * 0.5f : origin.y;
+    const auto marker_under = [&](float mx, float my) {
+        int found = -1;
+        if (my < marker_top) {
+            return found;
+        }
+        const auto& markers = session.markers();
+        for (std::size_t m = 0; m < markers.size(); ++m) {
+            const float x = frame_to_x(session, view, markers[m].frame);
+            const float w = ImGui::CalcTextSize(markers[m].name.c_str()).x + 8.0f;
+            if (mx >= x - 3.0f && mx <= x + w) {
+                found = static_cast<int>(m);
+            }
+        }
+        return found;
+    };
+    const int hovered_marker = ImGui::IsItemHovered() ? marker_under(io.MousePos.x, io.MousePos.y) : -1;
+    if (hovered_marker >= 0) {
+        tooltip(T_("Markers: click to go there, drag to move, double-click on the ruler to add, right-click to rename or remove."));
+    }
+    if (ImGui::IsItemActivated() && hovered_marker >= 0) {
+        ui.marker_drag = hovered_marker;
+        ui.marker_moved = false;
+        ui.marker_grab_x = io.MousePos.x;
+        session.seek_frames(session.markers()[static_cast<std::size_t>(hovered_marker)].frame);
+    } else if (ui.marker_drag >= 0 && ImGui::IsItemActive()) {
+        if (!ui.marker_moved && std::fabs(io.MousePos.x - ui.marker_grab_x) > 3.0f) {
+            ui.marker_moved = true;
+        }
+        if (ui.marker_moved && io.MouseDelta.x != 0.0f) {
+            const std::int64_t frame =
+                magnet_seek_frame(session, ui, x_to_frame(session, view, io.MousePos.x), ui.marker_drag);
+            ui.marker_drag = static_cast<int>(session.move_marker(static_cast<std::size_t>(ui.marker_drag), frame));
+            session.seek_frames(frame);
+        }
+    } else if (ImGui::IsItemActivated() || (ImGui::IsItemActive() && io.MouseDelta.x != 0.0f)) {
         session.seek_frames(magnet_seek_frame(session, ui, x_to_frame(session, view, io.MousePos.x)));
     }
-    // Right-click: the tempo from here on.
-    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+    if (!ImGui::IsItemActive()) {
+        ui.marker_drag = -1;
+    }
+    // A double-click on the ruler (not on a marker) adds a marker there.
+    if (ImGui::IsItemHovered() && hovered_marker < 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        add_marker_at(session, magnet_seek_frame(session, ui, x_to_frame(session, view, io.MousePos.x)));
+    }
+    // Right-click on a marker: its name and removing it.
+    if (hovered_marker >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ui.marker_menu = hovered_marker;
+        std::snprintf(ui.marker_name, sizeof(ui.marker_name), "%s",
+                      session.markers()[static_cast<std::size_t>(hovered_marker)].name.c_str());
+        ImGui::OpenPopup("marker menu");
+    }
+    if (ImGui::BeginPopup("marker menu")) {
+        if (ui.marker_menu >= 0 && static_cast<std::size_t>(ui.marker_menu) < session.markers().size()) {
+            const auto index = static_cast<std::size_t>(ui.marker_menu);
+            if (ImGui::IsWindowAppearing()) {
+                ImGui::SetKeyboardFocusHere();
+            }
+            ImGui::SetNextItemWidth(16.0f * font);
+            if (ImGui::InputText(T_("Name##marker"), ui.marker_name, sizeof(ui.marker_name),
+                                 ImGuiInputTextFlags_EnterReturnsTrue)) {
+                session.rename_marker(index, ui.marker_name);
+                ImGui::CloseCurrentPopup();
+            } else if (ImGui::IsItemDeactivatedAfterEdit()) {
+                session.rename_marker(index, ui.marker_name);
+            }
+            if (ImGui::Button(T_("Remove the marker"))) {
+                session.remove_marker(index);
+                ImGui::CloseCurrentPopup();
+            }
+        } else {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    // Right-click elsewhere: the tempo from here on, or a marker.
+    if (hovered_marker < 0 && ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
         ui.tempo_frame = session.snap_frame(std::max<std::int64_t>(x_to_frame(session, view, io.MousePos.x), 0));
         ui.tempo_index = -1;
         const auto& changes = session.tempo_changes();
@@ -3404,6 +3528,11 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
         }
         ImGui::TextDisabled("%s", T_("The grid and the metronome follow the tempo.\n"
                                      "Recorded sound and notes stay where they are in time."));
+        ImGui::Separator();
+        if (ImGui::Button(T_("Add a marker here"))) {
+            add_marker_at(session, ui.tempo_frame);
+            ImGui::CloseCurrentPopup();
+        }
         ImGui::EndPopup();
     }
 
@@ -3461,6 +3590,18 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
         }
         draw_list->AddText(ImVec2(x + 3.0f, time_top - 1.0f),
                            IM_COL32(170, 170, 180, 255), label);
+    }
+    // Markers: a yellow flag with the name in the time row.
+    for (const toh::app::Marker& marker : session.markers()) {
+        const float x = frame_to_x(session, view, marker.frame);
+        const ImVec2 size = ImGui::CalcTextSize(marker.name.c_str());
+        if (x + size.x + 8.0f < origin.x || x > origin.x + width) {
+            continue;
+        }
+        draw_list->AddLine(ImVec2(x, marker_top), ImVec2(x, bottom), IM_COL32(240, 200, 60, 255), 1.5f);
+        draw_list->AddRectFilled(ImVec2(x, marker_top), ImVec2(x + size.x + 8.0f, marker_top + size.y),
+                                 IM_COL32(150, 115, 20, 255), 2.0f);
+        draw_list->AddText(ImVec2(x + 4.0f, marker_top), IM_COL32(255, 248, 225, 255), marker.name.c_str());
     }
     draw_playhead(session, view, draw_list, origin.y, bottom);
     draw_list->PopClipRect();
@@ -4533,6 +4674,13 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         const float x = std::floor(frame_to_x(session, view, ui.magnet_frame)) + 0.5f;
         draw_list->AddLine(ImVec2(x, origin.y), ImVec2(x, corner.y), IM_COL32(255, 215, 60, 230),
                            2.0f);
+    }
+    // The markers go down through every lane as thin lines.
+    for (const toh::app::Marker& marker : session.markers()) {
+        const float x = std::floor(frame_to_x(session, view, marker.frame)) + 0.5f;
+        if (x >= origin.x && x <= corner.x) {
+            draw_list->AddLine(ImVec2(x, origin.y), ImVec2(x, corner.y), IM_COL32(240, 200, 60, 90));
+        }
     }
     draw_playhead(session, view, draw_list, origin.y, corner.y);
     draw_list->PopClipRect();

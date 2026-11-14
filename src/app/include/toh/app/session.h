@@ -130,6 +130,12 @@ struct ParamCurveInfo {
     std::vector<core::CurvePoint> points;  // sorted by frame, not empty
 };
 
+/// A named place on the timeline, to find a part of the song again (verse, chorus...).
+struct Marker {
+    std::int64_t frame = 0;
+    std::string name;
+};
+
 /// What a user interface needs to know about one track.
 struct TrackInfo {
     std::string name;  // UTF-8
@@ -398,6 +404,19 @@ public:
     /// Sets the tempo from `frame` on (20 to 400). At frame 0 or earlier it sets the start tempo.
     bool set_tempo_change(std::int64_t frame, double bpm);
     bool remove_tempo_change(std::size_t index);
+
+    /// The markers, in order of time. Adding, moving, renaming and removing them are edits
+    /// that can be undone, and they are saved with the project.
+    const std::vector<Marker>& markers() const noexcept { return markers_; }
+    /// Adds a marker and returns its index (frames below 0 are moved to 0).
+    std::size_t add_marker(std::int64_t frame, std::string name);
+    bool remove_marker(std::size_t index);
+    bool rename_marker(std::size_t index, std::string name);
+    /// Moves a marker and returns its index in the new order (or `index` when it is invalid).
+    std::size_t move_marker(std::size_t index, std::int64_t frame);
+    /// The nearest marker before or after `frame` (strictly), or -1 when there is none.
+    std::int64_t previous_marker_frame(std::int64_t frame) const noexcept;
+    std::int64_t next_marker_frame(std::int64_t frame) const noexcept;
     double bpm_at(std::int64_t frame) const noexcept;
     /// Beats before a timeline frame, and the frame of a beat position (both with fractions).
     double beats_at(std::int64_t frame) const noexcept;
@@ -621,6 +640,7 @@ private:
         std::string text;   // edit_text() of these tracks
         std::string label;  // what the step that follows (or was undone) did
         std::vector<core::TempoChange> tempo;  // the tempo changes of the project
+        std::vector<Marker> markers;
         double bpm = 120.0;                     // and its tempo at the start
     };
     /// The tracks and the tempo as they are now.
@@ -697,6 +717,8 @@ private:
     std::vector<std::string> open_warnings_;
     std::int64_t sync_token_ = 0;
     std::vector<core::TempoChange> tempo_changes_;  // sorted by frame, all after frame 0
+    std::vector<Marker> markers_;                   // sorted by frame
+    void sort_markers();
     std::shared_ptr<const core::TempoMap> tempo_map_;
     void rebuild_tempo();
     // The instrument plugin each live key went to, so that its end goes there too.

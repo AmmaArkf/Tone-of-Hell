@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.8
+
+- Markers (level 2 begins): named places on the timeline. M adds one at the playhead, a double-click on the ruler adds one there, and the ruler's right-click menu has "Add a marker here". A marker is a yellow flag in the ruler with a thin line through the lanes: click it to go there, drag it to move it, right-click it to rename or remove it.
+- Ctrl+Left and Ctrl+Right go to the previous and the next marker (also in the Transport menu; the shortcuts can be changed).
+- Markers are saved with the project, their changes can be undone, and the magnet and the playhead stick to them.
+
 ## 0.3.7
 
 - A "Hear yourself" button right of the master volume: the microphone or instrument being recorded is heard through the output (the input is opened when needed). Use headphones.

@@ -45,6 +45,9 @@ enum class Action {
     Copy,
     Paste,
     KeepSelection,
+    AddMarker,
+    PreviousMarker,
+    NextMarker,
     Count
 };
 
