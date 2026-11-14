@@ -762,6 +762,8 @@ struct Vst3Plugin::Impl {
     Vst::ProcessContext context{};
     std::array<bool, 128> held{};  // the keys that are down
     std::int64_t time = 0;
+    std::array<ParamChange, 64> rt{};  // automation values for the next block, normalized
+    std::uint32_t rt_count = 0;
 
     core::SpscQueue<ParamChange, 1024> changes;  // to the audio thread
     std::uint64_t sent = 0;
@@ -1052,6 +1054,14 @@ void Vst3Plugin::process(float* interleaved, std::uint32_t frames, std::uint32_t
     if (popped > 0) {
         s.consumed.fetch_add(popped, std::memory_order_release);
     }
+    for (std::uint32_t r = 0; r < s.rt_count; ++r) {
+        int32 index = 0;
+        if (Vst::IParamValueQueue* queue = s.in_changes.addParameterData(s.rt[r].id, index)) {
+            int32 point = 0;
+            queue->addPoint(0, s.rt[r].value, point);
+        }
+    }
+    s.rt_count = 0;
 
     for (std::uint32_t done = 0; done < frames;) {
         const std::uint32_t count = std::min(frames - done, kMaxFrames);
@@ -1129,6 +1139,13 @@ void Vst3Plugin::add_note(std::uint32_t frame, bool on, int pitch, float velocit
         return;
     }
     send(on, pitch, velocity);
+}
+
+void Vst3Plugin::set_param_rt(std::uint32_t id, double value) noexcept {
+    Impl& s = *impl_;
+    if (s.rt_count < s.rt.size()) {
+        s.rt[s.rt_count++] = ParamChange{id, std::clamp(value / scale_of(s, id), 0.0, 1.0)};
+    }
 }
 
 void Vst3Plugin::reset() noexcept {

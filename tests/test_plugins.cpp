@@ -204,6 +204,36 @@ TEST_CASE("An instrument plugin plays the notes of its track, live keys too") {
     std::filesystem::remove_all(folder);
 }
 
+TEST_CASE("A parameter of a plugin follows its automation, and the curve is saved") {
+    Session plain;
+    REQUIRE(plain.add_track("take", steady_clip(48000, 0.25f)));
+    const float dry = played_sample(plain);
+
+    Session session;
+    REQUIRE(session.add_track("take", steady_clip(48000, 0.25f)));
+    std::string error;
+    REQUIRE_MESSAGE(session.add_clap_effect(0, kExamples, "org.toneofhell.gain", &error), error);
+    const auto plugin = session.tracks()[0].effects[0].plugin;
+    REQUIRE(session.set_param_curve(0, plugin, 0, {{0, 6.0206f}, {40000, 99.0f}}));
+    REQUIRE(session.tracks()[0].param_curves.size() == 1);
+    CHECK(session.tracks()[0].param_curves[0].points[1].value == doctest::Approx(24.0f));  // the limit
+    REQUIRE(session.set_param_curve(0, plugin, 0, {{0, 6.0206f}}));
+    CHECK(played_sample(session) == doctest::Approx(2.0f * dry).epsilon(0.01));
+
+    const auto folder = std::filesystem::temp_directory_path() / "toh_param_curve_test";
+    std::filesystem::create_directories(folder);
+    REQUIRE_MESSAGE(session.save_project(folder / "c.tohp", &error), error);
+    Session reopened;
+    REQUIRE_MESSAGE(reopened.open_project(folder / "c.tohp", &error), error);
+    REQUIRE(reopened.tracks()[0].param_curves.size() == 1);
+    CHECK(reopened.tracks()[0].param_curves[0].plugin == reopened.tracks()[0].effects[0].plugin);
+    CHECK(reopened.tracks()[0].param_curves[0].points[0].value == doctest::Approx(6.0206f));
+    std::filesystem::remove_all(folder);
+
+    REQUIRE(session.set_param_curve(0, plugin, 0, {}));
+    CHECK(session.tracks()[0].param_curves.empty());
+}
+
 TEST_CASE("A track plays through its effects, and they are saved with the project") {
     Session plain;
     REQUIRE(plain.add_track("take", steady_clip(48000, 0.25f)));

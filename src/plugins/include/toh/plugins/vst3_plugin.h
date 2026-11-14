@@ -33,6 +33,7 @@ public:
     void process(float* interleaved, std::uint32_t frames, std::uint32_t channels) noexcept override;
     void add_note(std::uint32_t frame, bool on, int pitch, float velocity) noexcept override;
     void reset() noexcept override;
+    void set_param_rt(std::uint32_t id, double value) noexcept override;
 
     const std::vector<Param>& params() const noexcept override;
     double param_value(std::uint32_t id) const override;

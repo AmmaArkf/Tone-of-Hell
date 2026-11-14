@@ -93,7 +93,8 @@ bool Engine::push_content(std::uint32_t track, std::unique_ptr<TrackContent> con
 bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
                                const std::vector<std::shared_ptr<AudioEffect>>& effects,
                                std::shared_ptr<AudioEffect> instrument, std::int64_t latency,
-                               std::vector<CurvePoint> volume, std::vector<CurvePoint> pan) {
+                               std::vector<CurvePoint> volume, std::vector<CurvePoint> pan,
+                               std::vector<ParamCurve> params) {
     if (track >= kMaxTracks) {
         return false;
     }
@@ -111,6 +112,14 @@ bool Engine::set_track_regions(std::uint32_t track, const std::vector<Region>& r
     std::stable_sort(pan.begin(), pan.end(),
                      [](const CurvePoint& a, const CurvePoint& b) { return a.frame < b.frame; });
     content->pan = std::move(pan);
+    for (ParamCurve& curve : params) {
+        if (curve.effect && !curve.points.empty()) {
+            std::stable_sort(curve.points.begin(), curve.points.end(),
+                             [](const CurvePoint& a, const CurvePoint& b) { return a.frame < b.frame; });
+            curve.sent = false;
+            content->params.push_back(std::move(curve));
+        }
+    }
     for (const auto& effect : effects) {
         if (effect) {
             content->effects.push_back(effect);
@@ -1061,6 +1070,17 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 }
             }
             track_pos_ = positions;
+            // Automated plugin parameters get the value of their curve at the start of the block.
+            if (block_high >= 0) {
+                for (const ParamCurve& curve : track.content->params) {
+                    const float value = curve_at(curve.points, block_low);
+                    if (!curve.sent || value != curve.last) {
+                        curve.effect->set_param_rt(curve.id, static_cast<double>(value));
+                        curve.sent = true;
+                        curve.last = value;
+                    }
+                }
+            }
             // An instrument plugin gets the notes as events. Where the playhead jumps (a seek,
             // a loop, playing backwards), the notes that were sounding end.
             AudioEffect* const instrument = track.content->instrument.get();

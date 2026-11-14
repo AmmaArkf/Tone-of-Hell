@@ -23,6 +23,9 @@ public:
     /// processed. A `pitch` of -1 with `on` false ends every note.
     virtual void add_note(std::uint32_t /*frame*/, bool /*on*/, int /*pitch*/, float /*velocity*/) noexcept {}
 
+    /// Audio thread: gives a parameter a new value for the next block processed (automation).
+    virtual void set_param_rt(std::uint32_t /*id*/, double /*value*/) noexcept {}
+
     /// Forgets what is still sounding inside (echoes, held notes). Only while nothing
     /// processes the effect.
     virtual void reset() noexcept {}

@@ -87,6 +87,15 @@ inline float curve_at(const std::vector<CurvePoint>& points, std::int64_t frame)
     return a.value + (b.value - a.value) * t;
 }
 
+/// The automation of one parameter of a plugin on a track: its value along the timeline.
+struct ParamCurve {
+    std::shared_ptr<AudioEffect> effect;
+    std::uint32_t id = 0;
+    std::vector<CurvePoint> points;  ///< sorted by frame, not empty
+    mutable bool sent = false;       // audio thread: the value given to the plugin last
+    mutable float last = 0.0f;
+};
+
 /// How many frames of its clip a region plays.
 inline std::int64_t clip_frames_used(std::int64_t length, double rate) noexcept {
     return static_cast<std::int64_t>(std::ceil(static_cast<double>(length) * rate - 1e-9));
@@ -133,6 +142,8 @@ public:
     /// `effects` are the insert effects of the track, in the order the sound passes them.
     /// `instrument` (a plugin) plays the note regions of the track instead, before the effects.
     /// `volume` is the volume automation of the track (gain 0 to 2, multiplied with its fader).
+    /// `params` automate parameters of the track's plugins: once per block the plugin gets the
+    /// value of the curve where the playhead is.
     /// `pan` is its pan automation (-1 left to 1 right); while it has points, they decide the
     /// pan instead of set_track_pan().
     /// `latency` is how many frames the instrument and effects together delay the sound: the
@@ -140,7 +151,8 @@ public:
     bool set_track_regions(std::uint32_t track, const std::vector<Region>& regions,
                            const std::vector<std::shared_ptr<AudioEffect>>& effects = {},
                            std::shared_ptr<AudioEffect> instrument = nullptr, std::int64_t latency = 0,
-                           std::vector<CurvePoint> volume = {}, std::vector<CurvePoint> pan = {});
+                           std::vector<CurvePoint> volume = {}, std::vector<CurvePoint> pan = {},
+                           std::vector<ParamCurve> params = {});
     /// Asks the audio thread to confirm that it has taken in every change made so far:
     /// synced() returns `token` (or a later one) once it has.
     bool request_sync(std::int64_t token);
@@ -318,6 +330,7 @@ private:
         std::int64_t latency = 0;  // frames the plugins delay the sound
         std::vector<CurvePoint> volume;  // volume automation, sorted by frame
         std::vector<CurvePoint> pan;     // pan automation, sorted by frame
+        std::vector<ParamCurve> params;  // automation of plugin parameters
         std::int64_t end = 0;  // end of the last region
     };
 

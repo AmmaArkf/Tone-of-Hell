@@ -62,6 +62,7 @@ struct TrackPlugins {
     std::vector<std::shared_ptr<core::AudioEffect>> effects;
     std::shared_ptr<core::AudioEffect> instrument;
     std::int64_t latency = 0;
+    std::vector<core::ParamCurve> params;
 };
 
 // Reads "frame:value,frame:value" into a curve with its values limited to low..high.
@@ -89,6 +90,20 @@ std::vector<core::CurvePoint> parse_curve(const std::string& line, float low, fl
 
 TrackPlugins track_plugins(const TrackInfo& track) {
     TrackPlugins plugins;
+    // Parameter automation, for the plugins that are on the track now.
+    for (const ParamCurveInfo& curve : track.param_curves) {
+        bool present = curve.plugin && curve.plugin == track.plugin_instrument.plugin;
+        for (const EffectSlot& slot : track.effects) {
+            present = present || (curve.plugin && curve.plugin == slot.plugin);
+        }
+        if (present && !curve.points.empty()) {
+            core::ParamCurve engine_curve;
+            engine_curve.effect = curve.plugin;
+            engine_curve.id = curve.param;
+            engine_curve.points = curve.points;
+            plugins.params.push_back(std::move(engine_curve));
+        }
+    }
     if (track.plugin_instrument.plugin) {
         plugins.instrument = track.plugin_instrument.plugin;
         plugins.latency += track.plugin_instrument.plugin->latency();
@@ -973,7 +988,7 @@ void Session::sync_track_regions(std::size_t index) {
     const TrackPlugins plugins = track_plugins(tracks_[index]);
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, plugins.effects,
                               plugins.instrument, plugins.latency, tracks_[index].volume_curve,
-                              tracks_[index].pan_curve);
+                              tracks_[index].pan_curve, plugins.params);
     update_streaming();
 }
 
@@ -1045,6 +1060,43 @@ bool Session::set_track_pan_curve(std::size_t index, std::vector<core::CurvePoin
     tracks_[index].pan_curve = std::move(points);
     sync_track_regions(index);
     pending_label_ = "Pan automation";
+    return true;
+}
+
+bool Session::set_param_curve(std::size_t index, const std::shared_ptr<plugins::Plugin>& plugin,
+                              std::uint32_t param, std::vector<core::CurvePoint> points) {
+    if (index >= tracks_.size() || !plugin) {
+        return false;
+    }
+    double low = 0.0;
+    double high = 1.0;
+    for (const plugins::Plugin::Param& info : plugin->params()) {
+        if (info.id == param) {
+            low = info.min;
+            high = info.max;
+        }
+    }
+    for (core::CurvePoint& point : points) {
+        point.frame = std::max<std::int64_t>(point.frame, 0);
+        point.value = std::clamp(point.value, static_cast<float>(low), static_cast<float>(high));
+    }
+    std::stable_sort(points.begin(), points.end(),
+                     [](const core::CurvePoint& a, const core::CurvePoint& b) { return a.frame < b.frame; });
+    auto& curves = tracks_[index].param_curves;
+    auto found = std::find_if(curves.begin(), curves.end(), [&](const ParamCurveInfo& curve) {
+        return curve.plugin == plugin && curve.param == param;
+    });
+    if (points.empty()) {
+        if (found != curves.end()) {
+            curves.erase(found);
+        }
+    } else if (found != curves.end()) {
+        found->points = std::move(points);
+    } else {
+        curves.push_back(ParamCurveInfo{plugin, param, std::move(points)});
+    }
+    sync_track_regions(index);
+    pending_label_ = "Parameter automation";
     return true;
 }
 
@@ -2047,6 +2099,26 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
         }
         out << "gain=" << track.gain << "\n";
         out << "pan=" << track.pan << "\n";
+        // "slot|parameter|frame:value,..." with slot -1 for the instrument plugin.
+        for (const ParamCurveInfo& curve : track.param_curves) {
+            long long slot = -2;
+            if (curve.plugin && curve.plugin == track.plugin_instrument.plugin) {
+                slot = -1;
+            }
+            for (std::size_t e = 0; e < track.effects.size(); ++e) {
+                if (curve.plugin && curve.plugin == track.effects[e].plugin) {
+                    slot = static_cast<long long>(e);
+                }
+            }
+            if (slot == -2 || curve.points.empty()) {
+                continue;  // its plugin is gone
+            }
+            out << "param_curve=" << slot << "|" << curve.param << "|";
+            for (std::size_t p = 0; p < curve.points.size(); ++p) {
+                out << (p > 0 ? "," : "") << curve.points[p].frame << ":" << curve.points[p].value;
+            }
+            out << "\n";
+        }
         if (!track.pan_curve.empty()) {
             out << "pan_curve=";
             for (std::size_t p = 0; p < track.pan_curve.size(); ++p) {
@@ -2363,6 +2435,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         float pan = 0.0f;
         std::string volume_curve;
         std::string pan_curve;
+        std::vector<std::string> param_curves;
         bool mute = false;
         bool solo = false;
         long long instrument = 0;
@@ -2464,6 +2537,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().icon = value;
                 } else if (key == "gain") {
                     tracks.back().gain = std::clamp(static_cast<float>(real), 0.0f, 2.0f);
+                } else if (key == "param_curve") {
+                    tracks.back().param_curves.push_back(value);
                 } else if (key == "pan_curve") {
                     tracks.back().pan_curve = value;
                 } else if (key == "volume_curve") {
@@ -2780,11 +2855,13 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                 track.plugin_instrument.plugin = std::move(plugin);
             }
         }
+        std::vector<std::shared_ptr<plugins::Plugin>> by_slot;  // as saved; null where one is missing
         for (const EffectEntry& effect : entry.effects) {
             if (track.effects.size() >= kMaxEffects) {
                 break;
             }
             auto plugin = load_plugin(effect);
+            by_slot.push_back(plugin);
             if (!plugin) {
                 continue;
             }
@@ -2793,6 +2870,41 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             slot.enabled = effect.enabled;
             slot.plugin = std::move(plugin);
             track.effects.push_back(std::move(slot));
+        }
+        for (const std::string& saved : entry.param_curves) {
+            char* after = nullptr;
+            const long long slot = std::strtoll(saved.c_str(), &after, 10);
+            if (*after != '|') {
+                continue;
+            }
+            const char* rest = after + 1;
+            const unsigned long long param = std::strtoull(rest, &after, 10);
+            if (after == rest || *after != '|') {
+                continue;
+            }
+            std::shared_ptr<plugins::Plugin> plugin;
+            if (slot == -1) {
+                plugin = track.plugin_instrument.plugin;
+            } else if (slot >= 0 && static_cast<std::size_t>(slot) < by_slot.size()) {
+                plugin = by_slot[static_cast<std::size_t>(slot)];
+            }
+            if (!plugin) {
+                continue;
+            }
+            double low = 0.0;
+            double high = 1.0;
+            for (const plugins::Plugin::Param& info : plugin->params()) {
+                if (info.id == static_cast<std::uint32_t>(param)) {
+                    low = info.min;
+                    high = info.max;
+                }
+            }
+            std::vector<core::CurvePoint> points =
+                parse_curve(after + 1, static_cast<float>(low), static_cast<float>(high));
+            if (!points.empty()) {
+                track.param_curves.push_back(
+                    ParamCurveInfo{std::move(plugin), static_cast<std::uint32_t>(param), std::move(points)});
+            }
         }
         fresh.push_back(std::move(track));
     }
@@ -2898,6 +3010,13 @@ std::string Session::edit_text() const {
         for (const EffectSlot& slot : track.effects) {
             out << "E|" << static_cast<const void*>(slot.plugin.get()) << "|" << (slot.enabled ? 1 : 0)
                 << "\n";
+        }
+        for (const ParamCurveInfo& curve : track.param_curves) {
+            out << "C|" << static_cast<const void*>(curve.plugin.get()) << "|" << curve.param;
+            for (const core::CurvePoint& point : curve.points) {
+                out << "|" << point.frame << ":" << point.value;
+            }
+            out << "\n";
         }
         out << "I|" << static_cast<const void*>(track.plugin_instrument.plugin.get()) << "\n";
         out << "V";
@@ -3192,7 +3311,7 @@ bool Session::render_project(const std::function<bool(const float*, std::uint32_
             effect->reset();
         }
         offline->set_track_regions(slot, engine_regions(track), plugins.effects, plugins.instrument,
-                                   plugins.latency, track.volume_curve, track.pan_curve);
+                                   plugins.latency, track.volume_curve, track.pan_curve, plugins.params);
         offline->set_track_gain(slot, track.gain);
         offline->set_track_pan(slot, track.pan);
         offline->set_track_mute(slot, silenced(track));

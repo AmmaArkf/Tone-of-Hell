@@ -236,6 +236,8 @@ struct ClapPlugin::Impl {
     std::array<clap_event_param_value_t, 256> events{};
     std::array<PendingNote, 512> pending{};  // notes for the next block (audio thread)
     std::uint32_t pending_count = 0;
+    std::array<ParamChange, 64> rt{};  // automation values for the next block (audio thread)
+    std::uint32_t rt_count = 0;
     std::array<clap_event_note_t, 512> note_events{};
     std::array<const clap_event_header_t*, 768> order{};  // every event of the block, by time
     std::uint32_t event_count = 0;
@@ -597,6 +599,24 @@ void ClapPlugin::process(float* interleaved, std::uint32_t frames, std::uint32_t
     if (popped > 0) {
         s.consumed.fetch_add(popped, std::memory_order_release);
     }
+    for (std::uint32_t r = 0; r < s.rt_count && param_count < s.events.size(); ++r) {
+        clap_event_param_value_t& event = s.events[param_count++];
+        event = clap_event_param_value_t{};
+        event.header.size = static_cast<std::uint32_t>(sizeof(clap_event_param_value_t));
+        event.header.time = 0;
+        event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        event.header.type = CLAP_EVENT_PARAM_VALUE;
+        event.header.flags = 0;
+        event.param_id = s.rt[r].id;
+        event.cookie = nullptr;
+        event.note_id = -1;
+        event.port_index = -1;
+        event.channel = -1;
+        event.key = -1;
+        event.value = s.rt[r].value;
+        s.order[s.event_count++] = &event.header;
+    }
+    s.rt_count = 0;
     // Notes, sorted by their frame (the engine adds them track by track, region by region).
     for (std::uint32_t i = 1; i < s.pending_count; ++i) {
         const PendingNote note = s.pending[i];
@@ -678,6 +698,13 @@ void ClapPlugin::add_note(std::uint32_t frame, bool on, int pitch, float velocit
     note.on = on;
     note.key = static_cast<std::int16_t>(std::max(pitch, -1));
     note.velocity = velocity;
+}
+
+void ClapPlugin::set_param_rt(std::uint32_t id, double value) noexcept {
+    Impl& s = *impl_;
+    if (s.rt_count < s.rt.size()) {
+        s.rt[s.rt_count++] = ParamChange{id, value};
+    }
 }
 
 void ClapPlugin::reset() noexcept {

@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.19
+
+- Automation of plugin parameters: in the FX list, Automate next to a plugin (an effect or the instrument) shows its parameters, with a box to find one. Choosing one switches the lanes to its curve on the track of the plugin: bottom is the lowest value, top the highest, and a point shows the value as the plugin writes it. The plugin gets the value of the curve for every block of sound, for CLAP and VST3 alike. Saved in the project, part of exports and undo.
+
 ## 0.2.18
 
 - Pan automation: with Automation on, a list next to the button chooses Volume or Pan. The pan line has left at the top, the centre in the middle and right at the bottom. While a track has pan points they decide its pan instead of the pan control. Saved in the project, part of exports and undo.

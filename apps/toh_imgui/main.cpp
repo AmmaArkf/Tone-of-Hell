@@ -190,7 +190,12 @@ struct UiState {
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
     bool automation_mode = false;       // the lanes show and edit an automation curve
-    int automation_target = 0;          // which one: 0 volume, 1 pan
+    int automation_target = 0;          // which one: 0 volume, 1 pan, 2 a plugin parameter
+    std::weak_ptr<toh::plugins::Plugin> auto_plugin;  // for 2: the plugin and its parameter
+    std::uint32_t auto_param = 0;
+    std::string auto_param_name;
+    std::shared_ptr<toh::plugins::Plugin> pick_plugin;  // the "Automate" list is open for it
+    char pick_filter[64] = {};
     bool auto_drag = false;             // a point of it is being dragged
     std::size_t auto_track = 0;
     std::size_t auto_point = 0;
@@ -3093,16 +3098,28 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     tooltip(T_("Volume automation: the lanes show a line for the volume of each track along the song.\n"
                "Click to add a point, drag to move it, right-click to remove it. Switch off to edit regions again."));
     ImGui::SameLine();
+    if (ui.automation_target == 2 && ui.auto_plugin.expired()) {
+        ui.automation_target = 0;  // the plugin is gone
+    }
     if (ui.automation_mode) {
         static const char* const targets[] = {"Volume", "Pan"};
-        ImGui::SetNextItemWidth(8.0f * ImGui::GetFontSize());
-        if (ImGui::BeginCombo("##automation target", T_(targets[ui.automation_target]))) {
+        ImGui::SetNextItemWidth(ui.automation_target == 2 ? 16.0f * ImGui::GetFontSize()
+                                                          : 8.0f * ImGui::GetFontSize());
+        const char* const preview =
+            ui.automation_target == 2 ? ui.auto_param_name.c_str() : T_(targets[ui.automation_target]);
+        if (ImGui::BeginCombo("##automation target", preview)) {
             for (int k = 0; k < 2; ++k) {
                 if (ImGui::Selectable(T_(targets[k]), ui.automation_target == k)) {
                     ui.automation_target = k;
                     ui.auto_drag = false;
                 }
             }
+            if (!ui.auto_plugin.expired() &&
+                ImGui::Selectable(ui.auto_param_name.c_str(), ui.automation_target == 2)) {
+                ui.automation_target = 2;
+                ui.auto_drag = false;
+            }
+            ImGui::TextDisabled("%s", T_("Plugin parameters: FX > Automate"));
             ImGui::EndCombo();
         }
         tooltip(T_("What the lines on the lanes show and change"));
@@ -3380,10 +3397,58 @@ std::size_t lane_under(const UiState& ui, float y, std::size_t count) {
 
 // The curve that is edited, as heights from 0 (bottom of the lane) to 2 (top): the volume as it
 // is (0 % to 200 %), the pan turned so that left is at the top and the centre in the middle.
+// The parameter that is automated (target 2), if its plugin is on this track.
+const toh::plugins::Plugin::Param* automated_param(const Session& session, const UiState& ui,
+                                                   std::size_t track,
+                                                   std::shared_ptr<toh::plugins::Plugin>& plugin) {
+    plugin = ui.auto_plugin.lock();
+    if (!plugin) {
+        return nullptr;
+    }
+    const TrackInfo& info = session.tracks()[track];
+    bool here = info.plugin_instrument.plugin == plugin;
+    for (const toh::app::EffectSlot& slot : info.effects) {
+        here = here || slot.plugin == plugin;
+    }
+    if (!here) {
+        return nullptr;
+    }
+    for (const auto& param : plugin->params()) {
+        if (param.id == ui.auto_param) {
+            return &param;
+        }
+    }
+    return nullptr;
+}
+
+// True when the lane of a track shows a curve in the current automation mode.
+bool automation_applies(const Session& session, const UiState& ui, std::size_t track) {
+    std::shared_ptr<toh::plugins::Plugin> plugin;
+    return ui.automation_target != 2 || automated_param(session, ui, track, plugin) != nullptr;
+}
+
 std::vector<toh::core::CurvePoint> automation_points(const Session& session, const UiState& ui,
                                                      std::size_t track) {
     if (ui.automation_target == 0) {
         return session.tracks()[track].volume_curve;
+    }
+    if (ui.automation_target == 2) {
+        std::shared_ptr<toh::plugins::Plugin> plugin;
+        const auto* param = automated_param(session, ui, track, plugin);
+        std::vector<toh::core::CurvePoint> points;
+        if (param == nullptr) {
+            return points;
+        }
+        for (const toh::app::ParamCurveInfo& curve : session.tracks()[track].param_curves) {
+            if (curve.plugin == plugin && curve.param == param->id) {
+                points = curve.points;
+            }
+        }
+        const double range = param->max > param->min ? param->max - param->min : 1.0;
+        for (toh::core::CurvePoint& point : points) {
+            point.value = static_cast<float>(2.0 * (static_cast<double>(point.value) - param->min) / range);
+        }
+        return points;
     }
     std::vector<toh::core::CurvePoint> points = session.tracks()[track].pan_curve;
     for (toh::core::CurvePoint& point : points) {
@@ -3398,6 +3463,19 @@ void store_automation(Session& session, const UiState& ui, std::size_t track,
         session.set_track_volume_curve(track, std::move(points));
         return;
     }
+    if (ui.automation_target == 2) {
+        std::shared_ptr<toh::plugins::Plugin> plugin;
+        const auto* param = automated_param(session, ui, track, plugin);
+        if (param == nullptr) {
+            return;
+        }
+        for (toh::core::CurvePoint& point : points) {
+            double value = param->min + static_cast<double>(point.value) / 2.0 * (param->max - param->min);
+            point.value = static_cast<float>(param->stepped ? std::round(value) : value);
+        }
+        session.set_param_curve(track, plugin, param->id, std::move(points));
+        return;
+    }
     for (toh::core::CurvePoint& point : points) {
         point.value = 1.0f - point.value;
     }
@@ -3408,6 +3486,18 @@ void store_automation(Session& session, const UiState& ui, std::size_t track,
 void automation_label(const UiState& ui, float height, char* text, std::size_t size) {
     if (ui.automation_target == 0) {
         std::snprintf(text, size, "%d%%", static_cast<int>(std::lround(height * 100.0f)));
+        return;
+    }
+    if (ui.automation_target == 2) {
+        text[0] = '\0';
+        if (const auto plugin = ui.auto_plugin.lock()) {
+            for (const auto& param : plugin->params()) {
+                if (param.id == ui.auto_param) {
+                    const double value = param.min + static_cast<double>(height) / 2.0 * (param.max - param.min);
+                    std::snprintf(text, size, "%s", plugin->param_text(param.id, value).c_str());
+                }
+            }
+        }
         return;
     }
     const int amount = static_cast<int>(std::lround(std::fabs(1.0f - height) * 100.0f));
@@ -3426,6 +3516,9 @@ float automation_y(float value, float top, float height) { return top + height *
 void edit_automation(Session& session, UiState& ui, std::size_t track_index, const ImVec2& origin,
                      float row_height, bool hovered) {
     const ImGuiIO& io = ImGui::GetIO();
+    if (!automation_applies(session, ui, track_index)) {
+        return;  // the automated plugin is on another track
+    }
     std::vector<toh::core::CurvePoint> points = automation_points(session, ui, track_index);
     const float value = std::clamp(2.0f * (1.0f - (io.MousePos.y - origin.y) / row_height), 0.0f, 2.0f);
     std::int64_t frame = std::max<std::int64_t>(x_to_frame(session, ui.view, io.MousePos.x), 0);
@@ -3467,7 +3560,8 @@ void edit_automation(Session& session, UiState& ui, std::size_t track_index, con
                                                                     : std::numeric_limits<std::int64_t>::max();
         points[ui.auto_point].frame = std::clamp(frame, low, high);
         // Near 100 % the value sticks to it (Alt: free).
-        points[ui.auto_point].value = !io.KeyAlt && std::fabs(value - 1.0f) < 0.03f ? 1.0f : value;
+        points[ui.auto_point].value =
+            ui.automation_target != 2 && !io.KeyAlt && std::fabs(value - 1.0f) < 0.03f ? 1.0f : value;
         store_automation(session, ui, track_index, points);
     }
     if (ui.auto_drag && ui.auto_track == track_index && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
@@ -3487,6 +3581,9 @@ void draw_automation(const Session& session, const UiState& ui, std::size_t trac
     const float left = origin.x;
     const float right = origin.x + width;
     d->AddRectFilled(origin, ImVec2(right, origin.y + row_height), IM_COL32(0, 0, 0, 90));
+    if (!automation_applies(session, ui, track_index)) {
+        return;
+    }
     const float unity = automation_y(1.0f, origin.y, row_height);
     d->AddLine(ImVec2(left, unity), ImVec2(right, unity), IM_COL32(255, 255, 255, 50));
     if (points.empty()) {
@@ -3495,7 +3592,9 @@ void draw_automation(const Session& session, const UiState& ui, std::size_t trac
             d->AddText(ImVec2(left + 8.0f, origin.y + 4.0f), IM_COL32(255, 210, 150, 230),
                        T_(ui.automation_target == 0
                               ? "Click to add a volume point. Drag to move it, right-click to remove it."
-                              : "Click to add a pan point: left is up, right is down. Right-click removes it."));
+                              : ui.automation_target == 1
+                                    ? "Click to add a pan point: left is up, right is down. Right-click removes it."
+                                    : "Click to add a point for the parameter. Drag to move it, right-click to remove it."));
         }
         return;
     }
@@ -4311,12 +4410,18 @@ void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
         return;
     }
     ImGui::TextDisabled("%s", T_("Effects of the track: the sound passes them from top to bottom."));
+    bool open_picker = false;
     const auto& instrument_slot = session.tracks()[track].plugin_instrument;
     if (instrument_slot.plugin) {
         ImGui::Text(T_("Instrument: %s"), instrument_slot.name.c_str());
         ImGui::SameLine();
         if (ImGui::SmallButton(with_id(T_("Open"), "instrument open").c_str())) {
             open_effect_window(ui, instrument_slot.plugin);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(with_id(T_("Automate"), "instrument automate").c_str())) {
+            ui.pick_plugin = instrument_slot.plugin;
+            open_picker = true;
         }
         ImGui::SameLine();
         if (ImGui::SmallButton(with_id(T_("Remove"), "instrument remove").c_str())) {
@@ -4345,6 +4450,12 @@ void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
         }
         tooltip(T_("The plugin's window, or sliders for its parameters"));
         ImGui::SameLine();
+        if (ImGui::SmallButton(T_("Automate"))) {
+            ui.pick_plugin = effects[e].plugin;
+            open_picker = true;
+        }
+        tooltip(T_("Choose a parameter and draw how it changes along the song"));
+        ImGui::SameLine();
         if (ImGui::SmallButton("^") && e > 0) {
             action = 1;
             target = e;
@@ -4369,6 +4480,54 @@ void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
         session.move_effect(track, target, target + 1);
     } else if (action == 3) {
         session.remove_effect(track, target);
+    }
+    // The list of parameters to automate: choosing one switches the lanes to its curve.
+    if (open_picker) {
+        ui.pick_filter[0] = '\0';
+        ImGui::OpenPopup("automate parameter");
+    }
+    if (ImGui::BeginPopup("automate parameter")) {
+        if (ui.pick_plugin) {
+            ImGui::TextDisabled("%s", ui.pick_plugin->info().name.c_str());
+            ImGui::SetNextItemWidth(18.0f * ImGui::GetFontSize());
+            ImGui::InputTextWithHint("##find", T_("Find a parameter"), ui.pick_filter, sizeof(ui.pick_filter));
+            std::string wanted = ui.pick_filter;
+            for (char& c : wanted) {
+                c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            }
+            ImGui::BeginChild("parameters", ImVec2(22.0f * ImGui::GetFontSize(), 16.0f * ImGui::GetFontSize()));
+            int shown = 0;
+            for (const auto& param : ui.pick_plugin->params()) {
+                if (param.hidden || shown >= 300) {
+                    continue;
+                }
+                std::string lower = param.name;
+                for (char& c : lower) {
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                }
+                if (!wanted.empty() && lower.find(wanted) == std::string::npos) {
+                    continue;
+                }
+                ++shown;
+                const std::string label = param.name + "##" + std::to_string(param.id);
+                if (ImGui::Selectable(label.c_str())) {
+                    ui.automation_mode = true;
+                    ui.automation_target = 2;
+                    ui.auto_plugin = ui.pick_plugin;
+                    ui.auto_param = param.id;
+                    ui.auto_param_name = ui.pick_plugin->info().name + ": " + param.name;
+                    ui.auto_drag = false;
+                    ui.pick_plugin.reset();
+                    ImGui::CloseCurrentPopup();
+                    break;
+                }
+            }
+            if (shown == 0) {
+                ImGui::TextDisabled("%s", T_("No parameters found."));
+            }
+            ImGui::EndChild();
+        }
+        ImGui::EndPopup();
     }
     ImGui::Separator();
     if (ImGui::BeginMenu(T_("Add an effect"))) {

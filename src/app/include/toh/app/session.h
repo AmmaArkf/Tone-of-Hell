@@ -121,6 +121,14 @@ struct EffectSlot {
     bool enabled = true;
 };
 
+/// The automation of one parameter of a plugin of a track: its value (in the units of the
+/// parameter) along the timeline.
+struct ParamCurveInfo {
+    std::shared_ptr<plugins::Plugin> plugin;
+    std::uint32_t param = 0;
+    std::vector<core::CurvePoint> points;  // sorted by frame, not empty
+};
+
 /// What a user interface needs to know about one track.
 struct TrackInfo {
     std::string name;  // UTF-8
@@ -145,6 +153,9 @@ struct TrackInfo {
     /// Pan automation: -1 (left) to 1 (right) along the timeline. While it has points they
     /// decide the pan instead of `pan`.
     std::vector<core::CurvePoint> pan_curve;
+    /// Automation of plugin parameters. A curve of a plugin that is no longer on the track
+    /// is kept (an undo may bring the plugin back) but does nothing.
+    std::vector<ParamCurveInfo> param_curves;
     float gain = 1.0f;
     float pan = 0.0f;
     bool mute = false;
@@ -278,6 +289,10 @@ public:
     bool set_track_volume_curve(std::size_t index, std::vector<core::CurvePoint> points);
     /// Replaces the pan automation of a track (see TrackInfo::pan_curve); values limited to -1..1.
     bool set_track_pan_curve(std::size_t index, std::vector<core::CurvePoint> points);
+    /// Replaces the automation of one parameter of a plugin of a track; no points removes it.
+    /// The values are limited to the range of the parameter.
+    bool set_param_curve(std::size_t index, const std::shared_ptr<plugins::Plugin>& plugin,
+                         std::uint32_t param, std::vector<core::CurvePoint> points);
     bool set_track_selected(std::size_t index, bool selected);
     /// Selects one track and deselects every other one.
     void select_only_track(std::size_t index);
