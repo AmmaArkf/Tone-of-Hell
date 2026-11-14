@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.21
+
+- Equalizer (stage 9 begins): a built-in effect with three bands. Low and High turn everything below or above their frequency up or down; Mid is a bell around its frequency with a width. FX > Add an effect > Equalizer; every parameter can be automated.
+
 ## 0.2.20
 
 - Tempo map: the tempo can change inside a song. Right-click the ruler where the new tempo begins, type the BPM and press "Set the tempo"; a blue flag on the ruler shows it, and a right-click on the flag changes or removes it. The BPM field of the toolbar stays the tempo from the start.

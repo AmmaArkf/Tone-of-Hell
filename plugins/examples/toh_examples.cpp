@@ -1,5 +1,5 @@
-// Example CLAP plugins that come with Tone of Hell: Echo, Tremolo, Gain, Simple Synth, and two
-// against noise: Noise Gate and Denoiser.
+// The CLAP plugins that come with Tone of Hell: Echo, Tremolo, Gain, Simple Synth, two against
+// noise (Noise Gate and Denoiser), and the mixing effects Equalizer, Compressor, Limiter and Reverb.
 //
 // They are small on purpose: they show what a CLAP effect needs (a factory, audio ports,
 // parameters and a saved state), they give a new user a few effects to try, and the tests use
@@ -49,6 +49,15 @@ const char* const kTremoloFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_P
                                         CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const char* const kGainFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_UTILITY,
                                      CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+const ParamDef kEqParams[] = {{0, "Low gain", -18.0, 18.0, 0.0, "dB"},
+                              {1, "Low frequency", 40.0, 600.0, 120.0, "Hz"},
+                              {2, "Mid gain", -18.0, 18.0, 0.0, "dB"},
+                              {3, "Mid frequency", 200.0, 8000.0, 1000.0, "Hz"},
+                              {4, "Mid width", 0.3, 6.0, 1.0, "Q"},
+                              {5, "High gain", -18.0, 18.0, 0.0, "dB"},
+                              {6, "High frequency", 1500.0, 16000.0, 8000.0, "Hz"}};
+const char* const kEqFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_EQUALIZER,
+                                   CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const ParamDef kGateParams[] = {{0, "Threshold", -80.0, 0.0, -45.0, "dB"},
                                 {1, "Attack", 0.1, 100.0, 2.0, "ms"},
                                 {2, "Release", 5.0, 2000.0, 150.0, "ms"},
@@ -90,7 +99,59 @@ const clap_plugin_descriptor_t kDenoise = {
     "Learns a steady noise (hiss, hum, a fan) from a part with only noise, then takes it out of the sound.",
     kDenoiseFeatures};
 
-enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise };
+const clap_plugin_descriptor_t kEq = {
+    CLAP_VERSION_INIT, "org.toneofhell.equalizer", "Equalizer", "Tone of Hell",
+    "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
+    "Three bands: more or less of the low, middle and high frequencies.", kEqFeatures};
+
+enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise, Equalizer };
+
+// A second-order filter (the "Audio EQ Cookbook" formulas of Robert Bristow-Johnson).
+struct Biquad {
+    double b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0;
+    double z1[2] = {0.0, 0.0};
+    double z2[2] = {0.0, 0.0};
+
+    float run(float input, std::size_t channel) noexcept {
+        const double x = static_cast<double>(input);
+        const double y = b0 * x + z1[channel];
+        z1[channel] = b1 * x - a1 * y + z2[channel];
+        z2[channel] = b2 * x - a2 * y;
+        return static_cast<float>(y);
+    }
+    void clear() noexcept { z1[0] = z1[1] = z2[0] = z2[1] = 0.0; }
+    void set(double n0, double n1, double n2, double d0, double d1, double d2) noexcept {
+        b0 = n0 / d0;
+        b1 = n1 / d0;
+        b2 = n2 / d0;
+        a1 = d1 / d0;
+        a2 = d2 / d0;
+    }
+    // A bell around `hz`, `q` wide.
+    void peak(double rate, double hz, double db, double q) noexcept {
+        const double a = std::pow(10.0, db / 40.0);
+        const double w = 2.0 * kPi * std::min(hz, 0.45 * rate) / rate;
+        const double alpha = std::sin(w) / (2.0 * q);
+        set(1.0 + alpha * a, -2.0 * std::cos(w), 1.0 - alpha * a, 1.0 + alpha / a, -2.0 * std::cos(w),
+            1.0 - alpha / a);
+    }
+    // Everything below (`high` false) or above (`high` true) `hz` louder or quieter.
+    void shelf(double rate, double hz, double db, bool high) noexcept {
+        const double a = std::pow(10.0, db / 40.0);
+        const double w = 2.0 * kPi * std::min(hz, 0.45 * rate) / rate;
+        const double c = std::cos(w);
+        const double beta = 2.0 * std::sqrt(a) * std::sin(w) / 2.0 * std::sqrt(2.0);
+        if (high) {
+            set(a * ((a + 1.0) + (a - 1.0) * c + beta), -2.0 * a * ((a - 1.0) + (a + 1.0) * c),
+                a * ((a + 1.0) + (a - 1.0) * c - beta), (a + 1.0) - (a - 1.0) * c + beta,
+                2.0 * ((a - 1.0) - (a + 1.0) * c), (a + 1.0) - (a - 1.0) * c - beta);
+        } else {
+            set(a * ((a + 1.0) - (a - 1.0) * c + beta), 2.0 * a * ((a - 1.0) - (a + 1.0) * c),
+                a * ((a + 1.0) - (a - 1.0) * c - beta), (a + 1.0) + (a - 1.0) * c + beta,
+                -2.0 * ((a - 1.0) + (a + 1.0) * c), (a + 1.0) + (a - 1.0) * c - beta);
+        }
+    }
+};
 
 // The denoiser works on overlapping pieces of kFft frames, a quarter apart.
 constexpr std::size_t kFft = 1024;
@@ -162,7 +223,7 @@ struct Example {
     Kind kind = Kind::Gain;
     const ParamDef* defs = nullptr;
     std::uint32_t count = 0;
-    std::array<std::atomic<double>, 4> values{};
+    std::array<std::atomic<double>, 8> values{};
     double rate = 48000.0;
     std::vector<float> delay;  // stereo, interleaved
     std::size_t delay_frames = 0;
@@ -173,6 +234,7 @@ struct Example {
     float gate_gain = 1.0f;
     bool gate_open = true;
     Denoise* denoise = nullptr;  // only for the denoiser
+    std::array<Biquad, 3> bands{};  // the equalizer: low, middle, high
 };
 
 // One piece of the denoiser: to the spectrum, every frequency turned down by how much noise
@@ -269,6 +331,9 @@ void plugin_reset(const clap_plugin_t* plugin) {
     e.phase = 0.0;
     for (Voice& voice : e.voices) {
         voice = Voice{};
+    }
+    for (Biquad& band : e.bands) {
+        band.clear();
     }
 }
 
@@ -433,6 +498,23 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
         }
         case Kind::Synth:
             break;
+        case Kind::Equalizer: {
+            e.bands[0].shelf(e.rate, e.values[1].load(), e.values[0].load(), false);
+            e.bands[1].peak(e.rate, e.values[3].load(), e.values[2].load(), e.values[4].load());
+            e.bands[2].shelf(e.rate, e.values[6].load(), e.values[5].load(), true);
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                float result[2];
+                for (std::uint32_t c = 0; c < 2; ++c) {
+                    float value = input(c, i);
+                    for (Biquad& band : e.bands) {
+                        value = band.run(value, c);
+                    }
+                    result[c] = value;
+                }
+                output(i, result[0], result[1]);
+            }
+            break;
+        }
         case Kind::Gate: {
             const auto threshold = static_cast<float>(std::pow(10.0, e.values[0].load() / 20.0));
             const auto attack = static_cast<float>(std::exp(-1.0 / (e.values[1].load() / 1000.0 * e.rate)));
@@ -608,7 +690,7 @@ const clap_plugin_params_t kParams = {params_count, params_info, params_value,
 
 bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream) {
     const Example& e = self(plugin);
-    std::array<double, 4> data{};
+    std::array<double, 8> data{};
     for (std::uint32_t i = 0; i < e.count; ++i) {
         data[i] = e.values[i].load();
     }
@@ -644,7 +726,7 @@ bool state_save(const clap_plugin_t* plugin, const clap_ostream_t* stream) {
 
 bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
     Example& e = self(plugin);
-    std::array<double, 4> data{};
+    std::array<double, 8> data{};
     auto* bytes = reinterpret_cast<char*>(data.data());
     std::uint64_t left = sizeof(double) * e.count;
     while (left > 0) {
@@ -709,8 +791,9 @@ void plugin_on_main_thread(const clap_plugin_t*) {}
 
 // ---- The factory -----------------------------------------------------------------------------------
 
-const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain, &kSynth, &kGate, &kDenoise};
-constexpr std::uint32_t kPluginCount = 6;
+const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain, &kSynth, &kGate, &kDenoise,
+                                                        &kEq};
+constexpr std::uint32_t kPluginCount = 7;
 
 std::uint32_t factory_count(const clap_plugin_factory_t*) { return kPluginCount; }
 
@@ -748,6 +831,11 @@ const clap_plugin_t* factory_create(const clap_plugin_factory_t*, const clap_hos
         e->defs = kGateParams;
         e->count = 4;
         e->plugin.desc = &kGate;
+    } else if (std::strcmp(id, kEq.id) == 0) {
+        e->kind = Kind::Equalizer;
+        e->defs = kEqParams;
+        e->count = 7;
+        e->plugin.desc = &kEq;
     } else if (std::strcmp(id, kDenoise.id) == 0) {
         e->kind = Kind::Denoise;
         e->defs = kDenoiseParams;

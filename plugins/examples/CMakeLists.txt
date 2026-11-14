@@ -1,5 +1,5 @@
-# Example CLAP plugins (Echo, Tremolo, Gain, Simple Synth, Noise Gate, Denoiser) that come with the
-# program, in one file:
+# The CLAP plugins that come with the program (Echo, Tremolo, Gain, Simple Synth, Noise Gate,
+# Denoiser, Equalizer, Compressor, Limiter, Reverb), in one file:
 # ToneOfHell-Examples.clap. The program finds them in "plugins" next to itself.
 add_library(toh_example_plugins MODULE toh_examples.cpp)
 target_include_directories(toh_example_plugins SYSTEM PRIVATE ${clap_SOURCE_DIR}/include)

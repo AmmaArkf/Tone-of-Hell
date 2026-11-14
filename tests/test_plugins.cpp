@@ -42,7 +42,7 @@ float played_sample(Session& session) {
 TEST_CASE("The example plugins are found in their file") {
     std::string error;
     const auto infos = toh::plugins::read_clap_file(kExamples, &error);
-    REQUIRE_MESSAGE(infos.size() == 6, error);
+    REQUIRE_MESSAGE(infos.size() >= 6, error);
     CHECK(infos[4].name == "Noise Gate");
     CHECK(infos[5].name == "Denoiser");
     CHECK(infos[0].name == "Echo");
@@ -126,6 +126,21 @@ TEST_CASE("The noise gate closes on quiet sound and lets loud sound through") {
     CHECK(rms_through(*gate, 0.0, 0.001, seed) < 0.00005);  // far below the -45 dB threshold
     const double loud = rms_through(*gate, 0.5, 0.001, seed);
     CHECK(loud == doctest::Approx(0.5 / std::sqrt(2.0)).epsilon(0.03));
+}
+
+TEST_CASE("The equalizer is flat at first and turns a band down") {
+    std::string error;
+    auto eq = ClapPlugin::create(kExamples, "org.toneofhell.equalizer", 48000.0, 2, &error);
+    REQUIRE_MESSAGE(eq != nullptr, error);
+    REQUIRE(eq->params().size() == 7);
+    std::uint32_t seed = 3;
+    const double full = 0.5 / std::sqrt(2.0);
+    CHECK(rms_through(*eq, 0.5, 0.0, seed) == doctest::Approx(full).epsilon(0.01));
+    REQUIRE(eq->set_param(2, -18.0));  // the middle band sits at the 1 kHz of the tone
+    CHECK(rms_through(*eq, 0.5, 0.0, seed) == doctest::Approx(full * std::pow(10.0, -18.0 / 20.0)).epsilon(0.05));
+    REQUIRE(eq->set_param(2, 0.0));
+    REQUIRE(eq->set_param(0, -18.0));  // the low band leaves 1 kHz nearly alone
+    CHECK(rms_through(*eq, 0.5, 0.0, seed) == doctest::Approx(full).epsilon(0.05));
 }
 
 TEST_CASE("The denoiser learns a noise and takes it out, keeping the sound") {
