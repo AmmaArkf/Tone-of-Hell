@@ -126,6 +126,30 @@ TEST_CASE("Markers stay in order, can be undone and are saved") {
     CHECK(session.markers().empty());
 }
 
+TEST_CASE("One track can be made faster or slower") {
+    Session session;
+    session.add_instrument_track("Lead", toh::core::Instrument::Keys, 1000, 8000);
+    REQUIRE(session.set_region_notes(0, 0, {toh::core::Note{1000, 500, 60, 0.8f},
+                                            toh::core::Note{4000, 2000, 64, 0.8f}}));
+    session.commit_edits();
+    REQUIRE(session.change_track_speed(0, 2.0));
+    session.commit_edits();
+    CHECK(session.undo_label() == "Speed up a track");
+    const toh::app::RegionInfo& region = session.tracks()[0].regions[0];
+    CHECK(region.start == 1000);  // the first region stays where it begins
+    CHECK(region.length == 4000);
+    const auto& notes = region.source->clip->notes->notes;
+    REQUIRE(notes.size() == 2);
+    CHECK(notes[0].start == 500);
+    CHECK(notes[0].length == 250);
+    CHECK(notes[1].start == 2000);
+    CHECK(notes[1].pitch == 64);  // notes keep their pitch
+    CHECK_FALSE(session.change_track_speed(0, 0.0));
+    CHECK_FALSE(session.change_track_speed(5, 2.0));
+    REQUIRE(session.undo());
+    CHECK(session.tracks()[0].regions[0].length == 8000);
+}
+
 TEST_CASE("Tempo changes can be taken back and done again") {
     Session session;
     toh::app::MetronomeSettings metronome = session.metronome();

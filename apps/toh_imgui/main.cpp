@@ -190,6 +190,11 @@ struct UiState {
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
     std::int64_t tempo_frame = 0;       // the tempo menu of the ruler: where, which tempo, and
+    float track_speed = 100.0f;         // the speed chosen in a track's speed box, in percent
+    bool roll_full = false;             // the piano roll fills the whole window
+    bool roll_restore = false;          // put it back where it was before, next frame
+    ImVec2 roll_saved_pos{};
+    ImVec2 roll_saved_size{};
     int marker_drag = -1;               // the marker held on the ruler (-1: none)
     bool marker_moved = false;          // it has been dragged, not only clicked
     float marker_grab_x = 0.0f;
@@ -4907,6 +4912,46 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     }
     tooltip(T_("Effects of the track (CLAP and VST3 plugins)"));
     draw_effects_popup(session, ui, i);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("x1")) {
+        ui.track_speed = 100.0f;
+        ImGui::OpenPopup("track speed");
+    }
+    tooltip(T_("Speed of the track"));
+    if (ImGui::BeginPopup("track speed")) {
+        ImGui::TextUnformatted(T_("Speed of the track"));
+        ImGui::SetNextItemWidth(16.0f * font);
+        ImGui::SliderFloat("##speed", &ui.track_speed, 25.0f, 400.0f, T_("Speed: %.0f%%"),
+                           ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+        if (double_clicked()) {
+            ui.track_speed = 100.0f;
+        }
+        for (const float preset : {50.0f, 75.0f, 90.0f, 110.0f, 125.0f, 150.0f, 200.0f}) {
+            char label[16];
+            std::snprintf(label, sizeof(label), "%.0f%%", static_cast<double>(preset));
+            if (ImGui::SmallButton(label)) {
+                ui.track_speed = preset;
+            }
+            ImGui::SameLine();
+        }
+        ImGui::NewLine();
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 24.0f * font);
+        ImGui::TextDisabled("%s", T_("Makes this track play faster or slower than the others: its regions get shorter or longer and the ones after move along. "
+                                     "Recorded sound changes its pitch with the speed, like a tape; notes keep their pitch. Ctrl+Z takes it back."));
+        ImGui::PopTextWrapPos();
+        if (ImGui::Button(T_("Apply"))) {
+            std::string error;
+            if (!session.change_track_speed(i, static_cast<double>(ui.track_speed) / 100.0, &error)) {
+                ui.error = error;
+            }
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T_("Cancel"))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
 
     // The remove button sits in the far corner, away from mute and solo, and asks first.
     // The track name gets the space in between and is shortened when it does not fit.
@@ -5108,9 +5153,21 @@ void draw_piano_roll(Session& session, UiState& ui) {
     const ImGuiIO& io = ImGui::GetIO();
     const float font = ImGui::GetFontSize();
     ImGui::SetNextWindowSize(ImVec2(62.0f * font, 28.0f * font), ImGuiCond_FirstUseEver);
+    // Full screen: the piano roll covers the whole program window until switched back.
+    ImGuiWindowFlags roll_flags = 0;
+    if (ui.roll_full) {
+        const ImGuiViewport* viewport = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(viewport->WorkPos);
+        ImGui::SetNextWindowSize(viewport->WorkSize);
+        roll_flags = ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse;
+    } else if (ui.roll_restore) {
+        ImGui::SetNextWindowPos(ui.roll_saved_pos);
+        ImGui::SetNextWindowSize(ui.roll_saved_size);
+        ui.roll_restore = false;
+    }
     const std::string title = std::string(T_("Piano roll")) + ": " +
                               session.tracks()[ui.roll_track].name + "###piano roll";
-    if (!ImGui::Begin(title.c_str(), &ui.roll_open)) {
+    if (!ImGui::Begin(title.c_str(), &ui.roll_open, roll_flags)) {
         ImGui::End();
         return;
     }
@@ -5152,6 +5209,17 @@ void draw_piano_roll(Session& session, UiState& ui) {
         session.trim_region_end(ui.roll_track, ui.roll_region, bars_from(session, region->end(), -1.0));
     }
     tooltip(T_("Make the region a bar shorter (the notes after its end are kept, but not heard)."));
+    ImGui::SameLine();
+    if (toggle_button(T_("Full screen##roll"), ui.roll_full, ImVec4(0.30f, 0.45f, 0.75f, 1.0f), false)) {
+        if (!ui.roll_full) {
+            ui.roll_saved_pos = ImGui::GetWindowPos();
+            ui.roll_saved_size = ImGui::GetWindowSize();
+        } else {
+            ui.roll_restore = true;
+        }
+        ui.roll_full = !ui.roll_full;
+    }
+    tooltip(T_("The piano roll over the whole window, or back to its own size."));
     // The buttons may have given the region a new source: look it up again.
     region = &session.tracks()[ui.roll_track].regions[ui.roll_region];
     refresh_frames();

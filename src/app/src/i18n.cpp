@@ -308,6 +308,18 @@ const Entry kRussian[] = {
     {"Rename a track", "переименование дорожки"},
     {"Change the tempo", "изменение темпа"},
     {"Change the markers", "изменение маркеров"},
+    {"Full screen##roll", "Во весь экран##roll"},
+    {"The piano roll over the whole window, or back to its own size.",
+     "Пианоролл на всё окно программы или обратно в свой размер."},
+    {"Speed up a track", "ускорение дорожки"},
+    {"Slow down a track", "замедление дорожки"},
+    {"Speed of the track", "Скорость дорожки"},
+    {"Speed: %.0f%%", "Скорость: %.0f%%"},
+    {"Apply", "Применить"},
+    {"Makes this track play faster or slower than the others: its regions get shorter or longer and the ones after move along. "
+     "Recorded sound changes its pitch with the speed, like a tape; notes keep their pitch. Ctrl+Z takes it back.",
+     "Дорожка играет быстрее или медленнее остальных: её фрагменты становятся короче или длиннее, следующие сдвигаются. "
+     "Записанный звук меняет высоту вместе со скоростью, как на плёнке; ноты сохраняют высоту. Ctrl+Z отменит."},
     {"Add a marker at the playhead", "Добавить маркер у курсора"},
     {"Go to the previous marker", "К предыдущему маркеру"},
     {"Go to the next marker", "К следующему маркеру"},

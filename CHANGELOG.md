@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.9
+
+- The speed of one track: the "x1" button in a track header sets it (25% to 400%, with quick choices). The regions of the track get shorter or longer from its first region on and the ones after move along; its automation follows. Recorded sound changes its pitch with the speed, like a tape; notes keep their pitch. Ctrl+Z takes it back.
+- The piano roll can fill the whole program window: the "Full screen" button in its toolbar, again to go back to its own size and place.
+
 ## 0.3.8
 
 - Markers (level 2 begins): named places on the timeline. M adds one at the playhead, a double-click on the ruler adds one there, and the ruler's right-click menu has "Add a marker here". A marker is a yellow flag in the ruler with a thin line through the lanes: click it to go there, drag it to move it, right-click it to rename or remove it.

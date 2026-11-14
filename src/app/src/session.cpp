@@ -3615,6 +3615,81 @@ bool Session::set_tempo_change(std::int64_t frame, double bpm) {
     return true;
 }
 
+bool Session::change_track_speed(std::size_t index, double factor, std::string* error) {
+    if (index >= tracks_.size()) {
+        set_error(error, "the track does not exist");
+        return false;
+    }
+    if (!(factor >= 0.1 && factor <= 10.0)) {
+        set_error(error, "the speed must be from 10% to 1000%");
+        return false;
+    }
+    TrackInfo& track = tracks_[index];
+    if (track.regions.empty() || factor == 1.0) {
+        return true;
+    }
+    for (const RegionInfo& region : track.regions) {
+        const double rate = region.rate * factor;
+        if (!region.has_notes() && !(rate >= core::Engine::kMinSpeed - 1e-9 && rate <= core::Engine::kMaxSpeed + 1e-9)) {
+            set_error(error, "a region would play its sound slower than 25% or faster than 400%");
+            return false;
+        }
+    }
+    std::int64_t anchor = track.regions.front().start;
+    for (const RegionInfo& region : track.regions) {
+        anchor = std::min(anchor, region.start);
+    }
+    // Times from the anchor on are squeezed or stretched; earlier ones stay.
+    const auto map = [anchor, factor](std::int64_t frame) {
+        return frame <= anchor ? frame
+                               : anchor + std::llround(static_cast<double>(frame - anchor) / factor);
+    };
+    const auto scale = [factor](std::int64_t frames) {
+        return std::llround(static_cast<double>(frames) / factor);
+    };
+    for (RegionInfo& region : track.regions) {
+        const std::int64_t new_start = map(region.start);
+        const std::int64_t new_end = std::max(map(region.end()), new_start + 1);
+        if (region.has_notes()) {
+            // Notes keep their pitch: their times change instead.
+            std::vector<core::Note> notes = region.source->clip->notes->notes;
+            for (core::Note& note : notes) {
+                note.start = scale(note.start);
+                note.length = std::max<std::int64_t>(scale(note.length), 1);
+            }
+            const std::int64_t clip_frames = std::max<std::int64_t>(scale(region.source->clip->frames()), 1);
+            region.offset = std::min<std::int64_t>(scale(region.offset), clip_frames - 1);
+            region.source = note_source(region.source->name, std::move(notes), clip_frames, config_.channels,
+                                        config_.sample_rate);
+            region.length = std::min(new_end - new_start, clip_frames - region.offset);
+        } else {
+            region.rate = std::clamp(region.rate * factor, core::Engine::kMinSpeed, core::Engine::kMaxSpeed);
+            region.length = new_end - new_start;
+            // It must stay inside its sound.
+            const auto available = static_cast<double>(region.source->clip->frames() - region.offset);
+            const auto longest = static_cast<std::int64_t>(std::floor(available / region.rate));
+            region.length = std::max<std::int64_t>(std::min(region.length, longest), 1);
+        }
+        region.start = new_start;
+        region.fade_in = std::min(scale(region.fade_in), region.length);
+        region.fade_out = std::min(scale(region.fade_out), region.length);
+    }
+    const auto map_points = [&map](std::vector<core::CurvePoint>& points) {
+        for (core::CurvePoint& point : points) {
+            point.frame = map(point.frame);
+        }
+    };
+    map_points(track.volume_curve);
+    map_points(track.pan_curve);
+    for (ParamCurveInfo& curve : track.param_curves) {
+        map_points(curve.points);
+    }
+    pending_label_ = factor > 1.0 ? "Speed up a track" : "Slow down a track";
+    sync_track_regions(index);
+    update_length();
+    return true;
+}
+
 void Session::sort_markers() {
     std::stable_sort(markers_.begin(), markers_.end(),
                      [](const Marker& a, const Marker& b) { return a.frame < b.frame; });

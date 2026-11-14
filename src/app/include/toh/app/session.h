@@ -405,6 +405,13 @@ public:
     bool set_tempo_change(std::int64_t frame, double bpm);
     bool remove_tempo_change(std::size_t index);
 
+    /// Plays one track `factor` times as fast (0.5 = half speed): its regions get shorter or
+    /// longer from the start of its first region on, and the regions after it move along.
+    /// Recorded sound changes its pitch with the speed, like a tape; notes keep their pitch.
+    /// The automation of the track follows. Fails when a region would play its sound slower
+    /// than 25% or faster than 400%.
+    bool change_track_speed(std::size_t index, double factor, std::string* error = nullptr);
+
     /// The markers, in order of time. Adding, moving, renaming and removing them are edits
     /// that can be undone, and they are saved with the project.
     const std::vector<Marker>& markers() const noexcept { return markers_; }
