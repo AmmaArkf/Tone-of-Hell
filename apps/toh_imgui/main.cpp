@@ -4067,6 +4067,11 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         if (hit.kind == DragKind::None) {
             ui.drag = DragKind::Seek;
             ui.selected = false;
+            // An empty part of a lane is empty space: the selected tracks are let go, too
+            // (with Ctrl or Shift held they stay, as when clicking the headers).
+            if (!io.KeyCtrl && !io.KeyShift) {
+                session.clear_track_selection();
+            }
             session.seek_frames(x_to_frame(session, view, io.MousePos.x));
         } else {
             ui.drag = hit.kind;
@@ -5490,6 +5495,12 @@ void draw_tracks(Session& session, UiState& ui) {
     if (ui.selected && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) &&
         !ImGui::IsAnyItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         ui.selected = false;
+    }
+    // A click below the tracks lets the selected tracks go (the free part of a header selects
+    // its track instead; with Ctrl or Shift held nothing changes).
+    if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() && !io.KeyCtrl && !io.KeyShift &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        session.clear_track_selection();
     }
 
     if (session.tracks().empty()) {

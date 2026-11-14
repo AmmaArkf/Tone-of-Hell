@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.3
+
+- A click on empty space lets the selected tracks go: below the tracks or on an empty part of a lane (there it also moves the playhead, as before). With Ctrl or Shift held the selection stays.
+- The roadmap shows stage 7 (plugin hosting) as done.
+
 ## 0.3.2
 
 - Tempo changes can be undone and redone (Ctrl+Z, Ctrl+Y), with the start tempo too; the step is called "Change the tempo".
