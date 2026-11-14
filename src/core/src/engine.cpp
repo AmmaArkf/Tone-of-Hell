@@ -500,6 +500,13 @@ void Engine::render_live(float* out, std::uint32_t frames) noexcept {
     }
 }
 
+void Engine::set_tempo_map(std::shared_ptr<const TempoMap> map) {
+    tempo_.store(map.get(), std::memory_order_release);
+    if (map) {
+        tempos_.push_back(std::move(map));
+    }
+}
+
 void Engine::set_soundfont(std::shared_ptr<const SoundFont> soundfont) {
     soundfont_.store(soundfont.get(), std::memory_order_release);
     if (soundfont) {
@@ -922,10 +929,12 @@ bool Engine::run_transport(std::uint32_t frames, std::int64_t begin_pos, std::in
 // The metronome click at a timeline frame: a short decaying sine at the start of every beat.
 // It is a pure function of the position, so it stays in step through seeks, loops and reverse.
 float Engine::metronome_sample(std::int64_t frame) const noexcept {
-    const double beats = static_cast<double>(frame) / metronome_beat_frames_;
-    const double whole = std::floor(beats);
-    const double seconds =
-        (beats - whole) * metronome_beat_frames_ / static_cast<double>(sample_rate_);
+    const TempoMap* const map = tempo_.load(std::memory_order_acquire);
+    const auto at = static_cast<double>(frame);
+    const double beat_frames = map != nullptr ? map->beat_frames_at(at) : metronome_beat_frames_;
+    const double beats = map != nullptr ? map->beats_at(at) : at / metronome_beat_frames_;
+    const double whole = std::floor(beats + 1e-9);
+    const double seconds = std::max(beats - whole, 0.0) * beat_frames / static_cast<double>(sample_rate_);
     if (seconds >= kClickSeconds) {
         return 0.0f;
     }

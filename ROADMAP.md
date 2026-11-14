@@ -15,7 +15,7 @@ A stage is done when the criterion in parentheses is met and has been checked on
 - [x] **5. Project and undo.** Saving, loading, autosave and undo/redo (a project opens without losses).
 - [x] **6. MIDI, piano roll and a simple synthesizer.** (A melody can be played from a keyboard, edited in the piano roll and played back.)
 - [ ] **7. Plugin hosting.** CLAP first, then VST3, with delay compensation (a third-party synthesizer and reverb work in the mix and keep their state).
-- [ ] **8. Automation and tempo map.** (Volume and plugin parameters follow curves, and the tempo can change inside a track.)
+- [x] **8. Automation and tempo map.** (Volume and plugin parameters follow curves, and the tempo can change inside a track.)
 - [ ] **9. Built-in effects.** Equalizer, compressor, reverb, delay and limiter (each is checked on test signals and produces no clicks).
 - [ ] **10. Advanced features by community demand.** The order is chosen by votes on issues.
 

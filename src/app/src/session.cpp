@@ -2061,6 +2061,13 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
     out << "loop=" << (loop_ ? 1 : 0) << "\n";
     out << "metronome=" << (metronome_.enabled ? 1 : 0) << "\n";
     out << "bpm=" << metronome_.bpm << "\n";
+    if (!tempo_changes_.empty()) {
+        out << "tempo_changes=";
+        for (std::size_t t = 0; t < tempo_changes_.size(); ++t) {
+            out << (t > 0 ? "," : "") << tempo_changes_[t].frame << ":" << tempo_changes_[t].bpm;
+        }
+        out << "\n";
+    }
     out << "beats_per_bar=" << metronome_.beats_per_bar << "\n";
     out << "beat_unit=" << metronome_.beat_unit << "\n";
     out << "metronome_volume=" << metronome_.volume << "\n";
@@ -2454,6 +2461,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     long long channels = 0;
     bool loop = false;
     MetronomeSettings metronome = metronome_;
+    std::string tempo_text;
     long long grid = static_cast<long long>(grid_step_);
     std::filesystem::path original;  // in recovery files: the project file they belong to
     enum class Section { Head, Source, Track, Region, Effect } section = Section::Head;
@@ -2509,6 +2517,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     loop = integer != 0;
                 } else if (key == "metronome") {
                     metronome.enabled = integer != 0;
+                } else if (key == "tempo_changes") {
+                    tempo_text = value;
                 } else if (key == "bpm") {
                     metronome.bpm = real;
                 } else if (key == "beats_per_bar") {
@@ -2920,6 +2930,14 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     update_length();
     set_loop(loop);
     set_metronome(metronome);  // ignored if a value is out of range
+    tempo_changes_.clear();
+    for (const core::CurvePoint& point : parse_curve(tempo_text, static_cast<float>(core::TempoMap::kMinBpm),
+                                                     static_cast<float>(core::TempoMap::kMaxBpm))) {
+        if (point.frame > 0) {
+            tempo_changes_.push_back(core::TempoChange{point.frame, static_cast<double>(point.value)});
+        }
+    }
+    rebuild_tempo();
     if (grid >= 0 && grid <= static_cast<long long>(GridStep::None)) {
         grid_step_ = static_cast<GridStep>(grid);
     }
@@ -2943,6 +2961,8 @@ void Session::new_project() {
     update_length();
     update_streaming();
     seek_frames(0);
+    tempo_changes_.clear();
+    rebuild_tempo();
     project_file_.clear();
     saved_state_ = state_text();
     autosaved_state_ = saved_state_;
@@ -3351,10 +3371,11 @@ std::int64_t Session::snap_frame(std::int64_t frame) const noexcept {
     if (!snap_ || grid_step_ == GridStep::None) {
         return frame;
     }
-    double step = beat_frames();
+    // The grid is counted in beats, so it follows the tempo map.
+    double step = 1.0;
     switch (grid_step_) {
         case GridStep::Bar:
-            step = bar_frames();
+            step = static_cast<double>(metronome_.beats_per_bar);
             break;
         case GridStep::Beat:
             break;
@@ -3367,11 +3388,11 @@ std::int64_t Session::snap_frame(std::int64_t frame) const noexcept {
         case GridStep::None:
             break;
     }
-    if (!(step >= 1.0)) {
+    if (!(step > 0.0)) {
         return frame;
     }
-    const double snapped = std::round(static_cast<double>(frame) / step) * step;
-    return std::max<std::int64_t>(std::llround(snapped), 0);
+    const double snapped = std::round(beats_at(frame) / step) * step;
+    return std::max<std::int64_t>(std::llround(frame_at(snapped)), 0);
 }
 
 // ---- Master and transport ----------------------------------------------------------------
@@ -3454,7 +3475,62 @@ bool Session::set_metronome(const MetronomeSettings& settings) {
         return false;
     }
     metronome_ = settings;
+    rebuild_tempo();
     return true;
+}
+
+void Session::rebuild_tempo() {
+    tempo_map_ = std::make_shared<const core::TempoMap>(static_cast<double>(config_.sample_rate),
+                                                        metronome_.bpm, metronome_.beat_unit, tempo_changes_);
+    engine_.set_tempo_map(tempo_changes_.empty() ? nullptr : tempo_map_);
+}
+
+bool Session::set_tempo_change(std::int64_t frame, double bpm) {
+    if (!(bpm >= core::TempoMap::kMinBpm && bpm <= core::TempoMap::kMaxBpm)) {
+        return false;
+    }
+    if (frame <= 0) {
+        MetronomeSettings settings = metronome_;
+        settings.bpm = bpm;
+        return set_metronome(settings);
+    }
+    auto at = tempo_changes_.begin();
+    while (at != tempo_changes_.end() && at->frame < frame) {
+        ++at;
+    }
+    if (at != tempo_changes_.end() && at->frame == frame) {
+        at->bpm = bpm;
+    } else {
+        tempo_changes_.insert(at, core::TempoChange{frame, bpm});
+    }
+    rebuild_tempo();
+    return true;
+}
+
+bool Session::remove_tempo_change(std::size_t index) {
+    if (index >= tempo_changes_.size()) {
+        return false;
+    }
+    tempo_changes_.erase(tempo_changes_.begin() + static_cast<std::ptrdiff_t>(index));
+    rebuild_tempo();
+    return true;
+}
+
+double Session::bpm_at(std::int64_t frame) const noexcept {
+    return tempo_map_ ? tempo_map_->bpm_at(static_cast<double>(frame)) : metronome_.bpm;
+}
+
+double Session::beats_at(std::int64_t frame) const noexcept {
+    return tempo_map_ ? tempo_map_->beats_at(static_cast<double>(frame))
+                      : static_cast<double>(frame) / beat_frames();
+}
+
+double Session::frame_at(double beats) const noexcept {
+    return tempo_map_ ? tempo_map_->frame_at(beats) : beats * beat_frames();
+}
+
+double Session::beat_frames_at(std::int64_t frame) const noexcept {
+    return tempo_map_ ? tempo_map_->beat_frames_at(static_cast<double>(frame)) : beat_frames();
 }
 
 }  // namespace toh::app

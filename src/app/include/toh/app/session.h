@@ -387,6 +387,22 @@ public:
     /// Length of one beat and of one bar in frames (fractional), from the metronome settings.
     double beat_frames() const noexcept;
     double bar_frames() const noexcept;
+
+    // ---- Tempo map -------------------------------------------------------------------------
+    // The tempo of the metronome settings holds from the start; tempo changes set another
+    // tempo from a later frame on. The grid, snapping and the metronome follow them. Regions
+    // and notes stay where they are in time.
+
+    const std::vector<core::TempoChange>& tempo_changes() const noexcept { return tempo_changes_; }
+    /// Sets the tempo from `frame` on (20 to 400). At frame 0 or earlier it sets the start tempo.
+    bool set_tempo_change(std::int64_t frame, double bpm);
+    bool remove_tempo_change(std::size_t index);
+    double bpm_at(std::int64_t frame) const noexcept;
+    /// Beats before a timeline frame, and the frame of a beat position (both with fractions).
+    double beats_at(std::int64_t frame) const noexcept;
+    double frame_at(double beats) const noexcept;
+    /// The length of one beat in frames at a timeline frame.
+    double beat_frames_at(std::int64_t frame) const noexcept;
     /// The nearest grid position when snapping is on; otherwise `frame` itself.
     std::int64_t snap_frame(std::int64_t frame) const noexcept;
 
@@ -660,6 +676,9 @@ private:
     std::string pending_label_;  // the name of the next undo step, if an edit gave one
     std::vector<std::string> open_warnings_;
     std::int64_t sync_token_ = 0;
+    std::vector<core::TempoChange> tempo_changes_;  // sorted by frame, all after frame 0
+    std::shared_ptr<const core::TempoMap> tempo_map_;
+    void rebuild_tempo();
     // The instrument plugin each live key went to, so that its end goes there too.
     std::array<std::shared_ptr<plugins::Plugin>, 128> live_plugin_keys_{};
     bool notes_recording_ = false;

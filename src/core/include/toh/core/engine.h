@@ -13,6 +13,7 @@
 #include "toh/core/sampler.h"
 #include "toh/core/soundfont.h"
 #include "toh/core/spsc_queue.h"
+#include "toh/core/tempo.h"
 #include "toh/core/spsc_ring.h"
 
 namespace toh::core {
@@ -226,6 +227,9 @@ public:
     /// metronome on, playback also runs when no clip is loaded.
     bool set_metronome(bool enabled, double bpm = 120.0, std::uint32_t beats_per_bar = 4,
                        std::uint32_t beat_unit = 4, float volume = 0.5f);
+    /// The tempo along the timeline, for the metronome clicks; null: the tempo of
+    /// set_metronome() throughout. Control thread.
+    void set_tempo_map(std::shared_ptr<const TempoMap> map);
     /// With the metronome on, playback goes on past the end of the project until it is
     /// stopped (unless it loops). On by default. Any thread.
     void set_metronome_endless(bool endless) noexcept {
@@ -481,6 +485,8 @@ private:
     std::int64_t metronome_beats_per_bar_ = 4;
     float metronome_volume_ = 0.5f;
     float metronome_gain_ = 0.0f;  // smoothed; 0 while the metronome is off
+    std::atomic<const TempoMap*> tempo_{nullptr};
+    std::vector<std::shared_ptr<const TempoMap>> tempos_;  // keeps every one alive
     bool monitoring_ = false;
     float monitor_volume_ = 1.0f;
     float monitor_gain_ = 0.0f;  // smoothed; 0 while monitoring is off

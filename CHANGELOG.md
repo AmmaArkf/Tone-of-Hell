@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.20
+
+- Tempo map: the tempo can change inside a song. Right-click the ruler where the new tempo begins, type the BPM and press "Set the tempo"; a blue flag on the ruler shows it, and a right-click on the flag changes or removes it. The BPM field of the toolbar stays the tempo from the start.
+- The grid, the bar numbers, snapping and the metronome clicks follow the tempo changes. Recorded sound and notes stay where they are in time. Tempo changes are saved in the project.
+- Known limit: the grid inside the piano roll still uses the tempo from the start.
+
 ## 0.2.19
 
 - Automation of plugin parameters: in the FX list, Automate next to a plugin (an effect or the instrument) shows its parameters, with a box to find one. Choosing one switches the lanes to its curve on the track of the plugin: bottom is the lowest value, top the highest, and a point shows the value as the plugin writes it. The plugin gets the value of the curve for every block of sound, for CLAP and VST3 alike. Saved in the project, part of exports and undo.

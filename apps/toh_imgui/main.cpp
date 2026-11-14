@@ -189,6 +189,9 @@ struct UiState {
     bool ask_unsaved = false;
     bool cut_tool = false;              // the scissors: a click cuts a region
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
+    std::int64_t tempo_frame = 0;       // the tempo menu of the ruler: where, which tempo, and
+    double tempo_bpm = 120.0;           // the tempo change under the mouse (-1: none)
+    int tempo_index = -1;
     bool automation_mode = false;       // the lanes show and edit an automation curve
     int automation_target = 0;          // which one: 0 volume, 1 pan, 2 a plugin parameter
     std::weak_ptr<toh::plugins::Plugin> auto_plugin;  // for 2: the plugin and its parameter
@@ -3204,33 +3207,41 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
 
 // ---- Timeline ----------------------------------------------------------------------------
 
-// Vertical lines at bars and beats. With `labels`, bar numbers are written next to the lines.
+// Vertical lines at bars and beats; they follow the tempo map. With `labels`, bar numbers are
+// written next to the lines.
 void draw_grid(const Session& session, const View& view, ImDrawList* draw_list, float top,
                float bottom, bool labels) {
     if (session.grid_step() == GridStep::None) {
         return;  // the grid is switched off
     }
     const double rate = static_cast<double>(session.sample_rate());
-    const double bar_seconds = session.bar_frames() / rate;
-    const double beat_seconds = session.beat_frames() / rate;
-    if (!(bar_seconds > 0.0) || !(beat_seconds > 0.0)) {
-        return;
-    }
     const float left = view.lane_origin_x;
     const float right = left + view.lane_width;
     const double end_seconds =
         view.start_seconds + static_cast<double>(view.lane_width) / view.pixels_per_second;
+    if (end_seconds < 0.0) {
+        return;
+    }
+    const auto first_frame = std::max<std::int64_t>(std::llround(view.start_seconds * rate), 0);
+    const auto last_frame = std::llround(end_seconds * rate);
+    const double first_beat = std::floor(session.beats_at(first_frame));
+    const double last_beat = session.beats_at(last_frame);
+    const auto x_of = [&](double beat) {
+        return left + static_cast<float>((session.frame_at(beat) / rate - view.start_seconds) *
+                                         view.pixels_per_second);
+    };
+    // How close the beats get in view decides what is drawn.
+    const double beat_px = std::min(session.beat_frames_at(first_frame), session.beat_frames_at(last_frame)) /
+                           rate * view.pixels_per_second;
+    if (!(beat_px > 0.0)) {
+        return;
+    }
 
     // Beats, when there is room for them.
-    if (beat_seconds * view.pixels_per_second >= 10.0) {
-        const auto first = static_cast<std::int64_t>(std::floor(view.start_seconds / beat_seconds));
-        for (std::int64_t beat = first;; ++beat) {
-            const double seconds = static_cast<double>(beat) * beat_seconds;
-            if (seconds > end_seconds) {
-                break;
-            }
-            const float x =
-                left + static_cast<float>((seconds - view.start_seconds) * view.pixels_per_second);
+    if (beat_px >= 10.0) {
+        int drawn = 0;
+        for (double beat = first_beat; beat <= last_beat && drawn < 5000; beat += 1.0, ++drawn) {
+            const float x = x_of(beat);
             if (x >= left && x <= right) {
                 draw_list->AddLine(ImVec2(x, top), ImVec2(x, bottom), IM_COL32(255, 255, 255, 16));
             }
@@ -3238,27 +3249,23 @@ void draw_grid(const Session& session, const View& view, ImDrawList* draw_list, 
     }
 
     // Bars; when they get too close, only every 2nd, 4th, 8th ... is drawn.
+    const double per_bar = static_cast<double>(std::max(session.metronome().beats_per_bar, 1));
     std::int64_t every = 1;
-    while (bar_seconds * static_cast<double>(every) * view.pixels_per_second < 48.0 &&
-           every < (std::int64_t{1} << 20)) {
+    while (beat_px * per_bar * static_cast<double>(every) < 48.0 && every < (std::int64_t{1} << 20)) {
         every *= 2;
     }
-    const double step = bar_seconds * static_cast<double>(every);
-    const auto first = static_cast<std::int64_t>(std::floor(view.start_seconds / step));
-    for (std::int64_t index = first;; ++index) {
-        const double seconds = static_cast<double>(index) * step;
-        if (seconds > end_seconds) {
-            break;
-        }
-        const float x =
-            left + static_cast<float>((seconds - view.start_seconds) * view.pixels_per_second);
+    const double step = per_bar * static_cast<double>(every);
+    int drawn = 0;
+    for (double beat = std::floor(first_beat / step) * step; beat <= last_beat && drawn < 5000;
+         beat += step, ++drawn) {
+        const float x = x_of(beat);
         if (x < left || x > right) {
             continue;
         }
         draw_list->AddLine(ImVec2(x, top), ImVec2(x, bottom), IM_COL32(255, 255, 255, 46));
         if (labels) {
             char label[24];
-            std::snprintf(label, sizeof(label), "%lld", static_cast<long long>(index * every + 1));
+            std::snprintf(label, sizeof(label), "%lld", static_cast<long long>(std::llround(beat / per_bar)) + 1);
             draw_list->AddText(ImVec2(x + 3.0f, top), IM_COL32(200, 200, 210, 255), label);
         }
     }
@@ -3292,6 +3299,42 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
     if (ImGui::IsItemActivated() || (ImGui::IsItemActive() && io.MouseDelta.x != 0.0f)) {
         session.seek_frames(x_to_frame(session, view, io.MousePos.x));
     }
+    // Right-click: the tempo from here on.
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        ui.tempo_frame = session.snap_frame(std::max<std::int64_t>(x_to_frame(session, view, io.MousePos.x), 0));
+        ui.tempo_index = -1;
+        const auto& changes = session.tempo_changes();
+        for (std::size_t t = 0; t < changes.size(); ++t) {
+            if (std::fabs(frame_to_x(session, view, changes[t].frame) - io.MousePos.x) <= 0.6f * font) {
+                ui.tempo_index = static_cast<int>(t);
+                ui.tempo_frame = changes[t].frame;
+            }
+        }
+        ui.tempo_bpm = session.bpm_at(ui.tempo_frame);
+        ImGui::OpenPopup("tempo menu");
+    }
+    if (ImGui::BeginPopup("tempo menu")) {
+        const double seconds = static_cast<double>(ui.tempo_frame) / static_cast<double>(session.sample_rate());
+        ImGui::Text(T_("Tempo from %d:%05.2f on"), static_cast<int>(seconds / 60.0),
+                    seconds - 60.0 * static_cast<int>(seconds / 60.0));
+        ImGui::SetNextItemWidth(9.0f * font);
+        ImGui::InputDouble(T_("BPM##tempo change"), &ui.tempo_bpm, 1.0, 10.0, "%.1f");
+        ui.tempo_bpm = std::clamp(ui.tempo_bpm, 20.0, 400.0);
+        if (ImGui::Button(T_("Set the tempo"))) {
+            session.set_tempo_change(ui.tempo_frame, ui.tempo_bpm);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ui.tempo_index >= 0) {
+            ImGui::SameLine();
+            if (ImGui::Button(T_("Remove this tempo change"))) {
+                session.remove_tempo_change(static_cast<std::size_t>(ui.tempo_index));
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::TextDisabled("%s", T_("The grid and the metronome follow the tempo.\n"
+                                     "Recorded sound and notes stay where they are in time."));
+        ImGui::EndPopup();
+    }
 
     ImDrawList* draw_list = ImGui::GetWindowDrawList();
     const float bottom = origin.y + height;
@@ -3299,6 +3342,21 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
     draw_list->AddRectFilled(origin, ImVec2(origin.x + width, bottom), IM_COL32(40, 42, 48, 255));
     draw_list->PushClipRect(origin, ImVec2(origin.x + width, bottom), true);
     draw_grid(session, view, draw_list, origin.y, origin.y + height * 0.5f, true);
+    // Tempo changes: a small flag with the tempo.
+    for (const toh::core::TempoChange& change : session.tempo_changes()) {
+        const float x = frame_to_x(session, view, change.frame);
+        if (x < origin.x - 60.0f || x > origin.x + width) {
+            continue;
+        }
+        char text[24];
+        std::snprintf(text, sizeof(text), "%.4g", change.bpm);
+        const ImVec2 size = ImGui::CalcTextSize(text);
+        const float flag_bottom = origin.y + height * 0.5f;
+        draw_list->AddLine(ImVec2(x, origin.y), ImVec2(x, bottom), IM_COL32(90, 200, 230, 255), 1.5f);
+        draw_list->AddRectFilled(ImVec2(x, flag_bottom), ImVec2(x + size.x + 8.0f, flag_bottom + size.y),
+                                 IM_COL32(40, 110, 135, 255), 2.0f);
+        draw_list->AddText(ImVec2(x + 4.0f, flag_bottom), IM_COL32(235, 250, 255, 255), text);
+    }
 
     // Time marks: pick a distance that keeps the labels apart.
     static const double steps[] = {0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1,  2,
