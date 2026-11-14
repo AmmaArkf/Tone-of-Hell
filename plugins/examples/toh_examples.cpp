@@ -58,6 +58,13 @@ const ParamDef kEqParams[] = {{0, "Low gain", -18.0, 18.0, 0.0, "dB"},
                               {6, "High frequency", 1500.0, 16000.0, 8000.0, "Hz"}};
 const char* const kEqFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_EQUALIZER,
                                    CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+const ParamDef kCompParams[] = {{0, "Threshold", -60.0, 0.0, -18.0, "dB"},
+                                {1, "Ratio", 1.0, 20.0, 4.0, ": 1"},
+                                {2, "Attack", 0.1, 200.0, 10.0, "ms"},
+                                {3, "Release", 10.0, 2000.0, 150.0, "ms"},
+                                {4, "Make-up gain", 0.0, 24.0, 0.0, "dB"}};
+const char* const kCompFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_COMPRESSOR,
+                                     CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const ParamDef kGateParams[] = {{0, "Threshold", -80.0, 0.0, -45.0, "dB"},
                                 {1, "Attack", 0.1, 100.0, 2.0, "ms"},
                                 {2, "Release", 5.0, 2000.0, 150.0, "ms"},
@@ -104,7 +111,12 @@ const clap_plugin_descriptor_t kEq = {
     "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
     "Three bands: more or less of the low, middle and high frequencies.", kEqFeatures};
 
-enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise, Equalizer };
+const clap_plugin_descriptor_t kComp = {
+    CLAP_VERSION_INIT, "org.toneofhell.compressor", "Compressor", "Tone of Hell",
+    "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
+    "Turns the loud parts down, so the sound gets more even.", kCompFeatures};
+
+enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise, Equalizer, Compressor };
 
 // A second-order filter (the "Audio EQ Cookbook" formulas of Robert Bristow-Johnson).
 struct Biquad {
@@ -235,6 +247,8 @@ struct Example {
     bool gate_open = true;
     Denoise* denoise = nullptr;  // only for the denoiser
     std::array<Biquad, 3> bands{};  // the equalizer: low, middle, high
+    float comp_level = 0.0f;        // the compressor: the level it follows, and
+    float comp_reduction = 0.0f;    // how far it turns down now, in dB (0 or less)
 };
 
 // One piece of the denoiser: to the spectrum, every frequency turned down by how much noise
@@ -335,6 +349,8 @@ void plugin_reset(const clap_plugin_t* plugin) {
     for (Biquad& band : e.bands) {
         band.clear();
     }
+    e.comp_level = 0.0f;
+    e.comp_reduction = 0.0f;
 }
 
 // A note starts or ends, or a parameter changes, for the synthesizer.
@@ -512,6 +528,28 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
                     result[c] = value;
                 }
                 output(i, result[0], result[1]);
+            }
+            break;
+        }
+        case Kind::Compressor: {
+            const auto threshold = static_cast<float>(e.values[0].load());
+            const auto slope = static_cast<float>(1.0 / e.values[1].load() - 1.0);  // dB of reduction per dB over
+            const auto attack = static_cast<float>(std::exp(-1.0 / (e.values[2].load() / 1000.0 * e.rate)));
+            const auto release = static_cast<float>(std::exp(-1.0 / (e.values[3].load() / 1000.0 * e.rate)));
+            const auto makeup = static_cast<float>(e.values[4].load());
+            const auto fall = static_cast<float>(std::exp(-1.0 / (0.010 * e.rate)));
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                const float left = input(0, i);
+                const float right = input(1, i);
+                // Both sides are turned down together, so the stereo picture stays.
+                const float level = std::max(std::fabs(left), std::fabs(right));
+                e.comp_level = level > e.comp_level ? level : e.comp_level * fall;
+                const float db = 20.0f * std::log10(e.comp_level + 1e-9f);
+                const float wanted = db > threshold ? (db - threshold) * slope : 0.0f;
+                const float coefficient = wanted < e.comp_reduction ? attack : release;
+                e.comp_reduction = wanted + (e.comp_reduction - wanted) * coefficient;
+                const float gain = std::pow(10.0f, (e.comp_reduction + makeup) / 20.0f);
+                output(i, left * gain, right * gain);
             }
             break;
         }
@@ -792,8 +830,8 @@ void plugin_on_main_thread(const clap_plugin_t*) {}
 // ---- The factory -----------------------------------------------------------------------------------
 
 const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain, &kSynth, &kGate, &kDenoise,
-                                                        &kEq};
-constexpr std::uint32_t kPluginCount = 7;
+                                                        &kEq, &kComp};
+constexpr std::uint32_t kPluginCount = 8;
 
 std::uint32_t factory_count(const clap_plugin_factory_t*) { return kPluginCount; }
 
@@ -836,6 +874,11 @@ const clap_plugin_t* factory_create(const clap_plugin_factory_t*, const clap_hos
         e->defs = kEqParams;
         e->count = 7;
         e->plugin.desc = &kEq;
+    } else if (std::strcmp(id, kComp.id) == 0) {
+        e->kind = Kind::Compressor;
+        e->defs = kCompParams;
+        e->count = 5;
+        e->plugin.desc = &kComp;
     } else if (std::strcmp(id, kDenoise.id) == 0) {
         e->kind = Kind::Denoise;
         e->defs = kDenoiseParams;

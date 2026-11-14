@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.22
+
+- Compressor: a built-in effect that turns the loud parts down so the sound gets more even (threshold, ratio, attack, release, make-up gain). Left and right are turned down together.
+
 ## 0.2.21
 
 - Equalizer (stage 9 begins): a built-in effect with three bands. Low and High turn everything below or above their frequency up or down; Mid is a bell around its frequency with a width. FX > Add an effect > Equalizer; every parameter can be automated.

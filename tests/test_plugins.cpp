@@ -143,6 +143,21 @@ TEST_CASE("The equalizer is flat at first and turns a band down") {
     CHECK(rms_through(*eq, 0.5, 0.0, seed) == doctest::Approx(full).epsilon(0.05));
 }
 
+TEST_CASE("The compressor turns loud sound down and leaves quiet sound alone") {
+    std::string error;
+    auto compressor = ClapPlugin::create(kExamples, "org.toneofhell.compressor", 48000.0, 2, &error);
+    REQUIRE_MESSAGE(compressor != nullptr, error);
+    std::uint32_t seed = 5;
+    // A tone at -26 dB is below the threshold of -18 dB.
+    CHECK(rms_through(*compressor, 0.05, 0.0, seed) == doctest::Approx(0.05 / std::sqrt(2.0)).epsilon(0.02));
+    // At -6 dB it is 12 dB over; with 4 : 1 it comes out 3 dB over, 9 dB quieter.
+    const double loud = rms_through(*compressor, 0.5, 0.0, seed);
+    CHECK(loud == doctest::Approx(0.5 / std::sqrt(2.0) * std::pow(10.0, -9.0 / 20.0)).epsilon(0.08));
+    // Make-up gain brings it back up.
+    REQUIRE(compressor->set_param(4, 9.0));
+    CHECK(rms_through(*compressor, 0.5, 0.0, seed) == doctest::Approx(0.5 / std::sqrt(2.0)).epsilon(0.08));
+}
+
 TEST_CASE("The denoiser learns a noise and takes it out, keeping the sound") {
     std::string error;
     auto denoiser = ClapPlugin::create(kExamples, "org.toneofhell.denoiser", 48000.0, 2, &error);
