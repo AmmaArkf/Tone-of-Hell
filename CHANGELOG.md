@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.24
+
+- Reverb: a built-in effect with the sound of a room (size, damping, mix). Its tail rings out after the regions end.
+- With Echo as the delay, the built-in effects of stage 9 are all there: Equalizer, Compressor, Reverb, Echo and Limiter, next to Noise Gate, Denoiser, Tremolo and Gain.
+
 ## 0.2.23
 
 - Limiter: a built-in effect that never lets the sound get louder than its ceiling (ceiling, release, input gain). It looks 5 ms ahead and turns peaks down smoothly before they arrive; that delay is compensated.

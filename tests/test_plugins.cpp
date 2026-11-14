@@ -186,6 +186,39 @@ TEST_CASE("The limiter keeps every sample under its ceiling") {
     CHECK(std::sqrt(energy / (94.0 * 1024.0)) > 0.4);  // limited, not silenced
 }
 
+TEST_CASE("The reverb leaves a tail after the sound has ended") {
+    std::string error;
+    auto reverb = ClapPlugin::create(kExamples, "org.toneofhell.reverb", 48000.0, 2, &error);
+    REQUIRE_MESSAGE(reverb != nullptr, error);
+    std::uint32_t seed = 11;
+    // With the mix at 0 the sound passes unchanged.
+    REQUIRE(reverb->set_param(2, 0.0));
+    CHECK(rms_through(*reverb, 0.5, 0.0, seed) == doctest::Approx(0.5 / std::sqrt(2.0)).epsilon(0.01));
+    reverb->reset();
+
+    // Only the reverb: one click, then silence going in; the tail still sounds a quarter second
+    // later and has faded after ten seconds.
+    REQUIRE(reverb->set_param(2, 100.0));
+    std::vector<float> block(2 * 512, 0.0f);
+    block[0] = block[1] = 1.0f;
+    float early = 0.0f;
+    float late = 0.0f;
+    for (int b = 0; b < 1000; ++b) {
+        reverb->process(block.data(), 512, 2);
+        for (const float sample : block) {
+            if (b >= 20 && b < 30) {
+                early = std::max(early, std::fabs(sample));
+            }
+            if (b >= 990) {
+                late = std::max(late, std::fabs(sample));
+            }
+        }
+        std::fill(block.begin(), block.end(), 0.0f);
+    }
+    CHECK(early > 0.0005f);
+    CHECK(late < early * 0.01f);
+}
+
 TEST_CASE("The denoiser learns a noise and takes it out, keeping the sound") {
     std::string error;
     auto denoiser = ClapPlugin::create(kExamples, "org.toneofhell.denoiser", 48000.0, 2, &error);

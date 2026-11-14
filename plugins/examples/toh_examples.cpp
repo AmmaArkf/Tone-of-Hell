@@ -70,6 +70,11 @@ const ParamDef kLimitParams[] = {{0, "Ceiling", -12.0, 0.0, -1.0, "dB"},
                                  {2, "Input gain", 0.0, 24.0, 0.0, "dB"}};
 const char* const kLimitFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_LIMITER,
                                       CLAP_PLUGIN_FEATURE_MASTERING, CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+const ParamDef kReverbParams[] = {{0, "Size", 0.0, 100.0, 60.0, "%"},
+                                  {1, "Damping", 0.0, 100.0, 40.0, "%"},
+                                  {2, "Mix", 0.0, 100.0, 25.0, "%"}};
+const char* const kReverbFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_REVERB,
+                                       CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const ParamDef kGateParams[] = {{0, "Threshold", -80.0, 0.0, -45.0, "dB"},
                                 {1, "Attack", 0.1, 100.0, 2.0, "ms"},
                                 {2, "Release", 5.0, 2000.0, 150.0, "ms"},
@@ -127,7 +132,58 @@ const clap_plugin_descriptor_t kLimit = {
     "Never lets the sound get louder than the ceiling: it looks ahead and turns peaks down in time.",
     kLimitFeatures};
 
-enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise, Equalizer, Compressor, Limiter };
+const clap_plugin_descriptor_t kReverb = {
+    CLAP_VERSION_INIT, "org.toneofhell.reverb", "Reverb", "Tone of Hell",
+    "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
+    "The sound of a room: many small echoes that melt into a tail.", kReverbFeatures};
+
+enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise, Equalizer, Compressor, Limiter, Reverb };
+
+// A reverb of the classic Schroeder kind: eight echo loops side by side (each a little duller
+// with every round), then four all-pass filters that smear them into a tail. The right side
+// uses slightly longer loops, which makes the tail wide.
+struct Reverb {
+    struct Line {
+        std::vector<float> buffer;
+        std::size_t position = 0;
+        float low = 0.0f;  // the damped sound going back into an echo loop
+    };
+    std::array<std::array<Line, 8>, 2> echoes{};
+    std::array<std::array<Line, 4>, 2> smears{};
+
+    void prepare(double rate) {
+        static const int echo_lengths[8] = {1116, 1188, 1277, 1356, 1422, 1491, 1557, 1617};  // at 44.1 kHz
+        static const int smear_lengths[4] = {556, 441, 341, 225};
+        const double scale = rate / 44100.0;
+        for (std::size_t side = 0; side < 2; ++side) {
+            const int spread = side == 0 ? 0 : 23;
+            for (std::size_t k = 0; k < 8; ++k) {
+                echoes[side][k].buffer.assign(
+                    static_cast<std::size_t>(std::llround((echo_lengths[k] + spread) * scale)), 0.0f);
+            }
+            for (std::size_t k = 0; k < 4; ++k) {
+                smears[side][k].buffer.assign(
+                    static_cast<std::size_t>(std::llround((smear_lengths[k] + spread) * scale)), 0.0f);
+            }
+        }
+        clear();
+    }
+    void clear() {
+        for (auto& side : echoes) {
+            for (Line& line : side) {
+                std::fill(line.buffer.begin(), line.buffer.end(), 0.0f);
+                line.position = 0;
+                line.low = 0.0f;
+            }
+        }
+        for (auto& side : smears) {
+            for (Line& line : side) {
+                std::fill(line.buffer.begin(), line.buffer.end(), 0.0f);
+                line.position = 0;
+            }
+        }
+    }
+};
 
 // The limiter looks 5 ms ahead: the sound is delayed that long, so the gain is down before a
 // peak arrives.
@@ -285,6 +341,7 @@ struct Example {
     Denoise* denoise = nullptr;  // only for the denoiser
     std::array<Biquad, 3> bands{};  // the equalizer: low, middle, high
     Limiter* limiter = nullptr;     // only for the limiter
+    Reverb* reverb = nullptr;       // only for the reverb
     float comp_level = 0.0f;        // the compressor: the level it follows, and
     float comp_reduction = 0.0f;    // how far it turns down now, in dB (0 or less)
 };
@@ -357,6 +414,7 @@ bool plugin_init(const clap_plugin_t*) { return true; }
 void plugin_destroy(const clap_plugin_t* plugin) {
     delete self(plugin).denoise;
     delete self(plugin).limiter;
+    delete self(plugin).reverb;
     delete &self(plugin);
 }
 
@@ -365,6 +423,9 @@ bool plugin_activate(const clap_plugin_t* plugin, double rate, std::uint32_t, st
     e.rate = rate;
     if (e.limiter != nullptr) {
         e.limiter->prepare(rate);
+    }
+    if (e.reverb != nullptr) {
+        e.reverb->prepare(rate);
     }
     if (e.kind == Kind::Echo) {
         e.delay_frames = static_cast<std::size_t>(rate * 2.1) + 1;  // a little over 2 seconds
@@ -395,6 +456,9 @@ void plugin_reset(const clap_plugin_t* plugin) {
     e.comp_reduction = 0.0f;
     if (e.limiter != nullptr) {
         e.limiter->clear();
+    }
+    if (e.reverb != nullptr) {
+        e.reverb->clear();
     }
 }
 
@@ -633,6 +697,36 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
                 // The oldest frame in the delay line is n - 1 frames old.
                 output(i, std::clamp(l.delay[l.position * 2] * gain, -ceiling, ceiling),
                        std::clamp(l.delay[l.position * 2 + 1] * gain, -ceiling, ceiling));
+            }
+            break;
+        }
+        case Kind::Reverb: {
+            Reverb& r = *e.reverb;
+            const auto feedback = static_cast<float>(0.7 + 0.28 * e.values[0].load() / 100.0);
+            const auto damping = static_cast<float>(0.4 * e.values[1].load() / 100.0);
+            const auto mix = static_cast<float>(e.values[2].load() / 100.0);
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                const float dry[2] = {input(0, i), input(1, i)};
+                const float feed = (dry[0] + dry[1]) * 0.015f + 1e-18f;  // never quite zero: no denormals
+                float result[2];
+                for (std::size_t side = 0; side < 2; ++side) {
+                    float wet = 0.0f;
+                    for (Reverb::Line& line : r.echoes[side]) {
+                        const float out = line.buffer[line.position];
+                        line.low = out * (1.0f - damping) + line.low * damping;
+                        line.buffer[line.position] = feed + line.low * feedback;
+                        line.position = (line.position + 1) % line.buffer.size();
+                        wet += out;
+                    }
+                    for (Reverb::Line& line : r.smears[side]) {
+                        const float held = line.buffer[line.position];
+                        line.buffer[line.position] = wet + held * 0.5f;
+                        line.position = (line.position + 1) % line.buffer.size();
+                        wet = held - wet;
+                    }
+                    result[side] = dry[side] * (1.0f - mix) + wet * mix;
+                }
+                output(i, result[0], result[1]);
             }
             break;
         }
@@ -920,8 +1014,8 @@ void plugin_on_main_thread(const clap_plugin_t*) {}
 // ---- The factory -----------------------------------------------------------------------------------
 
 const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain, &kSynth, &kGate, &kDenoise,
-                                                        &kEq, &kComp, &kLimit};
-constexpr std::uint32_t kPluginCount = 9;
+                                                        &kEq, &kComp, &kLimit, &kReverb};
+constexpr std::uint32_t kPluginCount = 10;
 
 std::uint32_t factory_count(const clap_plugin_factory_t*) { return kPluginCount; }
 
@@ -976,6 +1070,13 @@ const clap_plugin_t* factory_create(const clap_plugin_factory_t*, const clap_hos
         e->plugin.desc = &kLimit;
         e->limiter = new Limiter();
         e->limiter->prepare(48000.0);
+    } else if (std::strcmp(id, kReverb.id) == 0) {
+        e->kind = Kind::Reverb;
+        e->defs = kReverbParams;
+        e->count = 3;
+        e->plugin.desc = &kReverb;
+        e->reverb = new Reverb();
+        e->reverb->prepare(48000.0);
     } else if (std::strcmp(id, kDenoise.id) == 0) {
         e->kind = Kind::Denoise;
         e->defs = kDenoiseParams;

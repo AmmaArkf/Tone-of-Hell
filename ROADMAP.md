@@ -16,7 +16,7 @@ A stage is done when the criterion in parentheses is met and has been checked on
 - [x] **6. MIDI, piano roll and a simple synthesizer.** (A melody can be played from a keyboard, edited in the piano roll and played back.)
 - [ ] **7. Plugin hosting.** CLAP first, then VST3, with delay compensation (a third-party synthesizer and reverb work in the mix and keep their state).
 - [x] **8. Automation and tempo map.** (Volume and plugin parameters follow curves, and the tempo can change inside a track.)
-- [ ] **9. Built-in effects.** Equalizer, compressor, reverb, delay and limiter (each is checked on test signals and produces no clicks).
+- [x] **9. Built-in effects.** Equalizer, compressor, reverb, delay and limiter (each is checked on test signals and produces no clicks).
 - [ ] **10. Advanced features by community demand.** The order is chosen by votes on issues.
 
 Level 0 is complete: version 0.2 (see Releases). Level 1 starts with stage 6. A pre-release of level 0 comes out after stages 1 to 5, and of level 1 after stages 6 to 9. A stabilization phase runs before every release.
