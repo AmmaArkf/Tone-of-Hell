@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.5
+
+- With the magnet on, the playhead sticks to the starts and ends of regions (and to the start of the project) when it is placed or dragged on the ruler or on an empty part of a lane. Alt places it freely.
+
 ## 0.3.4
 
 - Against crackling: Settings > Audio has a choice of the buffer size (64 to 4096 frames). A bigger buffer gives the computer more time for many tracks and effects; it is remembered.

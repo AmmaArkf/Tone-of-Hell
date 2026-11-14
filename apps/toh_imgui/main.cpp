@@ -3299,6 +3299,35 @@ void draw_grid(const Session& session, const View& view, ImDrawList* draw_list, 
     }
 }
 
+// Where a click or drag on the ruler or on an empty part of a lane puts the playhead. With the
+// magnet on (and Alt not held) it sticks to the starts and ends of regions, and to the start of
+// the project, when the mouse is within half a line of text of them.
+std::int64_t magnet_seek_frame(const Session& session, const UiState& ui, std::int64_t frame) {
+    frame = std::max<std::int64_t>(frame, 0);
+    if (!ui.settings.magnet || ImGui::GetIO().KeyAlt) {
+        return frame;
+    }
+    const View& view = ui.view;
+    const float x = frame_to_x(session, view, frame);
+    float best_distance = 0.5f * ImGui::GetFontSize();
+    std::int64_t best = frame;
+    const auto consider = [&](std::int64_t candidate) {
+        const float d = std::fabs(frame_to_x(session, view, candidate) - x);
+        if (d <= best_distance) {
+            best_distance = d;
+            best = candidate;
+        }
+    };
+    consider(0);
+    for (const TrackInfo& track : session.tracks()) {
+        for (const RegionInfo& region : track.regions) {
+            consider(region.start);
+            consider(region.end());
+        }
+    }
+    return best;
+}
+
 void draw_playhead(const Session& session, const View& view, ImDrawList* draw_list, float top,
                    float bottom) {
     const float x = frame_to_x(session, view, session.position_frames());
@@ -3325,7 +3354,7 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
     ImGui::InvisibleButton("ruler", ImVec2(width, height));
     const ImGuiIO& io = ImGui::GetIO();
     if (ImGui::IsItemActivated() || (ImGui::IsItemActive() && io.MouseDelta.x != 0.0f)) {
-        session.seek_frames(x_to_frame(session, view, io.MousePos.x));
+        session.seek_frames(magnet_seek_frame(session, ui, x_to_frame(session, view, io.MousePos.x)));
     }
     // Right-click: the tempo from here on.
     if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
@@ -4100,7 +4129,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
             if (!io.KeyCtrl && !io.KeyShift) {
                 session.clear_track_selection();
             }
-            session.seek_frames(x_to_frame(session, view, io.MousePos.x));
+            session.seek_frames(magnet_seek_frame(session, ui, x_to_frame(session, view, io.MousePos.x)));
         } else {
             ui.drag = hit.kind;
             ui.drag_region = hit.region;
@@ -4286,7 +4315,7 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
         switch (ui.drag) {
             case DragKind::Seek:
                 if (io.MouseDelta.x != 0.0f) {
-                    session.seek_frames(mouse_frame);
+                    session.seek_frames(magnet_seek_frame(session, ui, mouse_frame));
                 }
                 break;
             case DragKind::Select:
