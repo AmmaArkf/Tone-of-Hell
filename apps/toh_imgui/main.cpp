@@ -4811,20 +4811,32 @@ bool is_black_key(int pitch) {
     return key == 1 || key == 3 || key == 6 || key == 8 || key == 10;
 }
 
-// One step of the grid in frames (a quarter beat when the grid is off).
-double grid_step_frames(const Session& session) {
+// The beats in a bar of the project (at least one).
+double bar_beats(const Session& session) {
+    return std::max(static_cast<double>(session.metronome().beats_per_bar), 1.0);
+}
+
+// One step of the grid in beats (a quarter beat when the grid is off). Counted in beats, the
+// grid follows the tempo changes of the project.
+double grid_step_beats(const Session& session) {
     switch (session.grid_step()) {
         case GridStep::Bar:
-            return session.bar_frames();
+            return bar_beats(session);
         case GridStep::Beat:
-            return session.beat_frames();
+            return 1.0;
         case GridStep::HalfBeat:
-            return session.beat_frames() / 2.0;
+            return 0.5;
         case GridStep::QuarterBeat:
         case GridStep::None:
             break;
     }
-    return session.beat_frames() / 4.0;
+    return 0.25;
+}
+
+// The frame a number of bars after (or before) a frame, by the tempo map.
+std::int64_t bars_from(const Session& session, std::int64_t frame, double bars) {
+    const double beats = session.beats_at(frame) + bars * bar_beats(session);
+    return std::llround(session.frame_at(std::max(beats, 0.0)));
 }
 
 void open_piano_roll(UiState& ui, std::size_t track, std::size_t region) {
@@ -4891,7 +4903,8 @@ void draw_piano_roll(Session& session, UiState& ui) {
     }
     std::int64_t frames = region->source->clip->frames();
     const double beat = std::max(session.beat_frames(), 1.0);
-    const double step = std::max(grid_step_frames(session), 1.0);
+    const double step_beats = grid_step_beats(session);
+    const double step = std::max(step_beats * beat, 1.0);
     if (ui.roll_last_length <= 0) {
         ui.roll_last_length = std::llround(beat);
     }
@@ -4907,14 +4920,12 @@ void draw_piano_roll(Session& session, UiState& ui) {
     // Longer or shorter by a bar (the edges of the region on its track can be dragged, too).
     const auto refresh_frames = [&]() { frames = session.tracks()[ui.roll_track].regions[ui.roll_region].source->clip->frames(); };
     if (ImGui::Button(T_("+ bar"))) {
-        session.trim_region_end(ui.roll_track, ui.roll_region,
-                                region->end() + std::llround(session.bar_frames()));
+        session.trim_region_end(ui.roll_track, ui.roll_region, bars_from(session, region->end(), 1.0));
     }
     tooltip(T_("Make the region a bar longer. Its edges on the track can be dragged further out, too."));
     ImGui::SameLine();
     if (ImGui::Button(T_("- bar"))) {
-        session.trim_region_end(ui.roll_track, ui.roll_region,
-                                region->end() - std::llround(session.bar_frames()));
+        session.trim_region_end(ui.roll_track, ui.roll_region, bars_from(session, region->end(), -1.0));
     }
     tooltip(T_("Make the region a bar shorter (the notes after its end are kept, but not heard)."));
     // The buttons may have given the region a new source: look it up again.
@@ -4981,9 +4992,12 @@ void draw_piano_roll(Session& session, UiState& ui) {
             return value;
         }
         const double timeline = static_cast<double>(region->start - region->offset) + rel;
-        const double cells = timeline / step;
-        const double snapped = (down ? std::floor(cells) : std::round(cells)) * step;
-        return std::llround(snapped) - region->start + region->offset;
+        if (timeline < 0.0) {
+            return value;  // before the start of the project there is no grid
+        }
+        const double cells = session.beats_at(std::llround(timeline)) / step_beats;
+        const double snapped = (down ? std::floor(cells + 1e-9) : std::round(cells)) * step_beats;
+        return std::llround(session.frame_at(snapped)) - region->start + region->offset;
     };
 
     const double mouse_frame = px_to_frame(io.MousePos.x);
@@ -5224,15 +5238,25 @@ void draw_piano_roll(Session& session, UiState& ui) {
                        IM_COL32(70, 74, 86, 255));
         }
     }
-    // Vertical lines: steps of the grid, beats, and brighter bars.
-    double line_step = step;
-    while (line_step / beat * static_cast<double>(ui.roll_beat_px) < 6.0) {
-        line_step *= 2.0;
-    }
-    const double bar = std::max(session.bar_frames(), 1.0);
+    // Vertical lines: steps of the grid, beats, and brighter bars. They are counted in beats,
+    // so they follow the tempo changes of the project like the timeline does.
     const double shift = static_cast<double>(region->start - region->offset);  // timeline - note frame
-    for (double t = std::ceil(shift / line_step) * line_step; t - shift <= static_cast<double>(frames);
-         t += line_step) {
+    const double per_bar = bar_beats(session);
+    const std::int64_t span_first = std::max<std::int64_t>(std::llround(shift), 0);
+    const std::int64_t span_last = std::max<std::int64_t>(std::llround(shift + static_cast<double>(frames)), 0);
+    const double fastest_beat = std::max(std::min(session.beat_frames_at(span_first), session.beat_frames_at(span_last)), 1.0);
+    const double beat_px = fastest_beat / beat * static_cast<double>(ui.roll_beat_px);
+    double line_beats = step_beats;
+    while (line_beats * beat_px < 6.0) {
+        line_beats *= 2.0;
+    }
+    const double first_beat = session.beats_at(span_first);
+    float last_x = -1e9f;
+    for (double b = std::ceil(first_beat / line_beats - 1e-9) * line_beats;; b += line_beats) {
+        const double t = session.frame_at(b);
+        if (t - shift > static_cast<double>(frames)) {
+            break;
+        }
         const float x = frame_to_px(t - shift);
         if (x < view_left - 1.0f) {
             continue;
@@ -5240,8 +5264,12 @@ void draw_piano_roll(Session& session, UiState& ui) {
         if (x > view_right + 1.0f) {
             break;
         }
-        const bool on_bar = std::fabs(std::remainder(t, bar)) < 0.5;
-        const bool on_beat = std::fabs(std::remainder(t, beat)) < 0.5;
+        const bool on_bar = std::fabs(std::remainder(b, per_bar)) < 1e-6;
+        const bool on_beat = std::fabs(b - std::round(b)) < 1e-6;
+        if (!on_bar && x - last_x < 4.0f) {
+            continue;  // a faster tempo further on: too close to the line before
+        }
+        last_x = x;
         d->AddLine(ImVec2(x, std::max(origin.y, view_top)), ImVec2(x, std::min(origin.y + height, view_bottom)),
                    on_bar ? IM_COL32(110, 115, 130, 255)
                           : (on_beat ? IM_COL32(70, 74, 86, 255) : IM_COL32(50, 53, 62, 255)));
@@ -5284,12 +5312,15 @@ void draw_piano_roll(Session& session, UiState& ui) {
                      in_ruler && hovered ? IM_COL32(48, 52, 64, 255) : IM_COL32(36, 39, 48, 255));
     d->AddLine(ImVec2(view_left, ruler_bottom), ImVec2(view_right, ruler_bottom), IM_COL32(90, 95, 110, 255));
     {
-        double bar_step = bar;
-        while (bar_step / beat * static_cast<double>(ui.roll_beat_px) < 3.0f * font) {
+        double bar_step = per_bar;
+        while (bar_step * beat_px < 3.0 * static_cast<double>(font)) {
             bar_step *= 2.0;
         }
-        for (double t = std::ceil(shift / bar_step) * bar_step; t - shift <= static_cast<double>(frames);
-             t += bar_step) {
+        for (double b = std::ceil(first_beat / bar_step - 1e-9) * bar_step;; b += bar_step) {
+            const double t = session.frame_at(b);
+            if (t - shift > static_cast<double>(frames)) {
+                break;
+            }
             const float x = frame_to_px(t - shift);
             if (x < strip_left - 1.0f) {
                 continue;
@@ -5298,7 +5329,7 @@ void draw_piano_roll(Session& session, UiState& ui) {
                 break;
             }
             d->AddLine(ImVec2(x, ruler_bottom - 5.0f), ImVec2(x, ruler_bottom), IM_COL32(150, 155, 170, 255));
-            const std::string number = std::to_string(static_cast<long long>(std::llround(t / bar)) + 1);
+            const std::string number = std::to_string(static_cast<long long>(std::llround(b / per_bar)) + 1);
             d->AddText(ImVec2(x + 3.0f, view_top + 2.0f), IM_COL32(190, 195, 210, 255), number.c_str());
         }
     }

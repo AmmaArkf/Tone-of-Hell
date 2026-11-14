@@ -27,7 +27,16 @@ jobs:
             libxi-dev libxss-dev libxtst-dev libxkbcommon-dev libwayland-dev wayland-protocols \
             libegl1-mesa-dev libgl1-mesa-dev libgles2-mesa-dev libdbus-1-dev libudev-dev
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        shell: bash
+        run: |
+          # The sources of the libraries are downloaded here; a network hiccup is tried again.
+          for attempt in 1 2 3; do
+            cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && exit 0
+            echo "Configure failed (attempt $attempt), trying again"
+            rm -rf build
+            sleep 20
+          done
+          exit 1
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test

@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.1
+
+- The piano roll follows tempo changes: its grid lines, bar numbers and snapping are counted in beats, like the timeline. `+ bar` and `- bar` add or take a bar at the tempo where the region ends.
+- The automatic check on GitHub tries the download of the libraries again when the network fails (the check of 0.3.0 on Windows failed that way).
+
 ## 0.3.0
 
 The release of level 1, the working minimum. Everything since 0.2.0, in short:
