@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.10
+
+- Piano roll: Ctrl+C and Ctrl+X copy or cut the selected notes, Ctrl+V pastes them at the playhead on the grid, selected; the playhead moves to their end, so pasting again lays the next copy after them.
+- The middle mouse button (the wheel pressed) drags the timeline through time and through the tracks, and the piano roll canvas likewise.
+- The wheel zooms the axis under the mouse: over the ruler always the time axis, over the track headers the height of the tracks, over the keys of the piano roll the height of its rows (around the key under the mouse).
+
 ## 0.3.9
 
 - The speed of one track: the "x1" button in a track header sets it (25% to 400%, with quick choices). The regions of the track get shorter or longer from its first region on and the ones after move along; its automation follows. Recorded sound changes its pitch with the speed, like a tape; notes keep their pitch. Ctrl+Z takes it back.

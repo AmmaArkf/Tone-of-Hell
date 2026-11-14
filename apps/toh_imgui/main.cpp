@@ -191,6 +191,12 @@ struct UiState {
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
     std::int64_t tempo_frame = 0;       // the tempo menu of the ruler: where, which tempo, and
     float track_speed = 100.0f;         // the speed chosen in a track's speed box, in percent
+    bool middle_pan = false;            // the middle mouse button drags the timeline
+    float track_zoom = 1.0f;            // the height of the tracks (1 = normal)
+    bool ruler_hovered = false;         // the mouse was over the ruler in the last frame
+    float roll_key_zoom = 1.0f;         // the height of the rows of the piano roll
+    float roll_canvas_y = 0.0f;         // top of the piano roll canvas on the screen
+    float roll_scroll_y = 0.0f;
     bool roll_full = false;             // the piano roll fills the whole window
     bool roll_restore = false;          // put it back where it was before, next frame
     ImVec2 roll_saved_pos{};
@@ -246,6 +252,8 @@ struct UiState {
     std::vector<toh::core::Note> roll_notes;
     std::vector<toh::core::Note> roll_origin;  // the notes when the drag began
     std::vector<char> roll_selected;           // one flag per note of roll_notes
+    std::vector<toh::core::Note> note_clipboard;  // copied notes, the first starting at 0
+    std::int64_t note_clipboard_span = 0;         // from the first start to the last end
     int roll_mode = 0;  // 0 nothing, 1 moving, 2 length, 3 playhead, 4 listening, 5 selection box
     std::size_t roll_anchor = 0;               // the note the drag began on
     double roll_start_frame = 0.0;
@@ -3423,6 +3431,7 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
 
     ImGui::InvisibleButton("ruler", ImVec2(width, height));
     const ImGuiIO& io = ImGui::GetIO();
+    ui.ruler_hovered = ImGui::IsItemHovered();
     // Markers sit as flags in the time row: a click goes there, a drag moves the marker.
     const float marker_top = grid ? origin.y + height * 0.5f : origin.y;
     const auto marker_under = [&](float mx, float my) {
@@ -5232,13 +5241,23 @@ void draw_piano_roll(Session& session, UiState& ui) {
                                  "Ctrl: select several. Alt: off the grid."));
     ImGui::TextDisabled("%s", T_("Wheel: zoom. Scrollbars: move. The strip on top: place the playhead. "
                                  "The keys on the left: listen."));
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", T_("Ctrl+C, Ctrl+X, Ctrl+V: copy, cut and paste notes at the playhead."));
 
-    const float key_h = std::max(0.85f * font, 8.0f);
+    const float key_h = std::max(0.85f * font * ui.roll_key_zoom, 4.0f);
     const float keys_w = 3.5f * font;
     const float ruler_h = font + 4.0f;
     // The wheel only zooms, around the mouse; moving is left to the scrollbars.
     float next_scroll_x = -1.0f;
-    if (ui.roll_hovered && io.MouseWheel != 0.0f) {
+    float next_scroll_y = -1.0f;
+    if (ui.roll_hovered && io.MouseWheel != 0.0f && io.MousePos.x < ui.roll_canvas_x + keys_w) {
+        // Over the keys the wheel zooms the rows, around the key under the mouse.
+        const float old_h = key_h;
+        ui.roll_key_zoom = std::clamp(ui.roll_key_zoom * std::pow(1.15f, io.MouseWheel), 0.4f, 4.0f);
+        const float new_h = std::max(0.85f * font * ui.roll_key_zoom, 4.0f);
+        const float mouse_in_view = io.MousePos.y - ui.roll_canvas_y;
+        next_scroll_y = std::max((ui.roll_scroll_y + mouse_in_view) * (new_h / old_h) - mouse_in_view, 0.0f);
+    } else if (ui.roll_hovered && io.MouseWheel != 0.0f) {
         const float old_px = ui.roll_beat_px;
         ui.roll_beat_px = std::clamp(ui.roll_beat_px * std::pow(1.25f, io.MouseWheel), 8.0f, 600.0f);
         const float mouse_in_view = io.MousePos.x - ui.roll_canvas_x;
@@ -5248,13 +5267,21 @@ void draw_piano_roll(Session& session, UiState& ui) {
     const float width = keys_w + static_cast<float>(static_cast<double>(frames) / beat) * ui.roll_beat_px;
     const float height = 128.0f * key_h;
     ImGui::SetNextWindowContentSize(ImVec2(width, height));
-    if (next_scroll_x >= 0.0f) {
-        ImGui::SetNextWindowScroll(ImVec2(next_scroll_x, -1.0f));
+    if (next_scroll_x >= 0.0f || next_scroll_y >= 0.0f) {
+        ImGui::SetNextWindowScroll(ImVec2(next_scroll_x, next_scroll_y));
     }
     ImGui::BeginChild("roll canvas", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
                       ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    // The middle mouse button drags the canvas, as on the timeline.
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
+        ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+    }
     ui.roll_hovered = ImGui::IsWindowHovered();
     ui.roll_scroll_x = ImGui::GetScrollX();
+    ui.roll_scroll_y = ImGui::GetScrollY();
+    ui.roll_canvas_y = ImGui::GetWindowPos().y;
     ui.roll_canvas_x = ImGui::GetCursorScreenPos().x + ImGui::GetScrollX();
     const float ruler_bottom = ImGui::GetWindowPos().y + ruler_h;
     const ImVec2 origin = ImGui::GetCursorScreenPos();
@@ -5499,6 +5526,59 @@ void draw_piano_roll(Session& session, UiState& ui) {
         if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_A)) {
             std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 1);
         }
+        // Ctrl+C and Ctrl+X: the selected notes go to the clipboard of notes.
+        const bool copy_key = io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C);
+        const bool cut_key = io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_X);
+        if (copy_key || cut_key) {
+            std::vector<toh::core::Note> copied;
+            std::vector<toh::core::Note> kept;
+            std::int64_t first = std::numeric_limits<std::int64_t>::max();
+            std::int64_t last = 0;
+            for (std::size_t k = 0; k < ui.roll_notes.size(); ++k) {
+                const toh::core::Note& note = ui.roll_notes[k];
+                if (ui.roll_selected[k] != 0) {
+                    copied.push_back(note);
+                    first = std::min(first, note.start);
+                    last = std::max(last, note.start + note.length);
+                } else {
+                    kept.push_back(note);
+                }
+            }
+            if (!copied.empty()) {
+                for (toh::core::Note& note : copied) {
+                    note.start -= first;
+                }
+                ui.note_clipboard = std::move(copied);
+                ui.note_clipboard_span = std::max<std::int64_t>(last - first, 1);
+                if (cut_key) {
+                    ui.roll_notes = std::move(kept);
+                    ui.roll_selected.assign(ui.roll_notes.size(), 0);
+                    changed = true;
+                }
+            }
+        }
+        // Ctrl+V: the copied notes go in at the playhead (on the grid), selected so they can be
+        // dragged on right away; the playhead moves to their end, so pasting again continues.
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V) && !ui.note_clipboard.empty()) {
+            const double playhead = static_cast<double>(session.position_frames()) - shift_frames;
+            const std::int64_t at = playhead >= 0.0 && playhead < static_cast<double>(frames)
+                                        ? std::clamp<std::int64_t>(snap(playhead, false), 0, std::max<std::int64_t>(frames - 1, 0))
+                                        : 0;
+            std::fill(ui.roll_selected.begin(), ui.roll_selected.end(), 0);
+            for (const toh::core::Note& copied : ui.note_clipboard) {
+                toh::core::Note note = copied;
+                note.start += at;
+                if (note.start >= frames) {
+                    continue;  // past the end of the region's notes
+                }
+                note.length = std::max<std::int64_t>(std::min(note.length, frames - note.start), 1);
+                ui.roll_notes.push_back(note);
+                ui.roll_selected.push_back(1);
+            }
+            sort_roll_notes(ui);
+            session.seek_frames(std::max<std::int64_t>(std::llround(static_cast<double>(at + ui.note_clipboard_span) + shift_frames), 0));
+            changed = true;
+        }
     }
     if (changed) {
         session.set_region_notes(ui.roll_track, ui.roll_region, ui.roll_notes);
@@ -5644,14 +5724,19 @@ void draw_tracks(Session& session, UiState& ui) {
     const ImGuiIO& io = ImGui::GetIO();
     const float font = ImGui::GetFontSize();
     const float header_width = 22.5f * font;
-    const float row_height = 6.2f * font;
+    const float row_height = 6.2f * font * ui.track_zoom;
 
     // Mouse wheel over the timeline: Ctrl zooms around the mouse, Shift scrolls sideways.
     if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows)) {
         // With no region selected the plain wheel zooms too; with a selection it scrolls the
         // track list (the "tracks" child window is created without wheel scrolling otherwise).
-        const bool plain_zoom = !ui.selected && !io.KeyShift;
-        if ((io.KeyCtrl || plain_zoom) && io.MouseWheel != 0.0f) {
+        // Over the ruler the wheel always zooms the time axis; over the track headers it makes
+        // the tracks taller or lower.
+        const bool plain_zoom = (!ui.selected || ui.ruler_hovered) && !io.KeyShift;
+        const bool over_headers = io.MousePos.x < view.lane_origin_x && !ui.ruler_hovered;
+        if (over_headers && !io.KeyCtrl && !io.KeyShift && io.MouseWheel != 0.0f) {
+            ui.track_zoom = std::clamp(ui.track_zoom * std::pow(1.15f, io.MouseWheel), 1.0f, 4.0f);
+        } else if ((io.KeyCtrl || plain_zoom) && io.MouseWheel != 0.0f) {
             zoom_view(view, std::pow(1.25, static_cast<double>(io.MouseWheel)),
                       std::max(io.MousePos.x, view.lane_origin_x));
         } else if (io.KeyShift && io.MouseWheel != 0.0f) {
@@ -5661,6 +5746,24 @@ void draw_tracks(Session& session, UiState& ui) {
             view.start_seconds -= static_cast<double>(io.MouseWheelH) * 80.0 / view.pixels_per_second;
         }
         view.start_seconds = std::max(view.start_seconds, 0.0);
+    }
+    // The middle mouse button (the wheel pressed) drags the timeline: sideways through time,
+    // up and down through the tracks.
+    if (ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) {
+        ui.middle_pan = true;
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle)) {
+        ui.middle_pan = false;
+    }
+    if (ui.middle_pan) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        if (io.MouseDelta.x != 0.0f) {
+            view.start_seconds = std::max(
+                view.start_seconds - static_cast<double>(io.MouseDelta.x) / view.pixels_per_second, 0.0);
+        }
+        if (io.MouseDelta.y != 0.0f) {
+            ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+        }
     }
 
     // Show everything when the first tracks arrive.

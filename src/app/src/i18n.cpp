@@ -308,6 +308,8 @@ const Entry kRussian[] = {
     {"Rename a track", "переименование дорожки"},
     {"Change the tempo", "изменение темпа"},
     {"Change the markers", "изменение маркеров"},
+    {"Ctrl+C, Ctrl+X, Ctrl+V: copy, cut and paste notes at the playhead.",
+     "Ctrl+C, Ctrl+X, Ctrl+V: копировать, вырезать и вставить ноты у курсора."},
     {"Full screen##roll", "Во весь экран##roll"},
     {"The piano roll over the whole window, or back to its own size.",
      "Пианоролл на всё окно программы или обратно в свой размер."},
