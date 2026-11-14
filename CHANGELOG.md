@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.6
+
+- Much less load from instrument tracks with recorded instruments (SoundFont): a note is computed for a whole audio block at once, its pitch once per note and its loudness once every 16 frames where it changes slowly (every frame where it changes fast). Six MIDI tracks used to take most of the time of an audio block.
+- Pre-release with the fixes after 0.3.0: the piano roll grid follows tempo changes, tempo changes can be undone, a click on empty space deselects the tracks, the playhead sticks to region edges with the magnet, a buffer size setting and a load meter.
+
 ## 0.3.5
 
 - With the magnet on, the playhead sticks to the starts and ends of regions (and to the start of the project) when it is placed or dragged on the ruler or on an empty part of a lane. Alt places it freely.

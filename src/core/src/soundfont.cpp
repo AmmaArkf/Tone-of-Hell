@@ -129,6 +129,38 @@ double timecents_to_seconds(std::int32_t timecents) {
     return std::pow(2.0, static_cast<double>(timecents) / 1200.0);
 }
 
+// 10^(-5 x) as a power of two, which is quicker to compute: a fall by 100 dB over x = 1.
+double fall_100db(double x) {
+    constexpr double kLog2Of10 = 3.321928094887362;
+    return std::exp2(-5.0 * kLog2Of10 * x);
+}
+
+// The loudness of a zone `t` seconds after its note started, the note held for `held` seconds:
+// attack, hold, decay to the sustain level, then the release (the same as in add_note()).
+double zone_level(const SoundFont::Zone& zone, double t, double held) {
+    const auto held_level = [&zone](double x) {
+        if (x < zone.attack) {
+            return x / zone.attack;
+        }
+        x -= zone.attack;
+        if (x < zone.hold) {
+            return 1.0;
+        }
+        x -= zone.hold;
+        return std::max(zone.sustain, fall_100db(x / zone.decay));
+    };
+    if (t < 0.0) {
+        return 0.0;
+    }
+    if (t < held) {
+        return held_level(t);
+    }
+    if (t - held < zone.release) {
+        return held_level(held) * fall_100db((t - held) / zone.release);
+    }
+    return 0.0;
+}
+
 }  // namespace
 
 std::shared_ptr<const SoundFont> SoundFont::load(const std::filesystem::path& path,
@@ -298,6 +330,67 @@ std::shared_ptr<const SoundFont> SoundFont::parse(const std::vector<char>& bytes
         return nullptr;
     }
     return font;
+}
+
+void SoundFont::add_note_frames(const Preset& preset, const Note& note, const double* t_frames,
+                                std::uint32_t count, double sample_rate, float* left,
+                                float* right) const noexcept {
+    if (count == 0 || note.pitch >= preset.by_key.size() || !(sample_rate > 0.0)) {
+        return;
+    }
+    const double held = static_cast<double>(note.length) / sample_rate;
+    const auto velocity = static_cast<int>(std::lround(note.velocity * 127.0f));
+    for (const std::uint16_t index : preset.by_key[note.pitch]) {
+        const Zone& zone = preset.zones[index];
+        if (velocity < zone.velocity_low || velocity > zone.velocity_high) {
+            continue;
+        }
+        // These stay the same for the whole note.
+        const double ratio = std::exp2((static_cast<double>(note.pitch) - zone.root_key) / 12.0) *
+                             zone.sample_rate / sample_rate;
+        const float gain = zone.gain * note.velocity * 0.5f;
+        const double loop_start = static_cast<double>(zone.loop_start);
+        const double loop_end = static_cast<double>(zone.loop_end);
+        const double loop_length = loop_end - loop_start;
+        const double start = static_cast<double>(zone.start);
+        for (std::uint32_t i0 = 0; i0 < count; i0 += kEnvelopeStep) {
+            const std::uint32_t i1 = std::min(i0 + kEnvelopeStep, count);
+            // The envelope at both ends of this piece, a straight line in between.
+            const double level_a = zone_level(zone, t_frames[i0] / sample_rate, held);
+            const double level_b = zone_level(zone, t_frames[i1 - 1] / sample_rate, held);
+            if (level_a <= 0.0 && level_b <= 0.0) {
+                continue;
+            }
+            const double slope = i1 - 1 > i0 ? (level_b - level_a) / static_cast<double>(i1 - 1 - i0) : 0.0;
+            // Where the loudness changes fast (the attack, a short decay or release, the moment
+            // the key is let go) a straight line is not close enough: there every frame gets
+            // its own value.
+            const bool exact = !(level_a > 0.0 && level_b > 0.0 && level_b > 0.8 * level_a &&
+                                 level_b < 1.25 * level_a);
+            for (std::uint32_t i = i0; i < i1; ++i) {
+                const double t = t_frames[i];
+                if (t < 0.0) {
+                    continue;
+                }
+                double position = start + t * ratio;
+                if (zone.loop && position >= loop_end) {
+                    position -= std::floor((position - loop_start) / loop_length) * loop_length;
+                }
+                const auto frame = static_cast<std::uint32_t>(position);
+                if (frame + 1 >= zone.end) {
+                    continue;  // a sample without a loop has ended
+                }
+                const auto frac = static_cast<float>(position - static_cast<double>(frame));
+                const float a = static_cast<float>(data_[frame]);
+                const float b = static_cast<float>(data_[frame + 1]);
+                const auto level = static_cast<float>(
+                    exact ? zone_level(zone, t / sample_rate, held) : level_a + slope * static_cast<double>(i - i0));
+                const float value = (a + (b - a) * frac) * (1.0f / 32768.0f) * gain * level;
+                left[i] += value * zone.left;
+                right[i] += value * zone.right;
+            }
+        }
+    }
 }
 
 const SoundFont::Preset* SoundFont::find(int program) const noexcept {

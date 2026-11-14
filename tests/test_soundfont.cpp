@@ -187,6 +187,42 @@ TEST_CASE("A SoundFont is read and plays its sample at the right pitch") {
     CHECK_FALSE(error.empty());
 }
 
+TEST_CASE("A SoundFont renders a block of a note like frame by frame, only faster") {
+    const auto font = SoundFont::parse(tiny_soundfont());
+    REQUIRE(font);
+    const SoundFont::Preset* preset = font->find(0);
+    REQUIRE(preset != nullptr);
+    Note note;
+    note.pitch = 72;
+    note.length = 3000;
+    note.velocity = 0.9f;
+    // From before the note starts to past its release, in uneven blocks.
+    constexpr std::uint32_t kFrames = 9000;
+    std::vector<double> times(kFrames);
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        times[i] = static_cast<double>(i) - 100.0;
+    }
+    std::vector<float> left(kFrames, 0.0f);
+    std::vector<float> right(kFrames, 0.0f);
+    for (std::uint32_t at = 0; at < kFrames; at += 333) {
+        const std::uint32_t count = std::min<std::uint32_t>(333, kFrames - at);
+        font->add_note_frames(*preset, note, times.data() + at, count, 48000.0, left.data() + at,
+                              right.data() + at);
+    }
+    float peak = 0.0f;
+    float worst = 0.0f;
+    for (std::uint32_t i = 0; i < kFrames; ++i) {
+        float l = 0.0f;
+        float r = 0.0f;
+        font->add_note(*preset, note, times[i], 48000.0, l, r);
+        peak = std::max(peak, std::fabs(l));
+        worst = std::max(worst, std::fabs(l - left[i]) + std::fabs(r - right[i]));
+    }
+    REQUIRE(peak > 0.01f);
+    CHECK(left[50] == 0.0f);  // before the note starts
+    CHECK(worst < 0.05f * peak);  // both sides together
+}
+
 TEST_CASE("Instrument tracks play a program of the SoundFont") {
     const auto font = SoundFont::parse(tiny_soundfont());
     REQUIRE(font);

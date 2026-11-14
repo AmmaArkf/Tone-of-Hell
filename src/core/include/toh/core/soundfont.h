@@ -70,6 +70,15 @@ public:
     void add_note(const Preset& preset, const Note& note, double t_frames, double sample_rate,
                   float& left, float& right) const noexcept;
 
+    /// Adds one note's sound to `count` frames of `left` and `right` at once. `t_frames[i]` is
+    /// the time since the note started at frame i, in frames; frames with a negative time stay
+    /// silent. Much faster than add_note() frame by frame: the loudness envelope is computed
+    /// exactly every kEnvelopeStep frames and followed in a straight line in between.
+    void add_note_frames(const Preset& preset, const Note& note, const double* t_frames,
+                         std::uint32_t count, double sample_rate, float* left,
+                         float* right) const noexcept;
+    static constexpr std::uint32_t kEnvelopeStep = 16;
+
 private:
     std::vector<std::int16_t> data_;
     std::vector<Preset> presets_;

@@ -503,6 +503,14 @@ private:
     std::vector<std::int64_t> frame_pos_;  // timeline frame for every output frame, -1 = silence
     std::vector<float> frame_fade_;
     std::vector<float> frame_frac_;  // for every output frame: the part of the next frame
+    // Recorded-instrument notes are rendered note by note over a block: where each frame is
+    // in the note region (-1 outside it), the time since one note started, the region fade
+    // and the two sides of the sum.
+    std::vector<double> sf_pos_;
+    std::vector<double> sf_time_;
+    std::vector<float> sf_fade_;
+    std::vector<float> sf_left_;
+    std::vector<float> sf_right_;
     std::vector<float> master_mix_;
     std::vector<float> track_mix_;
     std::array<std::int64_t, kBlockFrames> note_prev_{};  // per frame: the position before it

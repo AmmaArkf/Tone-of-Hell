@@ -55,6 +55,11 @@ Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
     track_pos_ = frame_pos_.data();
     frame_fade_.assign(kBlockFrames, 0.0f);
     frame_frac_.assign(kBlockFrames, 0.0f);
+    sf_pos_.assign(kBlockFrames, -1.0);
+    sf_time_.assign(kBlockFrames, -1.0);
+    sf_fade_.assign(kBlockFrames, 0.0f);
+    sf_left_.assign(kBlockFrames, 0.0f);
+    sf_right_.assign(kBlockFrames, 0.0f);
     master_mix_.assign(block_samples, 0.0f);
     track_mix_.assign(block_samples, 0.0f);
     input_frame_.assign(channels_, 0.0f);
@@ -1170,6 +1175,68 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                             active[active_count++] = static_cast<std::uint32_t>(k);
                         }
                     }
+                }
+                if (preset != nullptr && frames <= sf_pos_.size()) {
+                    // Recorded instruments: note by note over the whole block, so the SoundFont
+                    // computes its envelopes once every few frames instead of for every frame.
+                    bool inside = false;
+                    for (std::uint32_t i = 0; i < frames; ++i) {
+                        const std::int64_t position = positions[i];
+                        if (position < begin || position >= end) {
+                            sf_pos_[i] = -1.0;
+                            sf_fade_[i] = 0.0f;
+                            continue;
+                        }
+                        const std::int64_t into = position - begin;
+                        const std::int64_t remaining = end - 1 - position;
+                        float region_fade = 1.0f;
+                        if (into < region.fade_in) {
+                            region_fade = fade_curve(
+                                region.fade_shape,
+                                (static_cast<float>(into) + 0.5f) / static_cast<float>(region.fade_in));
+                        }
+                        if (remaining < region.fade_out) {
+                            region_fade *= fade_curve(region.fade_shape,
+                                                      (static_cast<float>(remaining) + 0.5f) /
+                                                          static_cast<float>(region.fade_out));
+                        }
+                        sf_pos_[i] = static_cast<double>(region.offset) + static_cast<double>(into) +
+                                     static_cast<double>(frame_frac_[i]);
+                        sf_fade_[i] = region_fade;
+                        inside = true;
+                    }
+                    if (inside && active_count > 0) {
+                        std::fill(sf_left_.begin(), sf_left_.begin() + frames, 0.0f);
+                        std::fill(sf_right_.begin(), sf_right_.begin() + frames, 0.0f);
+                        for (std::size_t k = 0; k < active_count; ++k) {
+                            const Note& note = note_data->notes[active[k]];
+                            const auto note_start = static_cast<double>(note.start);
+                            for (std::uint32_t i = 0; i < frames; ++i) {
+                                sf_time_[i] = sf_pos_[i] < 0.0 ? -1.0 : sf_pos_[i] - note_start;
+                            }
+                            font->add_note_frames(*preset, note, sf_time_.data(), frames,
+                                                  static_cast<double>(sample_rate_), sf_left_.data(),
+                                                  sf_right_.data());
+                        }
+                        for (std::uint32_t i = 0; i < frames; ++i) {
+                            if (sf_pos_[i] < 0.0) {
+                                continue;
+                            }
+                            float* note_dst = scratch + static_cast<std::size_t>(i) * channels;
+                            const float left = sf_left_[i] * sf_fade_[i];
+                            const float right = sf_right_[i] * sf_fade_[i];
+                            if (channels >= 2) {
+                                note_dst[0] += left;
+                                note_dst[1] += right;
+                                for (std::size_t c = 2; c < channels; ++c) {
+                                    note_dst[c] += 0.5f * (left + right);
+                                }
+                            } else {
+                                note_dst[0] += 0.5f * (left + right);
+                            }
+                        }
+                    }
+                    continue;
                 }
                 for (std::uint32_t i = 0; i < frames; ++i) {
                     const std::int64_t position = positions[i];
