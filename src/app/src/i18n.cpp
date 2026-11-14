@@ -307,6 +307,11 @@ const Entry kRussian[] = {
     {"Remove or join regions", "удаление или склейка регионов"},
     {"Rename a track", "переименование дорожки"},
     {"Change the tempo", "изменение темпа"},
+    {"Hear yourself", "Слышать себя"},
+    {"Hear the microphone or the instrument you record, through the output. Use headphones: "
+     "with loudspeakers the microphone hears itself and howls.",
+     "Слышать микрофон или инструмент, который записываете, через выход. Используйте наушники: "
+     "с колонками микрофон слышит сам себя и начинает выть."},
     {"Buffer size", "Размер буфера"},
     {"%d frames (%.1f ms)", "%d сэмплов (%.1f мс)"},
     {"A bigger buffer stops crackling when many tracks and effects play, but the sound reacts a little later.",

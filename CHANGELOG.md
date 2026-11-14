@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.7
+
+- A "Hear yourself" button right of the master volume: the microphone or instrument being recorded is heard through the output (the input is opened when needed). Use headphones.
+
 ## 0.3.6
 
 - Much less load from instrument tracks with recorded instruments (SoundFont): a note is computed for a whole audio block at once, its pitch once per note and its loudness once every 16 frames where it changes slowly (every frame where it changes fast). Six MIDI tracks used to take most of the time of an audio block.

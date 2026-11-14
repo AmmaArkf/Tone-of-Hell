@@ -3086,6 +3086,20 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
     }
     tooltip(T_("Master volume. 100% leaves the mix unchanged. Double-click: back to 100%. Ctrl+click: type a value."));
     ImGui::SameLine();
+    // Hearing yourself: the input (a microphone or an instrument) goes to the output, too.
+    if (toggle_button(T_("Hear yourself"), session.monitoring(), ImVec4(0.20f, 0.55f, 0.30f, 1.0f), false)) {
+        const bool enable = !session.monitoring();
+        if (enable && !session.config().capture) {
+            std::string error;
+            if (!session.set_input_enabled(true, &error)) {
+                ui.error = error;
+            }
+        }
+        session.set_monitoring(enable);
+    }
+    tooltip(T_("Hear the microphone or the instrument you record, through the output. Use headphones: "
+               "with loudspeakers the microphone hears itself and howls."));
+    ImGui::SameLine();
     draw_meter(session.master_peak(), 8.0f * font, ImGui::GetFrameHeight());
 
     const std::uint64_t clips = session.master_clip_count();
