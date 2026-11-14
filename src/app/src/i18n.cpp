@@ -307,6 +307,16 @@ const Entry kRussian[] = {
     {"Remove or join regions", "удаление или склейка регионов"},
     {"Rename a track", "переименование дорожки"},
     {"Change the tempo", "изменение темпа"},
+    {"Buffer size", "Размер буфера"},
+    {"%d frames (%.1f ms)", "%d сэмплов (%.1f мс)"},
+    {"A bigger buffer stops crackling when many tracks and effects play, but the sound reacts a little later.",
+     "Буфер побольше убирает хруст, когда играет много дорожек и эффектов, но звук откликается чуть позже."},
+    {"Load: %.0f%%", "Нагрузка: %.0f%%"},
+    {"Dropouts: %u", "Пропуски: %u"},
+    {"How much of the time for one audio block the computing of the sound takes. Above 100% the sound "
+     "crackles: choose a bigger buffer in Settings > Audio.",
+     "Какую часть времени одного звукового блока занимает расчёт звука. Выше 100% звук хрустит: "
+     "выберите буфер побольше в Настройках > Звук."},
     {"Change a track picture", "смена картинки дорожки"},
     {"Volume or pan", "громкость или панорама"},
     {"Edit regions", "правка регионов"},

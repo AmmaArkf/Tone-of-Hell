@@ -9,7 +9,7 @@
       "generator": "MinGW Makefiles",
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_COMPILER": "gcc",
         "CMAKE_CXX_COMPILER": "g++"
       },
@@ -20,7 +20,7 @@
       "displayName": "Linux",
       "description": "Builds with the default compiler into the build folder.",
       "binaryDir": "${sourceDir}/build",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" },
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" },
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
     }
   ],

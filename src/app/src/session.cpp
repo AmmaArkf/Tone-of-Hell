@@ -31,7 +31,7 @@ void set_error(std::string* error, const std::string& message) {
 }
 
 void render_callback(void* user_data, const float* in, float* out, std::uint32_t frames) {
-    static_cast<core::Engine*>(user_data)->render(in, out, frames);
+    static_cast<Session*>(user_data)->render_audio(in, out, frames);
 }
 
 // The regions of a track in the form the engine wants.
@@ -486,7 +486,7 @@ void Session::loader_main() {
 }
 
 bool Session::start_audio(std::string* error) {
-    return device_.start(config_, &render_callback, &engine_, error);
+    return device_.start(config_, &render_callback, this, error);
 }
 
 void Session::stop_audio() { device_.stop(); }
@@ -1711,7 +1711,7 @@ bool Session::set_input_enabled(bool enabled, std::string* error) {
         return true;  // takes effect when the audio is started
     }
     device_.stop();
-    if (!device_.start(config_, &render_callback, &engine_, error)) {
+    if (!device_.start(config_, &render_callback, this, error)) {
         return false;
     }
     if (enabled && !device_.has_input()) {
@@ -1722,6 +1722,37 @@ bool Session::set_input_enabled(bool enabled, std::string* error) {
     return true;
 }
 
+void Session::render_audio(const float* in, float* out, std::uint32_t frames) noexcept {
+    const auto begin = std::chrono::steady_clock::now();
+    engine_.render(in, out, frames);
+    const double used = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+    const double block = static_cast<double>(frames) / static_cast<double>(std::max<std::uint32_t>(config_.sample_rate, 1));
+    const float load = block > 0.0 ? static_cast<float>(used / block) : 0.0f;
+    // The peak falls back slowly, so a short spike stays visible for a moment.
+    const float before = dsp_load_.load(std::memory_order_relaxed);
+    dsp_load_.store(std::max(load, before * 0.98f), std::memory_order_relaxed);
+    if (load > 1.0f) {
+        dsp_overloads_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+bool Session::set_buffer_frames(std::uint32_t frames, std::string* error) {
+    if (frames < 32 || frames > 8192) {
+        set_error(error, "the buffer size must be from 32 to 8192 frames");
+        return false;
+    }
+    if (record_offset_ == 2 * static_cast<std::int64_t>(config_.buffer_frames)) {
+        record_offset_ = 2 * static_cast<std::int64_t>(frames);  // the default follows the buffer
+    }
+    config_.buffer_frames = frames;
+    dsp_overloads_.store(0, std::memory_order_relaxed);
+    if (!device_.running()) {
+        return true;  // takes effect when the audio is started
+    }
+    device_.stop();
+    return device_.start(config_, &render_callback, this, error);
+}
+
 bool Session::set_devices(const std::string& output, const std::string& input,
                           std::string* error) {
     config_.output_name = output;
@@ -1730,7 +1761,7 @@ bool Session::set_devices(const std::string& output, const std::string& input,
         return true;  // takes effect when the audio is started
     }
     device_.stop();
-    return device_.start(config_, &render_callback, &engine_, error);
+    return device_.start(config_, &render_callback, this, error);
 }
 
 bool Session::set_input_gain(float linear) {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -422,6 +423,17 @@ public:
     const std::string& input_device() const noexcept { return config_.input_name; }
     /// Chooses the devices (names from audio::list_devices(); empty for the system default).
     /// If the audio is running it is restarted, which interrupts playback for a moment.
+    /// The size of one audio block in frames (32 to 8192). A bigger block gives the computer
+    /// more time and stops crackling, but the sound reacts later. Restarts a running device.
+    /// The default latency correction of recordings follows the block size.
+    bool set_buffer_frames(std::uint32_t frames, std::string* error = nullptr);
+    /// How much of the time for one audio block the computing took, at its recent peak
+    /// (1 = all of it; above that the sound breaks up).
+    float dsp_load() const noexcept { return dsp_load_.load(std::memory_order_relaxed); }
+    /// The blocks that took longer than their own length since the audio started.
+    std::uint32_t dsp_overloads() const noexcept { return dsp_overloads_.load(std::memory_order_relaxed); }
+    /// Called by the audio device on its thread: renders one block and measures the load.
+    void render_audio(const float* in, float* out, std::uint32_t frames) noexcept;
     bool set_devices(const std::string& output, const std::string& input,
                      std::string* error = nullptr);
 
@@ -648,6 +660,8 @@ private:
     void loader_main();
 
     audio::DeviceConfig config_;
+    std::atomic<float> dsp_load_{0.0f};
+    std::atomic<std::uint32_t> dsp_overloads_{0};
     core::Engine engine_;
     audio::Device device_;
     std::vector<TrackInfo> tracks_;

@@ -116,6 +116,11 @@ bool Settings::load(const std::filesystem::path& path) {
             }
         } else if (key == "autosave") {
             autosave = value == "1" || value == "true";
+        } else if (key == "buffer_frames") {
+            const long number = std::atol(value.c_str());
+            if (number >= 32 && number <= 8192) {
+                buffer_frames = static_cast<std::uint32_t>(number);
+            }
         } else if (key == "autosave_minutes") {
             const int number = std::atoi(value.c_str());
             if (number >= 1 && number <= 60) {
@@ -176,6 +181,7 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "metronome_endless=" << (metronome_endless ? 1 : 0) << "\n";
     file << "autosave=" << (autosave ? 1 : 0) << "\n";
     file << "autosave_minutes=" << autosave_minutes << "\n";
+    file << "buffer_frames=" << buffer_frames << "\n";
     file << "reverse_starts_playback=" << (reverse_starts_playback ? 1 : 0) << "\n";
     file << "reverse_off_at_start=" << (reverse_off_at_start ? 1 : 0) << "\n";
     for (std::size_t i = 0; i < kActionCount; ++i) {

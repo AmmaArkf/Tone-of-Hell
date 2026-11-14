@@ -2471,6 +2471,34 @@ void draw_settings_window(Session& session, UiState& ui) {
             }
 
             ImGui::Spacing();
+            {
+                static const int sizes[] = {64, 128, 256, 512, 1024, 2048, 4096};
+                const int current = static_cast<int>(session.config().buffer_frames);
+                const double rate = static_cast<double>(std::max<std::uint32_t>(session.sample_rate(), 1));
+                char preview[64];
+                std::snprintf(preview, sizeof(preview), T_("%d frames (%.1f ms)"), current,
+                              1000.0 * static_cast<double>(current) / rate);
+                ImGui::SetNextItemWidth(24.0f * font);
+                if (ImGui::BeginCombo(T_("Buffer size"), preview)) {
+                    for (const int size : sizes) {
+                        char label[64];
+                        std::snprintf(label, sizeof(label), T_("%d frames (%.1f ms)"), size,
+                                      1000.0 * static_cast<double>(size) / rate);
+                        if (ImGui::Selectable(label, size == current)) {
+                            std::string error;
+                            if (!session.set_buffer_frames(static_cast<std::uint32_t>(size), &error)) {
+                                ui.error = error;
+                            }
+                            ui.settings.buffer_frames = session.config().buffer_frames;
+                            ui.settings_changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled("%s", T_("A bigger buffer stops crackling when many tracks and effects play, but the sound reacts a little later."));
+            }
+
+            ImGui::Spacing();
             float volume = session.master_gain() * 100.0f;
             ImGui::SetNextItemWidth(24.0f * font);
             if (ImGui::SliderFloat("##output volume", &volume, 0.0f, 200.0f, T_("Output volume: %.0f%%"),
@@ -5591,6 +5619,22 @@ void draw_status_bar(const Session& session, const UiState& ui) {
     ImGui::SameLine();
     ImGui::Text(T_("Audio: %s, %u Hz, buffer %u (%.1f ms)"), T_(session.audio_running() ? "on" : "off"),
                 config.sample_rate, config.buffer_frames, buffer_ms);
+    if (session.audio_running()) {
+        const float load = session.dsp_load();
+        ImGui::SameLine();
+        const ImVec4 colour = load > 0.9f   ? ImVec4(0.95f, 0.35f, 0.30f, 1.0f)
+                              : load > 0.6f ? ImVec4(0.95f, 0.80f, 0.30f, 1.0f)
+                                            : ImGui::GetStyleColorVec4(ImGuiCol_Text);
+        ImGui::TextColored(colour, T_("Load: %.0f%%"), static_cast<double>(load) * 100.0);
+        tooltip(T_("How much of the time for one audio block the computing of the sound takes. Above 100% the sound "
+                   "crackles: choose a bigger buffer in Settings > Audio."));
+        if (const std::uint32_t dropouts = session.dsp_overloads(); dropouts > 0) {
+            ImGui::SameLine();
+            ImGui::TextColored(ImVec4(0.95f, 0.35f, 0.30f, 1.0f), T_("Dropouts: %u"), dropouts);
+            tooltip(T_("How much of the time for one audio block the computing of the sound takes. Above 100% the sound "
+                       "crackles: choose a bigger buffer in Settings > Audio."));
+        }
+    }
     ImGui::SameLine();
     ImGui::TextDisabled("%s", T_("|"));
     ImGui::SameLine();
@@ -5693,6 +5737,7 @@ int main(int argc, char* argv[]) {
         }
         toh::app::set_language(ui.settings.language);
         session.set_devices(ui.settings.output_device, ui.settings.input_device);
+        session.set_buffer_frames(ui.settings.buffer_frames);
         session.set_master_gain(ui.settings.master_gain);
         session.set_input_gain(ui.settings.input_gain);
         session.set_play_selected_only(ui.settings.play_selected_only);

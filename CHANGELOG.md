@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.4
+
+- Against crackling: Settings > Audio has a choice of the buffer size (64 to 4096 frames). A bigger buffer gives the computer more time for many tracks and effects; it is remembered.
+- The status bar shows the load of the sound computing in percent (yellow above 60%, red above 90%) and the number of blocks that came too late.
+- The build presets make optimized builds with debug information (RelWithDebInfo) instead of slow debug builds, so a program built from the sources plays as smoothly as the released one.
+
 ## 0.3.3
 
 - A click on empty space lets the selected tracks go: below the tracks or on an empty part of a lane (there it also moves the playhead, as before). With Ctrl or Shift held the selection stays.
