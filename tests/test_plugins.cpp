@@ -158,6 +158,34 @@ TEST_CASE("The compressor turns loud sound down and leaves quiet sound alone") {
     CHECK(rms_through(*compressor, 0.5, 0.0, seed) == doctest::Approx(0.5 / std::sqrt(2.0)).epsilon(0.08));
 }
 
+TEST_CASE("The limiter keeps every sample under its ceiling") {
+    std::string error;
+    auto limiter = ClapPlugin::create(kExamples, "org.toneofhell.limiter", 48000.0, 2, &error);
+    REQUIRE_MESSAGE(limiter != nullptr, error);
+    CHECK(limiter->latency() == 239);  // 5 ms of look-ahead
+    std::uint32_t seed = 9;
+    // Quiet sound passes unchanged.
+    CHECK(rms_through(*limiter, 0.1, 0.0, seed) == doctest::Approx(0.1 / std::sqrt(2.0)).epsilon(0.01));
+    // A tone far over full scale, starting suddenly: nothing comes out above -1 dB.
+    const float ceiling = std::pow(10.0f, -1.0f / 20.0f);
+    std::vector<float> block(2 * 512);
+    float highest = 0.0f;
+    double energy = 0.0;
+    for (int b = 0; b < 94; ++b) {
+        for (std::size_t i = 0; i < 512; ++i) {
+            const double t = static_cast<double>(b * 512 + static_cast<int>(i)) / 48000.0;
+            block[2 * i] = block[2 * i + 1] = static_cast<float>(1.5 * std::sin(2.0 * 3.14159265358979 * 440.0 * t));
+        }
+        limiter->process(block.data(), 512, 2);
+        for (const float sample : block) {
+            highest = std::max(highest, std::fabs(sample));
+            energy += static_cast<double>(sample) * static_cast<double>(sample);
+        }
+    }
+    CHECK(highest <= ceiling * 1.0001f);
+    CHECK(std::sqrt(energy / (94.0 * 1024.0)) > 0.4);  // limited, not silenced
+}
+
 TEST_CASE("The denoiser learns a noise and takes it out, keeping the sound") {
     std::string error;
     auto denoiser = ClapPlugin::create(kExamples, "org.toneofhell.denoiser", 48000.0, 2, &error);

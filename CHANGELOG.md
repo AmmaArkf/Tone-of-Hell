@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.23
+
+- Limiter: a built-in effect that never lets the sound get louder than its ceiling (ceiling, release, input gain). It looks 5 ms ahead and turns peaks down smoothly before they arrive; that delay is compensated.
+
 ## 0.2.22
 
 - Compressor: a built-in effect that turns the loud parts down so the sound gets more even (threshold, ratio, attack, release, make-up gain). Left and right are turned down together.
