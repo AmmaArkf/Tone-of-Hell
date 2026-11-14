@@ -2,6 +2,24 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.0
+
+The release of level 1, the working minimum. Everything since 0.2.0, in short:
+
+- Notes and instruments: instrument tracks and a piano roll; 128 recorded General MIDI instruments and drums (FluidR3 SoundFont) next to simple synthesizers; a sampler that makes an instrument from any sound file and finds its note from its spectrum; MIDI keyboards and the computer keyboard as a piano; recording of played notes; import and export of MIDI files.
+- Plugins: CLAP and VST3 effects and instruments on every track, with their own windows, saved state and delay compensation.
+- Built-in effects: Equalizer, Compressor, Limiter, Reverb, Echo, Noise Gate, Denoiser, Tremolo, Gain, and a simple synthesizer.
+- Automation of volume, pan and plugin parameters; a tempo map that the grid, snapping and the metronome follow.
+- Editing: selecting a part of tracks, cut, copy, paste, keep only the selection; a name strip to move regions; scrolling by itself while selecting.
+- Exports pass through the sampler, the effects and the instrument plugins.
+
+Known problems, to be fixed in the next versions:
+
+- The grid inside the piano roll uses the tempo from the start and does not follow tempo changes.
+- Tempo changes cannot be undone with Ctrl+Z.
+- VST3 plugins show sliders instead of their own window on Linux.
+- The windows of third-party plugins, the automation lines and the tempo menu of the ruler have been tested by programs, not yet much by hand: please report what does not work in the Issues tab.
+
 ## 0.2.25
 
 - Tidying before the preview: a compiler warning in the Reverb is gone. Nothing changes in use.

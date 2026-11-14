@@ -19,7 +19,7 @@ A stage is done when the criterion in parentheses is met and has been checked on
 - [x] **9. Built-in effects.** Equalizer, compressor, reverb, delay and limiter (each is checked on test signals and produces no clicks).
 - [ ] **10. Advanced features by community demand.** The order is chosen by votes on issues.
 
-Level 0 is complete: version 0.2 (see Releases). Level 1 starts with stage 6. A pre-release of level 0 comes out after stages 1 to 5, and of level 1 after stages 6 to 9. A stabilization phase runs before every release.
+Level 0 is complete: version 0.2. Level 1 (stages 6 to 9) is complete: version 0.3 (see Releases). Level 2 comes next. A pre-release of level 0 comes out after stages 1 to 5, and of level 1 after stages 6 to 9. A stabilization phase runs before every release.
 
 ## Features by level
 
