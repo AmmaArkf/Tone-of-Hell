@@ -3055,13 +3055,41 @@ std::string Session::edit_text() const {
                 << region.rate << "\n";
         }
     }
+    // The tempo is part of the edits, too, so its changes can be taken back.
+    out << "M|" << metronome_.bpm;
+    for (const core::TempoChange& change : tempo_changes_) {
+        out << "|" << change.frame << ":" << change.bpm;
+    }
+    out << "\n";
     return out.str();
+}
+
+Session::Snapshot Session::capture(std::string text, std::string label) const {
+    Snapshot snapshot;
+    snapshot.tracks = tracks_;
+    snapshot.text = std::move(text);
+    snapshot.label = std::move(label);
+    snapshot.tempo = tempo_changes_;
+    snapshot.bpm = metronome_.bpm;
+    return snapshot;
+}
+
+void Session::restore_tempo(const Snapshot& snapshot) {
+    tempo_changes_ = snapshot.tempo;
+    if (snapshot.bpm != metronome_.bpm) {
+        MetronomeSettings settings = metronome_;
+        settings.bpm = snapshot.bpm;
+        if (set_metronome(settings)) {
+            return;  // the tempo map was built again there
+        }
+    }
+    rebuild_tempo();
 }
 
 void Session::clear_history() {
     undo_.clear();
     redo_.clear();
-    committed_ = Snapshot{tracks_, edit_text(), {}};
+    committed_ = capture(edit_text(), {});
 }
 
 void Session::commit_edits() {
@@ -3075,8 +3103,23 @@ void Session::commit_edits() {
         return;
     }
     Snapshot previous = std::move(committed_);
-    previous.label = label.empty() ? describe_change(previous.tracks, tracks_) : label;
-    committed_ = Snapshot{tracks_, std::move(text), {}};
+    const auto same_tempo = [this](const Snapshot& snapshot) {
+        if (snapshot.bpm != metronome_.bpm || snapshot.tempo.size() != tempo_changes_.size()) {
+            return false;
+        }
+        for (std::size_t t = 0; t < tempo_changes_.size(); ++t) {
+            if (snapshot.tempo[t].frame != tempo_changes_[t].frame || snapshot.tempo[t].bpm != tempo_changes_[t].bpm) {
+                return false;
+            }
+        }
+        return true;
+    };
+    if (label.empty()) {
+        previous.label = same_tempo(previous) ? describe_change(previous.tracks, tracks_) : "Change the tempo";
+    } else {
+        previous.label = label;
+    }
+    committed_ = capture(std::move(text), {});
     undo_.push_back(std::move(previous));
     if (undo_.size() > kMaxUndoSteps) {
         undo_.erase(undo_.begin());
@@ -3098,9 +3141,10 @@ bool Session::undo() {
     }
     Snapshot target = std::move(undo_.back());
     undo_.pop_back();
-    redo_.push_back(Snapshot{tracks_, committed_.text, target.label});
+    redo_.push_back(capture(committed_.text, target.label));
     restore_tracks(target.tracks);
-    committed_ = Snapshot{tracks_, edit_text(), {}};
+    restore_tempo(target);
+    committed_ = capture(edit_text(), {});
     return true;
 }
 
@@ -3114,9 +3158,10 @@ bool Session::redo() {
     }
     Snapshot target = std::move(redo_.back());
     redo_.pop_back();
-    undo_.push_back(Snapshot{tracks_, committed_.text, target.label});
+    undo_.push_back(capture(committed_.text, target.label));
     restore_tracks(target.tracks);
-    committed_ = Snapshot{tracks_, edit_text(), {}};
+    restore_tempo(target);
+    committed_ = capture(edit_text(), {});
     return true;
 }
 

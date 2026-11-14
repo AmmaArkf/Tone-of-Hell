@@ -82,3 +82,30 @@ TEST_CASE("Snapping and the metronome follow tempo changes, and they are saved")
     session.new_project();
     CHECK(session.tempo_changes().empty());
 }
+
+TEST_CASE("Tempo changes can be taken back and done again") {
+    Session session;
+    toh::app::MetronomeSettings metronome = session.metronome();
+    metronome.bpm = 120.0;
+    REQUIRE(session.set_metronome(metronome));
+    session.clear_history();
+
+    REQUIRE(session.set_tempo_change(48000, 60.0));
+    session.commit_edits();
+    CHECK(session.undo_label() == "Change the tempo");
+    REQUIRE(session.set_tempo_change(0, 90.0));  // the tempo at the start
+    session.commit_edits();
+
+    REQUIRE(session.undo());
+    CHECK(session.metronome().bpm == doctest::Approx(120.0));
+    REQUIRE(session.tempo_changes().size() == 1);
+    REQUIRE(session.undo());
+    CHECK(session.tempo_changes().empty());
+    CHECK(session.bpm_at(50000) == doctest::Approx(120.0));
+
+    REQUIRE(session.redo());
+    REQUIRE(session.tempo_changes().size() == 1);
+    CHECK(session.bpm_at(50000) == doctest::Approx(60.0));
+    REQUIRE(session.redo());
+    CHECK(session.metronome().bpm == doctest::Approx(90.0));
+}

@@ -306,6 +306,7 @@ const Entry kRussian[] = {
     {"Split or record", "разрезание или запись"},
     {"Remove or join regions", "удаление или склейка регионов"},
     {"Rename a track", "переименование дорожки"},
+    {"Change the tempo", "изменение темпа"},
     {"Change a track picture", "смена картинки дорожки"},
     {"Volume or pan", "громкость или панорама"},
     {"Edit regions", "правка регионов"},

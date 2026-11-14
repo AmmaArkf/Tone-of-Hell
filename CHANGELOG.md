@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.2
+
+- Tempo changes can be undone and redone (Ctrl+Z, Ctrl+Y), with the start tempo too; the step is called "Change the tempo".
+
 ## 0.3.1
 
 - The piano roll follows tempo changes: its grid lines, bar numbers and snapping are counted in beats, like the timeline. `+ bar` and `- bar` add or take a bar at the tempo where the region ends.

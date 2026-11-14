@@ -608,7 +608,13 @@ private:
         std::vector<TrackInfo> tracks;
         std::string text;   // edit_text() of these tracks
         std::string label;  // what the step that follows (or was undone) did
+        std::vector<core::TempoChange> tempo;  // the tempo changes of the project
+        double bpm = 120.0;                     // and its tempo at the start
     };
+    /// The tracks and the tempo as they are now.
+    Snapshot capture(std::string text, std::string label) const;
+    /// Puts the tempo of a snapshot back.
+    void restore_tempo(const Snapshot& snapshot);
     /// Everything about the tracks that counts as an edit (not mute, solo or selection).
     std::string edit_text() const;
     /// Puts the tracks of a snapshot back and tells the engine.
