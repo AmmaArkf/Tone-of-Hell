@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.2.25
+
+- Tidying before the preview: a compiler warning in the Reverb is gone. Nothing changes in use.
+
 ## 0.2.24
 
 - Reverb: a built-in effect with the sound of a room (size, damping, mix). Its tail rings out after the regions end.

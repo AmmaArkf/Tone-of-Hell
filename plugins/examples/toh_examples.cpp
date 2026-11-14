@@ -712,11 +712,11 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
                 for (std::size_t side = 0; side < 2; ++side) {
                     float wet = 0.0f;
                     for (Reverb::Line& line : r.echoes[side]) {
-                        const float out = line.buffer[line.position];
-                        line.low = out * (1.0f - damping) + line.low * damping;
+                        const float echo = line.buffer[line.position];
+                        line.low = echo * (1.0f - damping) + line.low * damping;
                         line.buffer[line.position] = feed + line.low * feedback;
                         line.position = (line.position + 1) % line.buffer.size();
-                        wet += out;
+                        wet += echo;
                     }
                     for (Reverb::Line& line : r.smears[side]) {
                         const float held = line.buffer[line.position];
