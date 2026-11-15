@@ -1388,6 +1388,9 @@ void add_effect(Session& session, UiState& ui, std::size_t track, const toh::plu
     std::string error;
     if (!session.add_effect(track, info, &error)) {
         ui.error = std::string(T_("Effect: ")) + error;
+        toh::app::logging::warning("Effect " + info.name + " not added: " + error);
+    } else {
+        toh::app::logging::info("Effect " + info.name + " added to track " + std::to_string(track + 1));
     }
 }
 
@@ -1450,6 +1453,9 @@ void list_library_folder(UiState& ui) {
 // below the tracks (track = tracks().size()) it makes a new track.
 void handle_library_drop(Session& session, UiState& ui, const LibraryDrag& drag, std::size_t track,
                          std::int64_t frame) {
+    toh::app::logging::info("Library drop: kind " + std::to_string(drag.kind) + ", item " +
+                            std::to_string(drag.index) + ", track " + std::to_string(track + 1) + ", frame " +
+                            std::to_string(frame));
     std::string error;
     const bool existing = track < session.tracks().size();
     frame = std::max<std::int64_t>(frame, 0);
@@ -1565,13 +1571,14 @@ void handle_library_drop(Session& session, UiState& ui, const LibraryDrag& drag,
 // One row of the library that can be dragged onto the tracks.
 void library_item(const std::string& text, const std::string& id, LibraryDrag drag, const char* tip = nullptr) {
     ImGui::Selectable((text + "##" + id).c_str());
-    if (tip != nullptr) {
-        tooltip(tip);
-    }
+    // The drag source must come right after its item: a tooltip in between is a window of its
+    // own and would take the item's place (effects with a description could not be dragged).
     if (ImGui::BeginDragDropSource()) {
         ImGui::SetDragDropPayload(kLibraryPayload, &drag, sizeof(drag));
         ImGui::TextUnformatted(text.c_str());
         ImGui::EndDragDropSource();
+    } else if (tip != nullptr) {
+        tooltip(tip);
     }
 }
 

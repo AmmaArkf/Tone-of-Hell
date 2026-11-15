@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.15
+
+- Fix: effects could not be dragged from the library (their description tooltip got in the way of the drag). Drops from the library and added effects are written to the log.
+
 ## 0.3.14
 
 - The library: a panel on the left (View > Library, or its "<<" button hides it; its edge can be dragged). Everything in it is dragged onto a track (placed where it is let go, with the magnet), onto a track header (at the playhead) or below the tracks (a new track):
