@@ -303,6 +303,8 @@ struct UiState {
     float roll_scroll_x = 0.0f;                // its scrolling and left edge in the last frame
     float roll_canvas_x = 0.0f;
     int roll_preview = -1;                     // the note sounding while a note is dragged
+    bool roll_score = false;                   // show the notes as a score instead
+    int score_preview = -1;                    // the note sounding after it was added on the score
     float roll_box_y = 0.0f;                   // where a selection box began, inside the canvas
     std::vector<char> roll_box_base;           // the selection before the box (kept with Ctrl)
     std::filesystem::path logs_folder;
@@ -6188,6 +6190,234 @@ void sort_roll_notes(UiState& ui) {
     ui.roll_selected = std::move(selected);
 }
 
+// ---- Score -------------------------------------------------------------------------------
+
+// The place of a pitch on the staff in diatonic steps from C0 (middle C, 60, is 28), and whether
+// it is written with a sharp.
+int staff_step(int pitch, bool* sharp) {
+    static const int steps[12] = {0, 0, 1, 1, 2, 3, 3, 4, 4, 5, 5, 6};
+    static const bool sharps[12] = {false, true, false, true, false, false, true, false, true, false, true, false};
+    if (sharp != nullptr) {
+        *sharp = sharps[pitch % 12];
+    }
+    return (pitch / 12 - 1) * 7 + steps[pitch % 12];
+}
+
+// The natural (white key) pitch written on a step.
+int step_pitch(int step) {
+    static const int naturals[7] = {0, 2, 4, 5, 7, 9, 11};
+    const int octave = step >= 0 ? step / 7 : (step - 6) / 7;
+    return std::clamp((octave + 1) * 12 + naturals[step - octave * 7], 0, 127);
+}
+
+// An oval note head, filled or hollow.
+void note_head(ImDrawList* d, ImVec2 centre, float rx, float ry, ImU32 colour, bool hollow) {
+    ImVec2 points[20];
+    for (int k = 0; k < 20; ++k) {
+        const float angle = static_cast<float>(k) * 6.2831853f / 20.0f;
+        // Tilted a little, like a printed note head.
+        const float x = std::cos(angle) * rx;
+        const float y = std::sin(angle) * ry;
+        points[k] = ImVec2(centre.x + x * 0.96f + y * 0.28f, centre.y + y * 0.96f - x * 0.18f);
+    }
+    if (hollow) {
+        d->AddPolyline(points, 20, colour, ImDrawFlags_Closed, std::max(1.5f, ry * 0.35f));
+    } else {
+        d->AddConvexPolyFilled(points, 20, colour);
+    }
+}
+
+// The notes of a note region on a grand staff (treble and bass). Time runs from left to right
+// like on the piano roll, so the notes stand where they sound. Click to add a note on a line or
+// space (Shift: a sharp), right-click a note to remove it.
+void draw_score(Session& session, UiState& ui, const RegionInfo& region) {
+    const ImGuiIO& io = ImGui::GetIO();
+    const float font = ImGui::GetFontSize();
+    const float half = std::max(0.42f * font * ui.roll_key_zoom, 3.0f);  // half a line distance
+    constexpr int kTop = 50;    // the highest step shown (A6)
+    constexpr int kBottom = 6;  // the lowest (B0)
+    const double beat = std::max(session.beat_frames(), 1.0);
+    const std::int64_t frames = region.source->clip->frames();
+    const double shift = static_cast<double>(region.start - region.offset);  // timeline - note time
+    const float clef_w = 5.5f * font;
+    const float width = clef_w + static_cast<float>(static_cast<double>(frames) / beat) * ui.roll_beat_px + font;
+    const float height = static_cast<float>(kTop - kBottom + 2) * half;
+
+    if (ui.score_preview >= 0 && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        session.note_off(ui.score_preview);
+        ui.score_preview = -1;
+    }
+    ImGui::SetNextWindowContentSize(ImVec2(width, height));
+    ImGui::BeginChild("score canvas", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    if (ImGui::IsWindowHovered() && io.MouseWheel != 0.0f) {
+        if (io.KeyCtrl) {
+            ui.roll_key_zoom = std::clamp(ui.roll_key_zoom * std::pow(1.15f, io.MouseWheel), 0.4f, 4.0f);
+        } else {
+            ui.roll_beat_px = std::clamp(ui.roll_beat_px * std::pow(1.25f, io.MouseWheel), 8.0f, 600.0f);
+        }
+    }
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
+        ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+    }
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("score", ImVec2(width, height),
+                           ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonRight);
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const ImU32 ink = IM_COL32(228, 228, 234, 255);
+    const ImU32 faint = IM_COL32(228, 228, 234, 70);
+    const ImU32 accent = IM_COL32(120, 180, 255, 255);
+    d->AddRectFilled(origin, ImVec2(origin.x + width, origin.y + height), IM_COL32(26, 26, 30, 255));
+    const auto step_y = [&](int step) { return origin.y + half + static_cast<float>(kTop - step) * half; };
+    const auto frame_x = [&](double frame) {
+        return origin.x + clef_w + static_cast<float>(frame / beat) * ui.roll_beat_px;
+    };
+    const float left = origin.x + 0.6f * font;
+    const float right = origin.x + width;
+
+    // The two staves, joined at the left.
+    for (int s = 30; s <= 38; s += 2) {
+        d->AddLine(ImVec2(left, step_y(s)), ImVec2(right, step_y(s)), ink);
+    }
+    for (int s = 18; s <= 26; s += 2) {
+        d->AddLine(ImVec2(left, step_y(s)), ImVec2(right, step_y(s)), ink);
+    }
+    d->AddLine(ImVec2(left, step_y(38)), ImVec2(left, step_y(18)), ink, 2.0f);
+    ImFont* face = ImGui::GetFont();
+    const float clef_size = half * 6.5f;
+    d->AddText(face, clef_size, ImVec2(left + 0.3f * font, step_y(32) - clef_size * 0.5f), ink, "G");
+    d->AddText(face, clef_size, ImVec2(left + 0.3f * font, step_y(24) - clef_size * 0.5f), ink, "F");
+    // The time signature on both staves.
+    const std::string upper = std::to_string(session.metronome().beats_per_bar);
+    const std::string lower = std::to_string(session.metronome().beat_unit);
+    const float digit = half * 4.2f;
+    const float sig_x = left + 2.6f * font;
+    for (const int middle : {34, 22}) {
+        d->AddText(face, digit, ImVec2(sig_x, step_y(middle + 2) - digit * 0.5f), ink, upper.c_str());
+        d->AddText(face, digit, ImVec2(sig_x, step_y(middle - 2) - digit * 0.5f), ink, lower.c_str());
+    }
+
+    // Bar lines, following the tempo of the project.
+    const double bar = bar_beats(session);
+    const double first_beats = session.beats_at(std::max<std::int64_t>(std::llround(shift), 0));
+    for (double b = std::ceil(first_beats / bar - 1e-9) * bar;; b += bar) {
+        const double at = session.frame_at(b) - shift;
+        if (at > static_cast<double>(frames)) {
+            break;
+        }
+        if (at < 0.0) {
+            continue;
+        }
+        const float x = frame_x(at);
+        d->AddLine(ImVec2(x, step_y(38)), ImVec2(x, step_y(18)), at <= 0.0 ? faint : ink);
+    }
+
+    // The notes.
+    const auto& notes = region.source->clip->notes->notes;
+    const float rx = half * 1.25f;
+    const float ry = half * 0.92f;
+    // The note under the mouse, and the step and time a new note would get.
+    std::size_t under = notes.size();
+    const int mouse_step =
+        std::clamp(kTop - static_cast<int>(std::lround((io.MousePos.y - origin.y - half) / half)), kBottom, kTop);
+    for (std::size_t k = 0; k < notes.size(); ++k) {
+        const toh::core::Note& note = notes[k];
+        bool sharp = false;
+        const int step = staff_step(note.pitch, &sharp);
+        const float x = frame_x(static_cast<double>(note.start));
+        const float y = step_y(step);
+        const bool hit = hovered && step == mouse_step && std::fabs(io.MousePos.x - x) <= rx * 1.4f;
+        if (hit) {
+            under = k;
+        }
+        const ImU32 colour = hit ? accent : ink;
+        // Ledger lines above, below and through middle C.
+        for (int l = 40; l <= step; l += 2) {
+            d->AddLine(ImVec2(x - rx * 1.7f, step_y(l)), ImVec2(x + rx * 1.7f, step_y(l)), ink);
+        }
+        for (int l = 16; l >= step; l -= 2) {
+            d->AddLine(ImVec2(x - rx * 1.7f, step_y(l)), ImVec2(x + rx * 1.7f, step_y(l)), ink);
+        }
+        if (step == 28) {
+            d->AddLine(ImVec2(x - rx * 1.7f, y), ImVec2(x + rx * 1.7f, y), ink);
+        }
+        // How long it sounds: a faint line, and the note value it is closest to.
+        const float end_x = frame_x(static_cast<double>(note.start + note.length));
+        d->AddLine(ImVec2(x + rx, y), ImVec2(std::max(end_x, x + rx), y), faint, 2.0f);
+        const double length_beats =
+            static_cast<double>(note.length) /
+            std::max(session.beat_frames_at(std::llround(shift) + note.start), 1.0);
+        const bool hollow = length_beats >= 1.75;
+        const bool stem = length_beats < 3.5;
+        const int flags = length_beats < 0.4375 ? 2 : length_beats < 0.875 ? 1 : 0;
+        note_head(d, ImVec2(x, y), rx, ry, colour, hollow);
+        if (sharp) {
+            d->AddText(face, half * 3.0f, ImVec2(x - rx - half * 2.4f, y - half * 1.6f), colour, "#");
+        }
+        if (stem) {
+            const bool up = step >= 28 ? step < 34 : step < 22;
+            const float sx = up ? x + rx * 0.95f : x - rx * 0.95f;
+            const float tip = up ? y - 7.0f * half : y + 7.0f * half;
+            d->AddLine(ImVec2(sx, y), ImVec2(sx, tip), colour, 1.5f);
+            for (int f = 0; f < flags; ++f) {
+                const float fy = up ? tip + static_cast<float>(f) * 1.6f * half : tip - static_cast<float>(f) * 1.6f * half;
+                d->AddLine(ImVec2(sx, fy), ImVec2(sx + 1.6f * half, fy + (up ? 2.6f : -2.6f) * half), colour, 2.0f);
+            }
+        }
+    }
+
+    // The playhead.
+    const double play = static_cast<double>(session.position_frames()) - shift;
+    if (play >= 0.0 && play <= static_cast<double>(frames)) {
+        const float x = frame_x(play);
+        d->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + height), IM_COL32(255, 80, 80, 220), 1.5f);
+    }
+
+    if (hovered && io.MousePos.x > origin.x + clef_w) {
+        std::vector<toh::core::Note> edited(notes.begin(), notes.end());
+        if (under < notes.size()) {
+            ImGui::SetTooltip("%s", pitch_name(notes[under].pitch).c_str());
+            if (ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                edited.erase(edited.begin() + static_cast<std::ptrdiff_t>(under));
+                session.set_region_notes(ui.roll_track, ui.roll_region, std::move(edited));
+            }
+        } else {
+            // Where a new note goes: the grid cell under the mouse.
+            const double rel = static_cast<double>(io.MousePos.x - origin.x - clef_w) / ui.roll_beat_px * beat;
+            std::int64_t start = std::llround(rel);
+            const double step_beats = grid_step_beats(session);
+            if (!io.KeyAlt && session.grid_step() != GridStep::None && shift + rel >= 0.0) {
+                const double cells = session.beats_at(std::llround(shift + rel)) / step_beats;
+                start = std::llround(session.frame_at(std::floor(cells + 1e-9) * step_beats) - shift);
+            }
+            const int pitch = std::min(step_pitch(mouse_step) + (io.KeyShift ? 1 : 0), 127);
+            if (start >= 0 && start < frames) {
+                const float x = frame_x(static_cast<double>(start));
+                note_head(d, ImVec2(x, step_y(mouse_step)), rx, ry, IM_COL32(120, 180, 255, 110), false);
+                ImGui::SetTooltip("%s", pitch_name(pitch).c_str());
+                if (ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+                    toh::core::Note note;
+                    note.start = start;
+                    note.length = std::max<std::int64_t>(std::min(ui.roll_last_length, frames - start), 1);
+                    note.pitch = static_cast<std::uint8_t>(pitch);
+                    note.velocity = 0.8f;
+                    edited.push_back(note);
+                    session.set_region_notes(ui.roll_track, ui.roll_region, std::move(edited));
+                    if (!session.is_recording()) {
+                        session.set_live_track(ui.roll_track);
+                        session.note_on(pitch, 0.8f);
+                        ui.score_preview = pitch;
+                    }
+                }
+            }
+        }
+    }
+    ImGui::EndChild();
+}
+
 void draw_piano_roll(Session& session, UiState& ui) {
     ui.roll_focused = false;
     if (!ui.roll_open) {
@@ -6272,6 +6502,11 @@ void draw_piano_roll(Session& session, UiState& ui) {
         ui.roll_full = !ui.roll_full;
     }
     tooltip(T_("The piano roll over the whole window, or back to its own size."));
+    ImGui::SameLine();
+    if (toggle_button(T_("Score##roll"), ui.roll_score, ImVec4(0.30f, 0.45f, 0.75f, 1.0f), false)) {
+        ui.roll_score = !ui.roll_score;
+    }
+    tooltip(T_("Show the notes as a score on two staves (treble and bass clef) instead of the piano roll."));
     // The buttons may have given the region a new source: look it up again.
     region = &session.tracks()[ui.roll_track].regions[ui.roll_region];
     refresh_frames();
@@ -6286,6 +6521,13 @@ void draw_piano_roll(Session& session, UiState& ui) {
                                  "The keys on the left: listen."));
     ImGui::SameLine();
     ImGui::TextDisabled("%s", T_("Ctrl+C, Ctrl+X, Ctrl+V: copy, cut and paste notes at the playhead."));
+    if (ui.roll_score) {
+        ImGui::TextDisabled("%s", T_("Score: click a line or space to add a note (Shift: a sharp, Alt: off the grid), "
+                                     "right-click a note to remove it. Wheel: zoom; Ctrl+wheel: the size of the staves."));
+        draw_score(session, ui, *region);
+        ImGui::End();
+        return;
+    }
 
     const float key_h = std::max(0.85f * font * ui.roll_key_zoom, 4.0f);
     const float keys_w = 3.5f * font;

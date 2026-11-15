@@ -409,6 +409,13 @@ const Entry kRussian[] = {
     {"MIDI learn", "MIDI learn"},
     {"A button of a MIDI controller for this action: click, then press the button. Right-click: forget it.",
      "Кнопка MIDI-контроллера для этого действия: нажмите здесь, затем кнопку на контроллере. Правый клик — забыть."},
+    {"Score##roll", "Ноты##roll"},
+    {"Show the notes as a score on two staves (treble and bass clef) instead of the piano roll.",
+     "Показать ноты нотной записью на двух нотоносцах (скрипичный и басовый ключ) вместо пианоролла."},
+    {"Score: click a line or space to add a note (Shift: a sharp, Alt: off the grid), right-click a note to remove it. "
+     "Wheel: zoom; Ctrl+wheel: the size of the staves.",
+     "Ноты: клик по линейке или промежутку добавляет ноту (Shift — диез, Alt — без сетки), правый клик по ноте "
+     "удаляет её. Колёсико — масштаб; Ctrl+колёсико — размер нотоносцев."},
     {"Saving...", "Сохранение..."},
     {"Still saving, a moment please.", "Ещё сохраняется, минутку."},
     {"Use the selection on the track", "Поставить выделенное на дорожку"},

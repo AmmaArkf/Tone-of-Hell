@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.25
+
+- Score editor: the "Score" button of the piano roll shows the notes of a note region on a grand staff (treble and bass clef) with the time signature, bar lines, ledger lines, sharps, note values (whole, half, quarter, eighth, sixteenth) and the playhead. Time runs left to right as on the piano roll, a faint line shows how long each note sounds.
+- On the score a click on a line or space adds a note on the grid (Shift: a sharp, Alt: off the grid) and plays it; a right-click removes a note. Wheel: zoom, Ctrl+wheel: the size of the staves.
+
 ## 0.3.24
 
 - External controllers: knobs, faders and buttons of MIDI controllers (control change messages). Right-click a track's volume or pan slider, its M or S button, a group's volume or the Master slider > "MIDI learn", then move the control. Faders give 0..200 %, buttons switch mute and solo.
