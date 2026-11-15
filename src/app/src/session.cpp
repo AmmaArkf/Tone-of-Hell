@@ -3640,12 +3640,14 @@ bool Session::change_track_speed(std::size_t index, double factor, std::string* 
         anchor = std::min(anchor, region.start);
     }
     // Times from the anchor on are squeezed or stretched; earlier ones stay.
-    const auto map = [anchor, factor](std::int64_t frame) {
-        return frame <= anchor ? frame
-                               : anchor + std::llround(static_cast<double>(frame - anchor) / factor);
+    // (std::int64_t is long on Linux and long long on Windows: the casts keep one type.)
+    const auto map = [anchor, factor](std::int64_t frame) -> std::int64_t {
+        return frame <= anchor
+                   ? frame
+                   : anchor + static_cast<std::int64_t>(std::llround(static_cast<double>(frame - anchor) / factor));
     };
-    const auto scale = [factor](std::int64_t frames) {
-        return std::llround(static_cast<double>(frames) / factor);
+    const auto scale = [factor](std::int64_t frames) -> std::int64_t {
+        return static_cast<std::int64_t>(std::llround(static_cast<double>(frames) / factor));
     };
     for (RegionInfo& region : track.regions) {
         const std::int64_t new_start = map(region.start);

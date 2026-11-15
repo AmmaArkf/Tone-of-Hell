@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.11
+
+- Fix: the Linux build failed since 0.3.9 (the track speed mixed two kinds of 64-bit numbers that are the same type on Windows but not on Linux). Nothing changes in use.
+
 ## 0.3.10
 
 - Piano roll: Ctrl+C and Ctrl+X copy or cut the selected notes, Ctrl+V pastes them at the playhead on the grid, selected; the playhead moves to their end, so pasting again lays the next copy after them.
