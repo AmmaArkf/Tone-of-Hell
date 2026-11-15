@@ -338,6 +338,15 @@ const Entry kRussian[] = {
      "с колонками микрофон слышит сам себя и начинает выть."},
     {"Buffer size", "Размер буфера"},
     {"Library", "Библиотека"},
+    {"Loop the selection", "Зациклить выделенное"},
+    {"Loop the whole project", "Зациклить весь проект"},
+    {"Punch in/out: record only inside the loop range", "Punch in/out: записывать только внутри цикла"},
+    {"Select a part of the tracks and choose \"Loop the selection\" first. A take then replaces only that part; "
+     "start playback a little earlier to hear the way in. With the loop on, every pass becomes a take: the last "
+     "one stays, the earlier ones go to new muted tracks.",
+     "Сначала выделите часть дорожек и выберите «Зациклить выделенное». Тогда дубль заменит только эту часть; "
+     "запускайте воспроизведение чуть раньше, чтобы слышать подход. При включённом цикле каждый проход становится "
+     "дублем: последний остаётся, предыдущие уходят на новые заглушённые дорожки."},
     {"Favorites", "Избранное"},
     {"Only favorites", "Только избранное"},
     {"Show only the items marked with a star.", "Показывать только отмеченное звёздочкой."},

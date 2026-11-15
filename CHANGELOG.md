@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.18
+
+- Loop recording and punch in/out. Transport > "Loop the selection" loops a selected part of the tracks (a band on the ruler shows it; "Loop the whole project" goes back). With such a loop on, recording goes on over every pass and each pass becomes a take: the last whole pass stays on the track, the earlier ones go to new muted tracks to choose from.
+- Transport > "Punch in/out": a take keeps only what was recorded inside the loop range and replaces what the track had there; playback can start earlier to hear the way in.
+- The loop range is saved with the project.
+
 ## 0.3.17
 
 A release with everything since 0.3.0. In short:

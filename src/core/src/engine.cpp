@@ -1104,10 +1104,17 @@ void Engine::process_input(const float* in, float* out, std::uint32_t frames) no
             record_start_.store(position, std::memory_order_relaxed);
         }
         if (position != record_next_) {
-            // Playback stopped, jumped or turned around: the take ends here.
-            record_armed_ = false;
-            record_active_ = false;
-            continue;
+            // A loop over a range of its own starts again: the take goes on, and the session
+            // cuts it into one take per pass.
+            const bool loop_again = loop_enabled_ && loop_end_ >= 0 && position == loop_start_ &&
+                                    record_next_ >= loop_end_;
+            if (!loop_again) {
+                // Playback stopped, jumped or turned around: the take ends here.
+                record_armed_ = false;
+                record_active_ = false;
+                continue;
+            }
+            record_next_ = position;
         }
         if (recorded_.write(src, channels) != channels) {
             ++dropped;  // the control thread did not fetch the data in time
@@ -1701,7 +1708,9 @@ void Engine::render(const float* in, float* out, std::uint32_t frames) noexcept 
     const bool endless_metronome =
         metronome_enabled_ &&
         (project_frames_ <= 0 || (!looping && metronome_endless_.load(std::memory_order_relaxed)));
-    if (record_armed_ || endless_metronome) {
+    // A loop over a range of its own goes on looping while recording (one take per pass).
+    const bool record_loop = looping && loop_end_ >= 0;
+    if ((record_armed_ && !record_loop) || endless_metronome) {
         // Recording, or the metronome is on (and set to go on past the end): run until stopped.
         end_pos = std::numeric_limits<std::int64_t>::max();
     }

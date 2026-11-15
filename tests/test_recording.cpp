@@ -89,6 +89,49 @@ std::filesystem::path temp_file(const char* name) {
 
 }  // namespace
 
+TEST_CASE("A loop over a range records one take per pass, and punching replaces only the range") {
+    Session session;
+    FakeCard card(2);
+    session.set_record_offset_frames(0);
+    REQUIRE(session.add_track("Guide", constant_clip(96000, 2, 0.1f)));
+    session.update();
+    session.set_loop_range(24000, 48000);
+    session.set_loop(true);
+    session.set_punch(true);
+    session.seek_frames(12000);
+    REQUIRE(session.start_recording(0));
+    session.update();
+    for (int block = 0; block < 6; ++block) {
+        card.run(session.engine(), 10000);  // 12000 to 48000, then one whole pass more
+        session.update();
+    }
+    CHECK(session.is_recording());  // the loop did not end the take
+    session.stop_recording();
+    session.update();
+    card.run(session.engine(), 1000);
+    session.update();
+    REQUIRE_FALSE(session.is_recording());
+
+    // The guide was cut at the range and the last whole pass took its place.
+    const auto& regions = session.tracks()[0].regions;
+    REQUIRE(regions.size() == 3);
+    CHECK(regions[0].start == 0);
+    CHECK(regions[0].length == 24000);
+    CHECK(regions[1].start == 24000);
+    CHECK(regions[1].length == 24000);
+    CHECK(regions[1].source->name.rfind("Take", 0) == 0);
+    CHECK(regions[2].start == 48000);
+    // The first pass (and a short rest when stopping) went to new tracks, muted.
+    REQUIRE(session.tracks().size() >= 2);
+    const auto& first_pass = session.tracks()[1];
+    CHECK(first_pass.mute);
+    REQUIRE(first_pass.regions.size() == 1);
+    CHECK(first_pass.regions[0].start == 24000);
+    CHECK(first_pass.regions[0].length == 24000);
+    CHECK(first_pass.regions[0].offset == 12000);  // the part before the punch-in is left out
+    CHECK(regions[1].offset == 36000);              // the second pass follows in the take
+}
+
 TEST_CASE("Recording captures the input in step with the timeline") {
     Engine engine(kRate, 1);
     FakeCard card(1);

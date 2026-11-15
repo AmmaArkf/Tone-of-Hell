@@ -2096,23 +2096,100 @@ void Session::finish_take() {
     }
 
     auto source = std::make_shared<Source>();
-    source->name = "Take " + std::to_string(++take_count_);
+    const int take = ++take_count_;
+    source->name = "Take " + std::to_string(take);
     source->overview = std::move(overview);
     source->clip = std::move(clip);
+    const std::int64_t total = source->clip->frames();
 
-    RegionInfo region;
-    region.length = source->clip->frames();
-    region.source = std::move(source);
-    // Place the take earlier by the time the sound needed to pass through the sound card.
-    region.start = start - record_offset_;
-    if (region.start < 0) {
-        const std::int64_t cut = std::min(-region.start, region.length - 1);
-        region.offset = cut;
-        region.length -= cut;
-        region.start = 0;
+    // The pieces of the take on the timeline: one, or one per pass of a loop over a range.
+    struct Piece {
+        std::int64_t start;
+        std::int64_t offset;
+        std::int64_t length;
+    };
+    std::vector<Piece> pieces;
+    const bool ranged = loop_end_ > loop_start_;
+    if (loop_ && ranged && start < loop_end_) {
+        const std::int64_t pass = loop_end_ - loop_start_;
+        std::int64_t offset = std::min(total, loop_end_ - start);
+        pieces.push_back(Piece{start, 0, offset});
+        while (offset < total) {
+            const std::int64_t length = std::min(pass, total - offset);
+            pieces.push_back(Piece{loop_start_, offset, length});
+            offset += length;
+        }
+    } else {
+        pieces.push_back(Piece{start, 0, total});
     }
-    tracks_[record_track_].regions.push_back(std::move(region));
+
+    std::vector<RegionInfo> regions;
+    for (const Piece& piece : pieces) {
+        RegionInfo region;
+        region.source = source;
+        region.offset = piece.offset;
+        region.length = piece.length;
+        // Place the take earlier by the time the sound needed to pass through the sound card.
+        region.start = piece.start - record_offset_;
+        if (region.start < 0) {
+            const std::int64_t cut = std::min(-region.start, region.length - 1);
+            region.offset += cut;
+            region.length -= cut;
+            region.start = 0;
+        }
+        if (punch_ && ranged) {
+            // Punch in and out: only what lies inside the range is kept.
+            const std::int64_t from = std::max(region.start, loop_start_);
+            const std::int64_t to = std::min(region.end(), loop_end_);
+            if (to <= from) {
+                continue;
+            }
+            region.offset += from - region.start;
+            region.length = to - from;
+            region.start = from;
+        }
+        if (region.length > 0) {
+            regions.push_back(std::move(region));
+        }
+    }
+    if (regions.empty()) {
+        return;
+    }
+    if (punch_ && ranged) {
+        // The new take replaces what the track had in the range.
+        Range range;
+        range.first_track = record_track_;
+        range.last_track = record_track_;
+        range.begin = loop_start_;
+        range.end = loop_end_;
+        cut_range(range);
+    }
+    // The last pass stays on the track (a pass cut short by stopping does not count); the
+    // others go to new tracks, muted, to choose from.
+    std::size_t kept = regions.size() - 1;
+    if (ranged) {
+        const std::int64_t pass = loop_end_ - loop_start_;
+        while (kept > 0 && regions[kept].length * 2 < pass) {
+            --kept;
+        }
+    }
+    for (std::size_t k = 0; k < regions.size(); ++k) {
+        if (k == kept || tracks_.size() >= core::Engine::kMaxTracks) {
+            continue;
+        }
+        TrackInfo info;
+        info.name = tracks_[record_track_].name + " - take " + std::to_string(take) + ", pass " +
+                    std::to_string(k + 1);
+        info.regions.push_back(regions[k]);
+        info.mute = true;
+        tracks_.push_back(std::move(info));
+        sync_engine_tracks(tracks_.size() - 1);
+    }
+    tracks_[record_track_].regions.push_back(std::move(regions[kept]));
+    std::stable_sort(tracks_[record_track_].regions.begin(), tracks_[record_track_].regions.end(),
+                     [](const RegionInfo& a, const RegionInfo& b) { return a.start < b.start; });
     sync_track_regions(record_track_);
+    sync_mutes();
     update_length();
 }
 
@@ -2196,6 +2273,9 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
     out << "sample_rate=" << config_.sample_rate << "\n";
     out << "channels=" << config_.channels << "\n";
     out << "loop=" << (loop_ ? 1 : 0) << "\n";
+    if (loop_end_ > loop_start_) {
+        out << "loop_range=" << loop_start_ << ":" << loop_end_ << "\n";
+    }
     out << "metronome=" << (metronome_.enabled ? 1 : 0) << "\n";
     out << "bpm=" << metronome_.bpm << "\n";
     if (!tempo_changes_.empty()) {
@@ -2602,6 +2682,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     long long rate = 0;
     long long channels = 0;
     bool loop = false;
+    long long loop_from = 0;
+    long long loop_to = -1;
     MetronomeSettings metronome = metronome_;
     std::string tempo_text;
     long long grid = static_cast<long long>(grid_step_);
@@ -2663,6 +2745,12 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     channels = integer;
                 } else if (key == "loop") {
                     loop = integer != 0;
+                } else if (key == "loop_range") {
+                    const std::size_t colon = value.find(':');
+                    if (colon != std::string::npos) {
+                        loop_from = std::strtoll(value.c_str(), nullptr, 10);
+                        loop_to = std::strtoll(value.c_str() + colon + 1, nullptr, 10);
+                    }
                 } else if (key == "metronome") {
                     metronome.enabled = integer != 0;
                 } else if (key == "tempo_changes") {
@@ -3083,6 +3171,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         clear_engine_slot(slot);
     }
     update_length();
+    loop_start_ = loop_to > loop_from ? std::max<long long>(loop_from, 0) : 0;
+    loop_end_ = loop_to > loop_from ? loop_to : -1;
     set_loop(loop);
     set_metronome(metronome);  // ignored if a value is out of range
     markers_ = std::move(markers);
@@ -3120,6 +3210,7 @@ void Session::new_project() {
     seek_frames(0);
     tempo_changes_.clear();
     markers_.clear();
+    set_loop_range(0, -1);
     rebuild_tempo();
     project_file_.clear();
     saved_state_ = state_text();
@@ -3653,10 +3744,16 @@ void Session::seek_frames(std::int64_t frame) {
 }
 
 void Session::set_loop(bool enabled) {
-    if (engine_.set_loop(enabled)) {
+    if (engine_.set_loop(enabled, loop_start_, loop_end_ > loop_start_ ? loop_end_ : -1)) {
         loop_ = enabled;
         update_streaming();
     }
+}
+
+void Session::set_loop_range(std::int64_t start, std::int64_t end) {
+    loop_start_ = end > start ? std::max<std::int64_t>(start, 0) : 0;
+    loop_end_ = end > start ? end : -1;
+    set_loop(loop_);
 }
 
 void Session::set_reverse(bool reverse) {

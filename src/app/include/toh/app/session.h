@@ -604,6 +604,18 @@ public:
     void seek_frames(std::int64_t frame);
     bool loop() const noexcept { return loop_; }
     void set_loop(bool enabled);
+    /// The range that playback loops over: [start, end). An end at or before the start loops
+    /// the whole project. Saved with the project.
+    void set_loop_range(std::int64_t start, std::int64_t end);
+    std::int64_t loop_start() const noexcept { return loop_start_; }
+    std::int64_t loop_end() const noexcept { return loop_end_; }
+    bool has_loop_range() const noexcept { return loop_end_ > loop_start_; }
+    /// Punch in and out: a take keeps only what is recorded inside the loop range, and it
+    /// replaces what the track had there. Playback can start earlier to hear the way in.
+    /// With the loop on, every pass over the range becomes a take of its own: the last one
+    /// stays on the track, the earlier ones go to new tracks that are muted.
+    bool punch() const noexcept { return punch_; }
+    void set_punch(bool enabled) noexcept { punch_ = enabled; }
     bool reverse() const noexcept { return reverse_; }
     /// Plays backwards when enabled.
     void set_reverse(bool reverse);
@@ -716,6 +728,9 @@ private:
     std::vector<TrackInfo> tracks_;
     float master_gain_ = 1.0f;
     bool loop_ = false;
+    std::int64_t loop_start_ = 0;
+    std::int64_t loop_end_ = -1;
+    bool punch_ = false;
     bool reverse_ = false;
     bool snap_ = true;
     bool play_selected_only_ = false;

@@ -3421,6 +3421,23 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         if (ImGui::MenuItem(T_("Loop"), key_label(ui, Action::Loop), session.loop())) {
             session.set_loop(!session.loop());
         }
+        if (ImGui::MenuItem(T_("Loop the selection"), nullptr, false, has_range(ui))) {
+            session.set_loop_range(ui.range_begin, ui.range_end);
+            session.set_loop(true);
+        }
+        if (ImGui::MenuItem(T_("Loop the whole project"), nullptr, false, session.has_loop_range())) {
+            session.set_loop_range(0, -1);
+        }
+        if (ImGui::MenuItem(T_("Punch in/out: record only inside the loop range"), nullptr, session.punch(),
+                            session.has_loop_range())) {
+            session.set_punch(!session.punch());
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("%s", T_("Select a part of the tracks and choose \"Loop the selection\" first. A take then "
+                                       "replaces only that part; start playback a little earlier to hear the way in. "
+                                       "With the loop on, every pass becomes a take: the last one stays, the earlier ones "
+                                       "go to new muted tracks."));
+        }
         if (ImGui::MenuItem(T_("Metronome"), key_label(ui, Action::Metronome), session.metronome().enabled)) {
             toh::app::MetronomeSettings settings = session.metronome();
             settings.enabled = !settings.enabled;
@@ -4190,6 +4207,16 @@ void draw_ruler(Session& session, UiState& ui, float header_width) {
         }
         draw_list->AddText(ImVec2(x + 3.0f, time_top - 1.0f),
                            IM_COL32(170, 170, 180, 255), label);
+    }
+    // The loop range: a band over the ruler, green, or red while punching in and out.
+    if (session.has_loop_range()) {
+        const float x0 = std::max(frame_to_x(session, view, session.loop_start()), origin.x);
+        const float x1 = std::min(frame_to_x(session, view, session.loop_end()), origin.x + width);
+        if (x1 > x0) {
+            const ImU32 colour = session.punch() ? IM_COL32(220, 60, 60, session.loop() ? 110 : 55)
+                                                 : IM_COL32(60, 200, 110, session.loop() ? 110 : 55);
+            draw_list->AddRectFilled(ImVec2(x0, bottom - 0.35f * font), ImVec2(x1, bottom), colour);
+        }
     }
     // Markers: a yellow flag with the name in the time row.
     for (const toh::app::Marker& marker : session.markers()) {
