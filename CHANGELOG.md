@@ -2,6 +2,13 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.21
+
+- Editing the sound of a region: right-click an audio region > Sound > Normalize, Louder (+3 dB), Quieter (-3 dB), Reverse, Invert the polarity, Silence. The region gets a sound of its own; Ctrl+Z takes it back.
+- Time-stretch and pitch-shift: Sound > "Stretch (the pitch stays)" from 50% to 200%, and "Pitch (the length stays)" from -12 to +12 semitones (WSOLA).
+- The speed of a track can keep the pitch of recorded sound ("Keep the pitch of recorded sound", on by default).
+- The roadmap leaves video out of level 2: picture editing belongs to video editors.
+
 ## 0.3.20
 
 - Fix: a loop over a range of its own did not loop in an empty project or past the end of the project, so loop recording went straight on; with the metronome on it did not loop either. Now the range loops wherever it lies.

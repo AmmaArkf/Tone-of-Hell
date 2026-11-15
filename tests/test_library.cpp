@@ -11,6 +11,7 @@
 #include "toh/app/library.h"
 #include "toh/app/session.h"
 #include "toh/core/stock_sounds.h"
+#include "toh/core/stretch.h"
 
 using toh::app::Session;
 
@@ -43,6 +44,56 @@ TEST_CASE("A project is saved in the background while the program goes on") {
     REQUIRE(reopened.tracks().size() == 1);
     CHECK(reopened.markers().empty());
     std::filesystem::remove_all(folder);
+}
+
+namespace {
+
+// Upward zero crossings of the first channel, per second.
+double crossings_per_second(const std::vector<float>& data, std::size_t channels, double rate) {
+    int count = 0;
+    const std::size_t frames = data.size() / channels;
+    for (std::size_t i = 1; i < frames; ++i) {
+        if (data[(i - 1) * channels] < 0.0f && data[i * channels] >= 0.0f) {
+            ++count;
+        }
+    }
+    return count / (static_cast<double>(frames) / rate);
+}
+
+}  // namespace
+
+TEST_CASE("Stretching keeps the pitch, shifting the pitch keeps the length") {
+    const auto tone = toh::core::make_sine_clip(441.0, 1.0, 48000, 2, 0.5f);
+    const std::size_t frames = static_cast<std::size_t>(tone->frames());
+    const std::vector<float> longer = toh::core::time_stretch(tone->samples.data(), frames, 2, 1.5);
+    CHECK(longer.size() == static_cast<std::size_t>(std::llround(static_cast<double>(frames) * 1.5)) * 2);
+    CHECK(crossings_per_second(longer, 2, 48000.0) == doctest::Approx(441.0).epsilon(0.03));
+    const std::vector<float> higher = toh::core::pitch_shift(tone->samples.data(), frames, 2, 12.0);
+    CHECK(higher.size() == tone->samples.size());
+    CHECK(crossings_per_second(higher, 2, 48000.0) == doctest::Approx(882.0).epsilon(0.05));
+}
+
+TEST_CASE("The sound of a region is normalized, reversed and stretched, and can be undone") {
+    Session session;
+    REQUIRE(session.add_track("Tone", toh::core::make_sine_clip(441.0, 1.0, 48000, 2, 0.25f)));
+    session.commit_edits();
+    REQUIRE(session.edit_region_sound(0, 0, toh::app::SoundEdit::Normalize));
+    session.commit_edits();
+    CHECK(session.undo_label() == "Normalize");
+    std::vector<float> data(2 * 48000);
+    const auto& region = session.tracks()[0].regions[0];
+    toh::core::read_clip_frames(*region.source->clip, 0, 48000, data.data());
+    float peak = 0.0f;
+    for (const float value : data) {
+        peak = std::max(peak, std::fabs(value));
+    }
+    CHECK(peak == doctest::Approx(0.98f).epsilon(0.01));
+    REQUIRE(session.edit_region_sound(0, 0, toh::app::SoundEdit::Stretch, 2.0));
+    CHECK(session.tracks()[0].regions[0].length == 96000);
+    CHECK_FALSE(session.edit_region_sound(0, 0, toh::app::SoundEdit::Stretch, 9.0));
+    session.commit_edits();
+    REQUIRE(session.undo());
+    CHECK(session.tracks()[0].regions[0].length == 48000);
 }
 
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {

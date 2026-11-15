@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "toh/audio/clip_loader.h"
+#include "toh/core/stretch.h"
 #include "toh/audio/mp3_writer.h"
 #include "toh/app/midi_file.h"
 
@@ -3940,7 +3941,150 @@ bool Session::set_tempo_change(std::int64_t frame, double bpm) {
     return true;
 }
 
-bool Session::change_track_speed(std::size_t index, double factor, std::string* error) {
+bool Session::rewrite_region_sound(RegionInfo& region, const std::function<void(std::vector<float>&)>& process,
+                                   double length_factor, std::string* error) {
+    const std::size_t channels = config_.channels;
+    const std::int64_t count = region.source_frames();
+    if (count <= 0 || count > static_cast<std::int64_t>(config_.sample_rate) * 60 * 30) {
+        set_error(error, "the region is empty or longer than 30 minutes");
+        return false;
+    }
+    std::vector<float> data(static_cast<std::size_t>(count) * channels);
+    const std::size_t got =
+        core::read_clip_frames(*region.source->clip, region.offset, static_cast<std::size_t>(count), data.data());
+    data.resize(got * channels);
+    process(data);
+    if (data.size() < channels) {
+        set_error(error, "nothing was left of the sound");
+        return false;
+    }
+    CacheWriter writer;
+    const std::filesystem::path cache = new_cache_file("edit");
+    if (cache.empty() || !writer.open(cache, config_.channels, config_.sample_rate) ||
+        !writer.write(data.data(), data.size() / channels)) {
+        writer.discard();
+        set_error(error, "cannot write a cache file (is the disk full?)");
+        return false;
+    }
+    Overview overview;
+    auto clip = writer.finish(&overview, error);
+    if (!clip) {
+        return false;
+    }
+    auto source = std::make_shared<Source>();
+    source->name = region.source->name;
+    source->overview = std::move(overview);
+    source->clip = std::move(clip);
+    const std::int64_t frames = source->clip->frames();
+    region.source = std::move(source);
+    region.offset = 0;
+    if (length_factor != 1.0) {
+        const auto scale = [length_factor](std::int64_t value) -> std::int64_t {
+            return static_cast<std::int64_t>(std::llround(static_cast<double>(value) * length_factor));
+        };
+        region.length = std::max<std::int64_t>(scale(region.length), 1);
+        region.fade_in = std::min(scale(region.fade_in), region.length);
+        region.fade_out = std::min(scale(region.fade_out), region.length);
+    }
+    // The region must stay inside its new sound.
+    const auto longest = static_cast<std::int64_t>(std::floor(static_cast<double>(frames) / region.rate));
+    region.length = std::max<std::int64_t>(std::min(region.length, longest), 1);
+    return true;
+}
+
+bool Session::edit_region_sound(std::size_t track, std::size_t region, SoundEdit edit, double amount,
+                                std::string* error) {
+    RegionInfo* info = find_region(track, region);
+    if (info == nullptr || info->has_notes()) {
+        set_error(error, "choose a region with recorded sound");
+        return false;
+    }
+    const std::size_t channels = config_.channels;
+    std::function<void(std::vector<float>&)> process;
+    double length_factor = 1.0;
+    const char* label = "Edit the sound";
+    switch (edit) {
+        case SoundEdit::Normalize:
+            label = "Normalize";
+            process = [](std::vector<float>& data) {
+                float peak = 0.0f;
+                for (const float value : data) {
+                    peak = std::max(peak, std::fabs(value));
+                }
+                if (peak > 0.0f) {
+                    const float gain = 0.98f / peak;
+                    for (float& value : data) {
+                        value *= gain;
+                    }
+                }
+            };
+            break;
+        case SoundEdit::Louder:
+        case SoundEdit::Quieter: {
+            label = edit == SoundEdit::Louder ? "Louder" : "Quieter";
+            const float gain = edit == SoundEdit::Louder ? 1.41253754f : 0.70794578f;  // +-3 dB
+            process = [gain](std::vector<float>& data) {
+                for (float& value : data) {
+                    value *= gain;
+                }
+            };
+            break;
+        }
+        case SoundEdit::Reverse:
+            label = "Reverse";
+            process = [channels](std::vector<float>& data) {
+                const std::size_t frames = data.size() / channels;
+                for (std::size_t i = 0; i < frames / 2; ++i) {
+                    for (std::size_t c = 0; c < channels; ++c) {
+                        std::swap(data[i * channels + c], data[(frames - 1 - i) * channels + c]);
+                    }
+                }
+            };
+            break;
+        case SoundEdit::Invert:
+            label = "Invert the polarity";
+            process = [](std::vector<float>& data) {
+                for (float& value : data) {
+                    value = -value;
+                }
+            };
+            break;
+        case SoundEdit::Silence:
+            label = "Silence";
+            process = [](std::vector<float>& data) { std::fill(data.begin(), data.end(), 0.0f); };
+            break;
+        case SoundEdit::Stretch:
+            if (!(amount >= 0.25 && amount <= 4.0)) {
+                set_error(error, "the stretch must be from 25% to 400%");
+                return false;
+            }
+            label = "Stretch";
+            length_factor = amount;
+            process = [channels, amount](std::vector<float>& data) {
+                data = core::time_stretch(data.data(), data.size() / channels, channels, amount);
+            };
+            break;
+        case SoundEdit::Pitch:
+            if (!(amount >= -24.0 && amount <= 24.0)) {
+                set_error(error, "the pitch can move by 24 semitones at most");
+                return false;
+            }
+            label = "Change the pitch";
+            process = [channels, amount](std::vector<float>& data) {
+                data = core::pitch_shift(data.data(), data.size() / channels, channels, amount);
+            };
+            break;
+    }
+    if (!rewrite_region_sound(*info, process, length_factor, error)) {
+        return false;
+    }
+    pending_label_ = label;
+    sync_track_regions(track);
+    update_length();
+    return true;
+}
+
+bool Session::change_track_speed(std::size_t index, double factor, std::string* error, bool keep_pitch) {
     if (index >= tracks_.size()) {
         set_error(error, "the track does not exist");
         return false;
@@ -3955,7 +4099,8 @@ bool Session::change_track_speed(std::size_t index, double factor, std::string* 
     }
     for (const RegionInfo& region : track.regions) {
         const double rate = region.rate * factor;
-        if (!region.has_notes() && !(rate >= core::Engine::kMinSpeed - 1e-9 && rate <= core::Engine::kMaxSpeed + 1e-9)) {
+        if (!keep_pitch && !region.has_notes() &&
+            !(rate >= core::Engine::kMinSpeed - 1e-9 && rate <= core::Engine::kMaxSpeed + 1e-9)) {
             set_error(error, "a region would play its sound slower than 25% or faster than 400%");
             return false;
         }
@@ -3989,6 +4134,23 @@ bool Session::change_track_speed(std::size_t index, double factor, std::string* 
             region.source = note_source(region.source->name, std::move(notes), clip_frames, config_.channels,
                                         config_.sample_rate);
             region.length = std::min(new_end - new_start, clip_frames - region.offset);
+        } else if (keep_pitch) {
+            // The same pitch: the sound itself is made longer or shorter.
+            const std::size_t channels = config_.channels;
+            const double stretch = 1.0 / factor;
+            if (!rewrite_region_sound(
+                    region,
+                    [channels, stretch](std::vector<float>& data) {
+                        data = core::time_stretch(data.data(), data.size() / channels, channels, stretch);
+                    },
+                    1.0, error)) {
+                return false;
+            }
+            region.length = std::max<std::int64_t>(std::min(new_end - new_start,
+                                                            static_cast<std::int64_t>(std::floor(
+                                                                static_cast<double>(region.source->clip->frames()) /
+                                                                region.rate))),
+                                                   1);
         } else {
             region.rate = std::clamp(region.rate * factor, core::Engine::kMinSpeed, core::Engine::kMaxSpeed);
             region.length = new_end - new_start;

@@ -130,6 +130,18 @@ struct ParamCurveInfo {
     std::vector<core::CurvePoint> points;  // sorted by frame, not empty
 };
 
+/// Changes to the sound of an audio region (see Session::edit_region_sound).
+enum class SoundEdit {
+    Normalize,  ///< as loud as possible without clipping
+    Louder,     ///< +3 dB
+    Quieter,    ///< -3 dB
+    Reverse,    ///< backwards
+    Invert,     ///< the polarity turned over
+    Silence,    ///< nothing
+    Stretch,    ///< longer or shorter by `amount` (2 = twice as long), the pitch stays
+    Pitch,      ///< higher or lower by `amount` semitones, the length stays
+};
+
 /// A named place on the timeline, to find a part of the song again (verse, chorus...).
 struct Marker {
     std::int64_t frame = 0;
@@ -426,7 +438,12 @@ public:
     /// Recorded sound changes its pitch with the speed, like a tape; notes keep their pitch.
     /// The automation of the track follows. Fails when a region would play its sound slower
     /// than 25% or faster than 400%.
-    bool change_track_speed(std::size_t index, double factor, std::string* error = nullptr);
+    bool change_track_speed(std::size_t index, double factor, std::string* error = nullptr,
+                            bool keep_pitch = false);
+    /// Changes the sound of an audio region: the region gets a new sound of its own (the old
+    /// one stays for undo). The part of the source the region plays is all that is kept.
+    bool edit_region_sound(std::size_t track, std::size_t region, SoundEdit edit, double amount = 0.0,
+                           std::string* error = nullptr);
 
     /// The markers, in order of time. Adding, moving, renaming and removing them are edits
     /// that can be undone, and they are saved with the project.
@@ -789,6 +806,10 @@ private:
     std::vector<core::TempoChange> tempo_changes_;  // sorted by frame, all after frame 0
     std::vector<Marker> markers_;                   // sorted by frame
     void sort_markers();
+    /// Gives a region a new sound made by `process` from the part of its source it plays.
+    /// `length_factor` changes its length on the timeline (for stretching).
+    bool rewrite_region_sound(RegionInfo& region, const std::function<void(std::vector<float>&)>& process,
+                              double length_factor, std::string* error);
     /// Decodes a file into a new cache file; null on failure.
     std::shared_ptr<const core::ClipData> decode_to_cache(const std::filesystem::path& path,
                                                           Overview* overview, std::string* error);

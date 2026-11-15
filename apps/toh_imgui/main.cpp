@@ -218,6 +218,7 @@ struct UiState {
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
     std::int64_t tempo_frame = 0;       // the tempo menu of the ruler: where, which tempo, and
     float track_speed = 100.0f;         // the speed chosen in a track's speed box, in percent
+    bool speed_keep_pitch = true;       // ... and whether recorded sound keeps its pitch
     float library_width = 0.0f;         // the library panel on the left
     std::filesystem::path library_dir;  // the folder shown under "My files"
     std::vector<LibraryFile> library_files;
@@ -4989,6 +4990,56 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
         }
+        // Editing the sound of an audio region: it gets a new sound of its own.
+        if (region != nullptr && !region->has_notes() && ImGui::BeginMenu(T_("Sound"))) {
+            using toh::app::SoundEdit;
+            const auto edit = [&](SoundEdit what, double amount) {
+                std::string error;
+                if (!session.edit_region_sound(ui.selected_track, ui.selected_region, what, amount, &error)) {
+                    ui.error = error;
+                }
+            };
+            if (ImGui::MenuItem(T_("Normalize"))) {
+                edit(SoundEdit::Normalize, 0.0);
+            }
+            tooltip(T_("As loud as possible without clipping"));
+            if (ImGui::MenuItem(T_("Louder (+3 dB)"))) {
+                edit(SoundEdit::Louder, 0.0);
+            }
+            if (ImGui::MenuItem(T_("Quieter (-3 dB)"))) {
+                edit(SoundEdit::Quieter, 0.0);
+            }
+            if (ImGui::MenuItem(T_("Reverse"))) {
+                edit(SoundEdit::Reverse, 0.0);
+            }
+            if (ImGui::MenuItem(T_("Invert the polarity"))) {
+                edit(SoundEdit::Invert, 0.0);
+            }
+            if (ImGui::MenuItem(T_("Silence"))) {
+                edit(SoundEdit::Silence, 0.0);
+            }
+            ImGui::Separator();
+            if (ImGui::BeginMenu(T_("Stretch (the pitch stays)"))) {
+                for (const int percent : {50, 75, 90, 95, 105, 110, 125, 150, 200}) {
+                    const std::string label = std::to_string(percent) + "%";
+                    if (ImGui::MenuItem(label.c_str())) {
+                        edit(SoundEdit::Stretch, percent / 100.0);
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            tooltip(T_("The length of the region: 200% twice as long, 50% half as long."));
+            if (ImGui::BeginMenu(T_("Pitch (the length stays)"))) {
+                for (const int semitones : {12, 7, 5, 2, 1, -1, -2, -5, -7, -12}) {
+                    const std::string label = (semitones > 0 ? "+" : "") + std::to_string(semitones) + " " + T_("semitones");
+                    if (ImGui::MenuItem(label.c_str())) {
+                        edit(SoundEdit::Pitch, semitones);
+                    }
+                }
+                ImGui::EndMenu();
+            }
+            ImGui::EndMenu();
+        }
         if (region != nullptr && region->has_notes() &&
             ImGui::MenuItem(T_("Open the piano roll"), key_label(ui, Action::PianoRoll))) {
             open_piano_roll(ui, ui.selected_track, ui.selected_region);
@@ -5584,13 +5635,17 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
             ImGui::SameLine();
         }
         ImGui::NewLine();
+        ImGui::Checkbox(T_("Keep the pitch of recorded sound"), &ui.speed_keep_pitch);
+        tooltip(T_("On: the sound is stretched and keeps its pitch. Off: it plays faster or slower like a tape, "
+                   "higher or lower."));
         ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 24.0f * font);
         ImGui::TextDisabled("%s", T_("Makes this track play faster or slower than the others: its regions get shorter or longer and the ones after move along. "
                                      "Recorded sound changes its pitch with the speed, like a tape; notes keep their pitch. Ctrl+Z takes it back."));
         ImGui::PopTextWrapPos();
         if (ImGui::Button(T_("Apply"))) {
             std::string error;
-            if (!session.change_track_speed(i, static_cast<double>(ui.track_speed) / 100.0, &error)) {
+            if (!session.change_track_speed(i, static_cast<double>(ui.track_speed) / 100.0, &error,
+                                            ui.speed_keep_pitch)) {
                 ui.error = error;
             }
             ImGui::CloseCurrentPopup();

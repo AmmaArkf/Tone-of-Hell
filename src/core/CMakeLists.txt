@@ -5,6 +5,7 @@ add_library(toh_core STATIC
     src/sampler.cpp
     src/soundfont.cpp
     src/stock_sounds.cpp
+    src/stretch.cpp
     src/synth.cpp)
 
 target_include_directories(toh_core PUBLIC include)

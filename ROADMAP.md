@@ -33,7 +33,7 @@ MIDI and piano roll, hosting of CLAP and VST3 plugins, automation, tempo map, ba
 
 ### Level 2. Advanced
 
-Take comping, punch in/out and loop recording, waveform editing, time-stretch and pitch-shift, groups and stacks, sidechain, external controllers, score editor, clip grid, markers, video.
+Take comping, punch in/out and loop recording, waveform editing, time-stretch and pitch-shift, groups and stacks, sidechain, external controllers, score editor, clip grid, markers. (Video was left out: picture editing belongs to video editors.)
 
 ### Level 3. Distinctive and heavy
 
