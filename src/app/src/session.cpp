@@ -1040,6 +1040,19 @@ bool Session::remove_track(std::size_t index) {
         return false;
     }
     tracks_.erase(tracks_.begin() + static_cast<std::ptrdiff_t>(index));
+    // Sidechain keys follow the tracks that move up; a key that is gone switches ducking off.
+    for (std::size_t t = 0; t < tracks_.size(); ++t) {
+        TrackInfo& track = tracks_[t];
+        if (track.duck_key == static_cast<int>(index)) {
+            track.duck_key = -1;
+        } else if (track.duck_key > static_cast<int>(index)) {
+            --track.duck_key;
+        }
+        if (t < index) {
+            engine_.set_track_ducking(static_cast<std::uint32_t>(t), track.duck_key, track.duck_threshold_db,
+                                      track.duck_amount_db, track.duck_release_ms);
+        }
+    }
     if (recording_ && record_track_ != kNewTrack) {
         if (index == record_track_) {
             record_track_ = kNewTrack;  // its track is gone: the take will be dropped
@@ -1090,6 +1103,8 @@ void Session::sync_engine_tracks(std::size_t first) {
         engine_.set_track_mute(slot, silenced(track));
         engine_.set_track_solo(slot, track.solo);
         engine_.set_track_output(slot, track.group);
+        engine_.set_track_ducking(slot, track.duck_key, track.duck_threshold_db, track.duck_amount_db,
+                                  track.duck_release_ms);
     }
     if (tracks_.size() < core::Engine::kMaxTracks) {
         const auto slot = static_cast<std::uint32_t>(tracks_.size());
@@ -1099,6 +1114,7 @@ void Session::sync_engine_tracks(std::size_t first) {
         engine_.set_track_mute(slot, false);
         engine_.set_track_solo(slot, false);
         engine_.set_track_output(slot, core::Engine::kMasterOutput);
+        engine_.set_track_ducking(slot, -1);
     }
 }
 
@@ -1419,6 +1435,22 @@ std::vector<std::size_t> Session::group_tracks(std::size_t group) const {
         }
     }
     return members;
+}
+
+bool Session::set_track_ducking(std::size_t track, int key, float threshold_db, float amount_db, float release_ms) {
+    if (track >= tracks_.size() || key < -1 || key >= static_cast<int>(tracks_.size()) ||
+        !std::isfinite(threshold_db) || !std::isfinite(amount_db) || !std::isfinite(release_ms)) {
+        return false;
+    }
+    TrackInfo& info = tracks_[track];
+    info.duck_key = key == static_cast<int>(track) ? -1 : key;
+    info.duck_threshold_db = std::clamp(threshold_db, -60.0f, 0.0f);
+    info.duck_amount_db = std::clamp(amount_db, 0.0f, 48.0f);
+    info.duck_release_ms = std::clamp(release_ms, 10.0f, 2000.0f);
+    engine_.set_track_ducking(static_cast<std::uint32_t>(track), info.duck_key, info.duck_threshold_db,
+                              info.duck_amount_db, info.duck_release_ms);
+    pending_label_ = "Sidechain";
+    return true;
 }
 
 float Session::track_peak(std::size_t index) const noexcept {
@@ -2505,6 +2537,10 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
         if (track.group >= 0) {
             out << "group=" << track.group << "\n";
         }
+        if (track.duck_key >= 0) {
+            out << "duck=" << track.duck_key << "|" << track.duck_threshold_db << "|" << track.duck_amount_db
+                << "|" << track.duck_release_ms << "\n";
+        }
         for (const RegionInfo& region : track.regions) {
             out << "[region]\n";
             out << "source=" << index_of[region.source.get()] << "\n";
@@ -2925,6 +2961,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         bool mute = false;
         bool solo = false;
         long long group = -1;
+        std::string duck;
         long long instrument = 0;
         long long program = -1;
         bool sampler = false;
@@ -3061,6 +3098,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().solo = integer != 0;
                 } else if (key == "group") {
                     tracks.back().group = integer;
+                } else if (key == "duck") {
+                    tracks.back().duck = value;
                 } else if (key == "instrument") {
                     tracks.back().instrument = integer;
                 } else if (key == "program") {
@@ -3287,6 +3326,26 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         track.group = entry.group >= 0 && entry.group < static_cast<long long>(groups.size())
                           ? static_cast<int>(entry.group)
                           : -1;
+        {
+            // "key|threshold|amount|release"
+            std::istringstream fields(entry.duck);
+            fields.imbue(std::locale::classic());
+            long long key = -1;
+            float threshold = 0.0f;
+            float amount = 0.0f;
+            float release = 0.0f;
+            char bar1 = 0;
+            char bar2 = 0;
+            char bar3 = 0;
+            if (!entry.duck.empty() &&
+                (fields >> key >> bar1 >> threshold >> bar2 >> amount >> bar3 >> release) && key >= 0 &&
+                key < static_cast<long long>(core::Engine::kMaxTracks)) {
+                track.duck_key = static_cast<int>(key);
+                track.duck_threshold_db = std::clamp(threshold, -60.0f, 0.0f);
+                track.duck_amount_db = std::clamp(amount, 0.0f, 48.0f);
+                track.duck_release_ms = std::clamp(release, 10.0f, 2000.0f);
+            }
+        }
         track.pan_curve = parse_curve(entry.pan_curve, -1.0f, 1.0f);
         // "frame:value,frame:value"
         for (const char* cursor = entry.volume_curve.c_str(); *cursor != '\0';) {
@@ -3452,6 +3511,11 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
 
     // Everything checked: replace the session.
     engine_.stop();
+    for (std::size_t t = 0; t < fresh.size(); ++t) {
+        if (fresh[t].duck_key >= static_cast<int>(fresh.size()) || fresh[t].duck_key == static_cast<int>(t)) {
+            fresh[t].duck_key = -1;
+        }
+    }
     const std::size_t old_count = tracks_.size();
     tracks_ = std::move(fresh);
     groups_ = std::move(groups);
@@ -3569,7 +3633,9 @@ std::string Session::edit_text() const {
     for (const TrackInfo& track : tracks_) {
         out << "T|" << track.name << "|" << track.icon << "|" << track.gain << "|" << track.pan << "|"
             << static_cast<int>(track.instrument) << "|" << track.program << "|"
-            << static_cast<const void*>(track.sampler.get()) << "|" << track.group << "\n";
+            << static_cast<const void*>(track.sampler.get()) << "|" << track.group << "|" << track.duck_key
+            << "|" << track.duck_threshold_db << "|" << track.duck_amount_db << "|" << track.duck_release_ms
+            << "\n";
         for (const EffectSlot& slot : track.effects) {
             out << "E|" << static_cast<const void*>(slot.plugin.get()) << "|" << (slot.enabled ? 1 : 0)
                 << "\n";
@@ -3752,6 +3818,7 @@ void Session::clear_engine_slot(std::size_t slot) {
     engine_.set_track_pan(index, 0.0f);
     engine_.set_track_mute(index, false);
     engine_.set_track_solo(index, false);
+    engine_.set_track_ducking(index, -1);
 }
 
 // ---- MIDI files --------------------------------------------------------------------------
@@ -3948,6 +4015,8 @@ bool Session::render_project(const std::function<bool(const float*, std::uint32_
         offline->set_track_mute(slot, silenced(track));
         offline->set_track_solo(slot, track.solo);
         offline->set_track_output(slot, track.group);
+        offline->set_track_ducking(slot, track.duck_key, track.duck_threshold_db, track.duck_amount_db,
+                                   track.duck_release_ms);
     }
     for (std::size_t g = 0; g < groups_.size(); ++g) {
         offline->set_bus_gain(static_cast<std::uint32_t>(g), groups_[g].gain);

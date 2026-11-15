@@ -172,6 +172,45 @@ TEST_CASE("Tracks in a group sum on its bus, with its fader and mute") {
     CHECK(session.group_tracks(0).size() == 3);
 }
 
+TEST_CASE("Sidechain ducking makes a track quieter while the key is loud") {
+    Session session;
+    REQUIRE(session.add_track("Pad", toh::core::make_sine_clip(441.0, 3.0, 48000, 2, 0.25f)));
+    const float alone = settled_peak(session);
+    REQUIRE(alone > 0.2f);
+    // The key sits in a muted group: it is not heard, but its level still ducks the pad.
+    REQUIRE(session.add_track("Kick", toh::core::make_sine_clip(60.0, 3.0, 48000, 2, 0.5f)));
+    REQUIRE(session.add_group("Keys", {1}) == 0);
+    REQUIRE(session.set_group_mute(0, true));
+    CHECK(settled_peak(session) == doctest::Approx(alone).epsilon(0.01));
+    // The key is 24 dB above -30 dB: 18 dB down, limited to 12 dB.
+    REQUIRE(session.set_track_ducking(0, 1, -30.0f, 12.0f, 150.0f));
+    session.commit_edits();
+    CHECK(session.undo_label() == "Sidechain");
+    CHECK(settled_peak(session) == doctest::Approx(alone * 0.2512f).epsilon(0.03));
+    REQUIRE(session.set_track_gain(1, 0.0f));  // a silent key: no ducking
+    CHECK(settled_peak(session) == doctest::Approx(alone).epsilon(0.01));
+    REQUIRE(session.set_track_gain(1, 1.0f));
+    CHECK_FALSE(session.set_track_ducking(0, 5, -30.0f, 12.0f, 150.0f));
+    REQUIRE(session.set_track_ducking(1, 1, -30.0f, 12.0f, 150.0f));
+    CHECK(session.tracks()[1].duck_key == -1);  // not by itself
+
+    const auto folder = std::filesystem::temp_directory_path() / "toh_duck";
+    std::filesystem::create_directories(folder);
+    const auto file = folder / "d.tohp";
+    std::string error;
+    REQUIRE_MESSAGE(session.save_project(file, &error), error);
+    Session reopened;
+    REQUIRE_MESSAGE(reopened.open_project(file, &error), error);
+    CHECK(reopened.tracks()[0].duck_key == 1);
+    CHECK(reopened.tracks()[0].duck_amount_db == doctest::Approx(12.0f));
+    CHECK(settled_peak(reopened) == doctest::Approx(alone * 0.2512f).epsilon(0.03));
+    std::filesystem::remove_all(folder);
+
+    REQUIRE(session.remove_track(1));
+    CHECK(session.tracks()[0].duck_key == -1);  // its key is gone
+    CHECK(settled_peak(session) == doctest::Approx(alone).epsilon(0.01));
+}
+
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {
     REQUIRE(toh::core::stock_sound_count() >= 20);
     for (std::size_t k = 0; k < toh::core::stock_sound_count(); ++k) {

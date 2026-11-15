@@ -182,6 +182,12 @@ public:
     bool set_track_solo(std::uint32_t track, bool solo);
     /// Sends the track to a bus (0 .. kMaxBuses-1) or to the master (kMasterOutput).
     bool set_track_output(std::uint32_t track, int bus);
+    /// Sidechain ducking: the track gets quieter while another track (the key, after its
+    /// fader) is loud. Above `threshold_db` every 4 dB of the key take 3 dB off the track, down
+    /// to `amount_db` at most; the level comes back within `release_ms`. A key of -1 (or the
+    /// track itself) switches it off.
+    bool set_track_ducking(std::uint32_t track, int key, float threshold_db = -30.0f, float amount_db = 12.0f,
+                           float release_ms = 150.0f);
 
     /// Shortcut for a single clip: the same as set_track_clip(0, clip).
     bool set_clip(std::shared_ptr<const ClipData> clip) { return set_track_clip(0, std::move(clip)); }
@@ -353,6 +359,7 @@ private:
         SetTrackMute,
         SetTrackSolo,
         SetTrackOutput,
+        SetTrackDucking,
         SetBusGain,
         SetBusMute,
         SetGain,
@@ -404,6 +411,12 @@ private:
         bool mute = false;
         bool solo = false;
         int bus = kMasterOutput;
+        int duck_key = -1;               // sidechain: the track whose level ducks this one
+        float duck_threshold = 0.0316f;  // linear
+        float duck_amount_db = 12.0f;
+        float duck_attack = 1.0f;        // smoothing factors of the key's envelope, per frame
+        float duck_release = 1.0f;
+        float duck_env = 0.0f;           // the level of the key
         float target_left = 1.0f;  // what the fader, pan, mute and solo add up to
         float target_right = 1.0f;
         float current_left = 1.0f;  // smoothed towards the target

@@ -386,6 +386,17 @@ const Entry kRussian[] = {
     {"Change the group of a track", "смена группы дорожки"},
     {"Rename a group", "переименование группы"},
     {"Group volume", "громкость группы"},
+    {"Sidechain", "Сайдчейн"},
+    {"Ducking: this track gets quieter while the key track is loud, for example a bass or pad that makes room "
+     "for the kick. A key in a muted group still works without being heard.",
+     "Дакинг: эта дорожка становится тише, пока громко звучит дорожка-ключ, например бас или пэд уступают место "
+     "бочке. Ключ в заглушённой группе тоже работает, хоть его и не слышно."},
+    {"Off", "Выкл."},
+    {"Key track", "Дорожка-ключ"},
+    {"Threshold: %.0f dB", "Порог: %.0f дБ"},
+    {"The key starts to duck the track above this level.", "Выше этого уровня ключ начинает приглушать дорожку."},
+    {"Down by at most: %.0f dB", "Тише максимум на: %.0f дБ"},
+    {"Comes back in: %.0f ms", "Возврат за: %.0f мс"},
     {"Saving...", "Сохранение..."},
     {"Still saving, a moment please.", "Ещё сохраняется, минутку."},
     {"Use the selection on the track", "Поставить выделенное на дорожку"},

@@ -346,6 +346,21 @@ bool Engine::set_track_output(std::uint32_t track, int bus) {
     return commands_.try_push(command);
 }
 
+bool Engine::set_track_ducking(std::uint32_t track, int key, float threshold_db, float amount_db, float release_ms) {
+    if (track >= kMaxTracks || key < -1 || key >= static_cast<int>(kMaxTracks) ||
+        !(threshold_db >= -90.0f && threshold_db <= 0.0f) || !(amount_db >= 0.0f && amount_db <= 60.0f) ||
+        !(release_ms >= 1.0f && release_ms <= 5000.0f)) {
+        return false;
+    }
+    Command command(CommandType::SetTrackDucking);
+    command.index = static_cast<std::int32_t>(track);
+    command.a = key == static_cast<int>(track) ? -1 : key;
+    command.value = threshold_db;
+    command.value2 = amount_db;
+    command.number = release_ms;
+    return commands_.try_push(command);
+}
+
 bool Engine::set_bus_gain(std::uint32_t bus, float linear) {
     if (bus >= kMaxBuses || !valid_gain(linear)) {
         return false;
@@ -750,6 +765,20 @@ void Engine::apply(const Command& command) noexcept {
         case CommandType::SetTrackOutput:
             tracks_[index].bus = static_cast<int>(command.a);
             break;
+
+        case CommandType::SetTrackDucking: {
+            Track& track = tracks_[index];
+            track.duck_key = static_cast<int>(command.a);
+            track.duck_threshold = std::pow(10.0f, command.value / 20.0f);
+            track.duck_amount_db = command.value2;
+            const double rate = static_cast<double>(sample_rate_);
+            track.duck_attack = static_cast<float>(1.0 - std::exp(-1.0 / (0.002 * rate)));
+            track.duck_release = static_cast<float>(1.0 - std::exp(-1.0 / (command.number * 0.001 * rate)));
+            if (track.duck_key < 0) {
+                track.duck_env = 0.0f;
+            }
+            break;
+        }
 
         case CommandType::SetBusGain:
             buses_[index].gain = command.value;
@@ -1637,6 +1666,38 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 if (!bus_used[bus]) {
                     std::fill(destination, destination + samples, 0.0f);
                     bus_used[bus] = true;
+                }
+            }
+            if (track.duck_key >= 0) {
+                // Sidechain ducking: follow the level of the key and take that much off.
+                const auto key = static_cast<std::size_t>(track.duck_key);
+                const float* key_out = track_has_out_[key] ? track_out_.data() + key * bus_stride : nullptr;
+                float* own = track_has_out_[t] ? track_out_.data() + t * bus_stride : nullptr;
+                const float floor_db = -track.duck_amount_db;
+                for (std::uint32_t i = 0; i < frames; ++i) {
+                    float level = 0.0f;
+                    if (key_out != nullptr) {
+                        for (std::size_t c = 0; c < channels; ++c) {
+                            level = std::max(level, std::fabs(key_out[static_cast<std::size_t>(i) * channels + c]));
+                        }
+                    }
+                    track.duck_env += (level - track.duck_env) * (level > track.duck_env ? track.duck_attack
+                                                                                       : track.duck_release);
+                    if (own == nullptr || track.duck_env <= track.duck_threshold) {
+                        continue;
+                    }
+                    const float over_db = 20.0f * std::log10(track.duck_env / track.duck_threshold);
+                    const float gain = std::pow(10.0f, std::max(-0.75f * over_db, floor_db) / 20.0f);
+                    for (std::size_t c = 0; c < channels; ++c) {
+                        own[static_cast<std::size_t>(i) * channels + c] *= gain;
+                    }
+                }
+                if (own != nullptr) {
+                    float reduced = 0.0f;
+                    for (std::size_t k = 0; k < samples; ++k) {
+                        reduced = std::max(reduced, std::fabs(own[k]));
+                    }
+                    track_out_peak_[t] = reduced;
                 }
             }
             if (track_has_out_[t]) {

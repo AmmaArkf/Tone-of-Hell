@@ -5398,10 +5398,65 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
 }
 
 // The effects of a track: switch them on and off, open them, change their order, add more.
+// Sidechain ducking of a track: which track makes it quieter, and how much.
+void draw_ducking(Session& session, std::size_t track) {
+    const TrackInfo& info = session.tracks()[track];
+    const float font = ImGui::GetFontSize();
+    ImGui::TextUnformatted(T_("Sidechain"));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    tooltip(T_("Ducking: this track gets quieter while the key track is loud, for example a bass or pad that "
+               "makes room for the kick. A key in a muted group still works without being heard."));
+    std::string current = T_("Off");
+    if (info.duck_key >= 0 && static_cast<std::size_t>(info.duck_key) < session.tracks().size()) {
+        current = std::to_string(info.duck_key + 1) + ". " + session.tracks()[static_cast<std::size_t>(info.duck_key)].name;
+    }
+    ImGui::SetNextItemWidth(16.0f * font);
+    int key = info.duck_key;
+    if (ImGui::BeginCombo(T_("Key track"), current.c_str())) {
+        if (ImGui::Selectable(T_("Off"), key < 0)) {
+            key = -1;
+        }
+        for (std::size_t t = 0; t < session.tracks().size(); ++t) {
+            if (t == track) {
+                continue;
+            }
+            const std::string name = std::to_string(t + 1) + ". " + session.tracks()[t].name;
+            ImGui::PushID(static_cast<int>(t));
+            if (ImGui::Selectable(name.c_str(), key == static_cast<int>(t))) {
+                key = static_cast<int>(t);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+    float threshold = info.duck_threshold_db;
+    float amount = info.duck_amount_db;
+    float release = info.duck_release_ms;
+    bool changed = key != info.duck_key;
+    if (info.duck_key >= 0) {
+        ImGui::SetNextItemWidth(16.0f * font);
+        changed |= ImGui::SliderFloat("##duck threshold", &threshold, -60.0f, 0.0f, T_("Threshold: %.0f dB"),
+                                      ImGuiSliderFlags_AlwaysClamp);
+        tooltip(T_("The key starts to duck the track above this level."));
+        ImGui::SetNextItemWidth(16.0f * font);
+        changed |= ImGui::SliderFloat("##duck amount", &amount, 0.0f, 48.0f, T_("Down by at most: %.0f dB"),
+                                      ImGuiSliderFlags_AlwaysClamp);
+        ImGui::SetNextItemWidth(16.0f * font);
+        changed |= ImGui::SliderFloat("##duck release", &release, 10.0f, 2000.0f, T_("Comes back in: %.0f ms"),
+                                      ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+    }
+    if (changed) {
+        session.set_track_ducking(track, key, threshold, amount, release);
+    }
+}
+
 void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
     if (!ImGui::BeginPopup("track effects")) {
         return;
     }
+    draw_ducking(session, track);
+    ImGui::Separator();
     ImGui::TextDisabled("%s", T_("Effects of the track: the sound passes them from top to bottom."));
     bool open_picker = false;
     const auto& instrument_slot = session.tracks()[track].plugin_instrument;

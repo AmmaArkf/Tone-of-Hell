@@ -192,6 +192,11 @@ struct TrackInfo {
     bool selected = false;  // see Session::set_play_selected_only()
     /// The group the track belongs to (an index of Session::groups()), or -1 for none.
     int group = -1;
+    /// Sidechain ducking: the track whose level makes this one quieter (-1: none), and how.
+    int duck_key = -1;
+    float duck_threshold_db = -30.0f;
+    float duck_amount_db = 12.0f;
+    float duck_release_ms = 150.0f;
 };
 
 /// Settings of the built-in metronome. `bpm` counts quarter notes per minute; the time
@@ -374,6 +379,13 @@ public:
     float group_peak(std::size_t group) const noexcept;
     /// The tracks of a group, in order.
     std::vector<std::size_t> group_tracks(std::size_t group) const;
+
+    // ---- Sidechain -----------------------------------------------------------------------
+
+    /// Sidechain ducking (see core::Engine::set_track_ducking): while the track `key` is loud,
+    /// `track` gets quieter. -1 (or the track itself) switches it off. The threshold is limited
+    /// to -60..0 dB, the amount to 0..48 dB and the release to 10..2000 ms.
+    bool set_track_ducking(std::size_t track, int key, float threshold_db, float amount_db, float release_ms);
 
     // ---- Regions -------------------------------------------------------------------------
     // Edits never interrupt playback. Each returns false when the track or region does not
