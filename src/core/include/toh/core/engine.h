@@ -129,9 +129,17 @@ public:
     static constexpr int kMasterOutput = -1;
 
     Engine(std::uint32_t sample_rate, std::uint32_t channels);
-    ~Engine() = default;
+    ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
+
+    /// Lets `count` more threads compute tracks together with the audio thread, so that big
+    /// projects use several processor cores (0 = the audio thread alone; at most kMaxWorkers).
+    /// Each track is computed by one thread; the sum is the same whatever the count. Control
+    /// thread only, and only while render() is not being called (before the audio starts).
+    void set_worker_threads(unsigned count);
+    unsigned worker_threads() const noexcept { return static_cast<unsigned>(workers_.size()); }
+    static constexpr unsigned kMaxWorkers = 31;
 
     // ---- Tracks (control thread) ---------------------------------------------------------
 
@@ -428,7 +436,13 @@ private:
     void process_input(const float* in, float* out, std::uint32_t frames) noexcept;
     void render_live(float* out, std::uint32_t frames) noexcept;
     void render_stopped_instruments(float* out, std::uint32_t frames) noexcept;
-    void schedule_notes(Track& track, const Region& region, const NoteData& notes, AudioEffect& instrument,
+    struct Scratch;
+    struct Worker;
+    void render_track(std::size_t index, Scratch& s) noexcept;
+    void run_track_jobs() noexcept;
+    void work_on_jobs(Scratch& s) noexcept;
+    void stop_workers();
+    void schedule_notes(Scratch& s, Track& track, const Region& region, const NoteData& notes, AudioEffect& instrument,
                         std::uint32_t frames, std::int64_t lowest, std::int64_t highest) noexcept;
     std::vector<std::shared_ptr<AudioEffect>> live_instruments_;  // kept alive for live notes
     std::atomic<std::int64_t> synced_{0};
@@ -503,20 +517,43 @@ private:
     std::vector<std::int64_t> frame_pos_;  // timeline frame for every output frame, -1 = silence
     std::vector<float> frame_fade_;
     std::vector<float> frame_frac_;  // for every output frame: the part of the next frame
-    // Recorded-instrument notes are rendered note by note over a block: where each frame is
-    // in the note region (-1 outside it), the time since one note started, the region fade
-    // and the two sides of the sum.
-    std::vector<double> sf_pos_;
-    std::vector<double> sf_time_;
-    std::vector<float> sf_fade_;
-    std::vector<float> sf_left_;
-    std::vector<float> sf_right_;
     std::vector<float> master_mix_;
-    std::vector<float> track_mix_;
-    std::array<std::int64_t, kBlockFrames> note_prev_{};  // per frame: the position before it
-    std::vector<std::int64_t> shifted_pos_;          // frame_pos_ moved ahead for one track
-    const std::int64_t* track_pos_ = nullptr;        // the positions the current track reads
     std::vector<float> bus_mix_;
+
+    // What one thread needs to compute a track; the audio thread uses the first one.
+    struct Scratch {
+        explicit Scratch(std::size_t channels)
+            : mix(static_cast<std::size_t>(kBlockFrames) * channels, 0.0f), shifted_pos(kBlockFrames, -1),
+              sf_pos(kBlockFrames, -1.0), sf_time(kBlockFrames, -1.0), sf_fade(kBlockFrames, 0.0f),
+              sf_left(kBlockFrames, 0.0f), sf_right(kBlockFrames, 0.0f) {}
+        std::vector<float> mix;                       // the track's regions, effects
+        std::vector<std::int64_t> shifted_pos;        // frame_pos_ moved ahead for one track
+        const std::int64_t* track_pos = nullptr;      // the positions the track reads
+        std::array<std::int64_t, kBlockFrames> note_prev{};  // per frame: the position before it
+        // Recorded-instrument notes are rendered note by note over a block: where each frame
+        // is in the note region (-1 outside it), the time since one note started, the region
+        // fade and the two sides of the sum.
+        std::vector<double> sf_pos;
+        std::vector<double> sf_time;
+        std::vector<float> sf_fade;
+        std::vector<float> sf_left;
+        std::vector<float> sf_right;
+    };
+    std::vector<std::unique_ptr<Scratch>> scratch_;
+    std::vector<std::unique_ptr<Worker>> workers_;
+    // The tracks of the current block (jobs) and what each gave, after its fader.
+    std::array<std::uint32_t, kMaxTracks> jobs_{};
+    std::uint32_t job_count_ = 0;
+    std::uint32_t job_generation_ = 0;
+    std::atomic<std::uint64_t> job_info_{0};  // generation << 32 | number of jobs
+    std::atomic<std::uint64_t> job_next_{0};  // generation << 32 | the next job to take
+    std::atomic<std::uint32_t> jobs_done_{0};
+    std::vector<float> track_out_;            // kBlockFrames frames for every track
+    std::array<bool, kMaxTracks> track_has_out_{};
+    std::array<float, kMaxTracks> track_out_peak_{};
+    std::uint32_t block_frames_ = 0;          // the block being computed
+    std::int64_t block_low_ = 0;
+    std::int64_t block_high_ = -1;
 
     // Copies of the audio-thread state for other threads to read.
     std::atomic<std::int64_t> published_position_{0};

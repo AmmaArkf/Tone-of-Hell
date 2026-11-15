@@ -453,6 +453,13 @@ public:
     /// more time and stops crackling, but the sound reacts later. Restarts a running device.
     /// The default latency correction of recordings follows the block size.
     bool set_buffer_frames(std::uint32_t frames, std::string* error = nullptr);
+    /// How many processor threads compute the tracks: -1 chooses by the processor (one fewer
+    /// than its cores, so the rest of the computer keeps one), 1 is the audio thread alone.
+    /// Restarts a running device.
+    void set_audio_threads(int threads);
+    int audio_threads() const noexcept { return audio_threads_; }
+    /// The number of threads in use (the audio thread and its helpers).
+    unsigned audio_threads_in_use() const noexcept { return engine_.worker_threads() + 1; }
     /// How much of the time for one audio block the computing took, at its recent peak
     /// (1 = all of it; above that the sound breaks up).
     float dsp_load() const noexcept { return dsp_load_.load(std::memory_order_relaxed); }
@@ -687,6 +694,7 @@ private:
     void loader_main();
 
     audio::DeviceConfig config_;
+    int audio_threads_ = -1;
     std::atomic<float> dsp_load_{0.0f};
     std::atomic<std::uint32_t> dsp_overloads_{0};
     core::Engine engine_;

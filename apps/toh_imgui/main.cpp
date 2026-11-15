@@ -11,6 +11,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <SDL3/SDL.h>
@@ -2468,6 +2469,36 @@ void draw_settings_window(Session& session, UiState& ui) {
             tooltip(T_("When backwards playback reaches the start and stops, the next play goes forwards."));
 
             ImGui::SeparatorText(T_("Performance"));
+            {
+                // How many processor cores compute the tracks.
+                const unsigned cores = std::max(std::thread::hardware_concurrency(), 1u);
+                char preview[96];
+                if (session.audio_threads() < 0) {
+                    std::snprintf(preview, sizeof(preview), T_("Automatic (%u of %u)"),
+                                  session.audio_threads_in_use(), cores);
+                } else {
+                    std::snprintf(preview, sizeof(preview), "%d", session.audio_threads());
+                }
+                ImGui::SetNextItemWidth(14.0f * font);
+                if (ImGui::BeginCombo(T_("Threads for the sound"), preview)) {
+                    if (ImGui::Selectable(T_("Automatic"), session.audio_threads() < 0)) {
+                        session.set_audio_threads(-1);
+                        ui.settings.audio_threads = -1;
+                        ui.settings_changed = true;
+                    }
+                    for (int n = 1; n <= static_cast<int>(std::min(cores, 32u)); n *= 2) {
+                        char label[16];
+                        std::snprintf(label, sizeof(label), "%d", n);
+                        if (ImGui::Selectable(label, session.audio_threads() == n)) {
+                            session.set_audio_threads(n);
+                            ui.settings.audio_threads = n;
+                            ui.settings_changed = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+                ImGui::TextDisabled("%s", T_("Tracks are computed on several processor cores at once. 1: only one core."));
+            }
             ImGui::BeginDisabled();
             bool gpu = false;
             ImGui::Checkbox(T_("GPU acceleration for effects (planned together with effects)"), &gpu);
@@ -6100,6 +6131,7 @@ int main(int argc, char* argv[]) {
         toh::app::set_language(ui.settings.language);
         session.set_devices(ui.settings.output_device, ui.settings.input_device);
         session.set_buffer_frames(ui.settings.buffer_frames);
+        session.set_audio_threads(ui.settings.audio_threads);
         session.set_master_gain(ui.settings.master_gain);
         session.set_input_gain(ui.settings.input_gain);
         session.set_play_selected_only(ui.settings.play_selected_only);

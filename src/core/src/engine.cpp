@@ -4,9 +4,83 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <thread>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <cerrno>
+#include <pthread.h>
+#include <sched.h>
+#include <semaphore.h>
+#endif
 
 namespace toh::core {
 namespace {
+
+// A counting semaphore from the system: posting it from the audio thread does not take a
+// lock, and a waiting thread sleeps without using the processor.
+class Semaphore {
+public:
+    Semaphore() noexcept {
+#ifdef _WIN32
+        handle_ = CreateSemaphoreW(nullptr, 0, 0x7fffffff, nullptr);
+#else
+        sem_init(&sem_, 0, 0);
+#endif
+    }
+    ~Semaphore() {
+#ifdef _WIN32
+        if (handle_ != nullptr) {
+            CloseHandle(handle_);
+        }
+#else
+        sem_destroy(&sem_);
+#endif
+    }
+    Semaphore(const Semaphore&) = delete;
+    Semaphore& operator=(const Semaphore&) = delete;
+    void post() noexcept {
+#ifdef _WIN32
+        ReleaseSemaphore(handle_, 1, nullptr);
+#else
+        sem_post(&sem_);
+#endif
+    }
+    void wait() noexcept {
+#ifdef _WIN32
+        WaitForSingleObject(handle_, INFINITE);
+#else
+        while (sem_wait(&sem_) == -1 && errno == EINTR) {
+        }
+#endif
+    }
+
+private:
+#ifdef _WIN32
+    HANDLE handle_ = nullptr;
+#else
+    sem_t sem_{};
+#endif
+};
+
+// Worker threads compute sound like the audio thread, so they should not wait behind the
+// user interface. Without the permission for that (Linux) they keep their normal priority.
+void raise_thread_priority() noexcept {
+#ifdef _WIN32
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+#else
+    sched_param param{};
+    param.sched_priority = sched_get_priority_min(SCHED_FIFO) + 10;
+    pthread_setschedparam(pthread_self(), SCHED_FIFO, &param);
+#endif
+}
 
 constexpr double kFadeSeconds = 0.005;           // click-free play, pause, stop and seek
 constexpr double kGainSmoothingSeconds = 0.010;  // click-free fader, pan, mute and solo changes
@@ -51,17 +125,11 @@ Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
 
     const std::size_t block_samples = static_cast<std::size_t>(kBlockFrames) * channels_;
     frame_pos_.assign(kBlockFrames, -1);
-    shifted_pos_.assign(kBlockFrames, -1);
-    track_pos_ = frame_pos_.data();
     frame_fade_.assign(kBlockFrames, 0.0f);
     frame_frac_.assign(kBlockFrames, 0.0f);
-    sf_pos_.assign(kBlockFrames, -1.0);
-    sf_time_.assign(kBlockFrames, -1.0);
-    sf_fade_.assign(kBlockFrames, 0.0f);
-    sf_left_.assign(kBlockFrames, 0.0f);
-    sf_right_.assign(kBlockFrames, 0.0f);
     master_mix_.assign(block_samples, 0.0f);
-    track_mix_.assign(block_samples, 0.0f);
+    track_out_.assign(block_samples * kMaxTracks, 0.0f);
+    scratch_.push_back(std::make_unique<Scratch>(channels_));
     input_frame_.assign(channels_, 0.0f);
     bus_mix_.assign(block_samples * kMaxBuses, 0.0f);
 
@@ -70,6 +138,51 @@ Engine::Engine(std::uint32_t sample_rate, std::uint32_t channels)
     }
     for (auto& peak : bus_peaks_) {
         peak.store(0.0f, std::memory_order_relaxed);
+    }
+}
+
+struct Engine::Worker {
+    Semaphore wake;
+    std::atomic<bool> quit{false};
+    std::thread thread;
+};
+
+Engine::~Engine() { stop_workers(); }
+
+void Engine::stop_workers() {
+    for (const auto& worker : workers_) {
+        worker->quit.store(true, std::memory_order_release);
+        worker->wake.post();
+    }
+    for (const auto& worker : workers_) {
+        if (worker->thread.joinable()) {
+            worker->thread.join();
+        }
+    }
+    workers_.clear();
+    scratch_.resize(1);
+}
+
+void Engine::set_worker_threads(unsigned count) {
+    stop_workers();
+    count = std::min(count, kMaxWorkers);
+    for (unsigned k = 0; k < count; ++k) {
+        scratch_.push_back(std::make_unique<Scratch>(channels_));
+        workers_.push_back(std::make_unique<Worker>());
+    }
+    for (unsigned k = 0; k < count; ++k) {
+        Worker* const worker = workers_[k].get();
+        Scratch* const scratch = scratch_[k + 1].get();
+        worker->thread = std::thread([this, worker, scratch] {
+            raise_thread_priority();
+            for (;;) {
+                worker->wake.wait();
+                if (worker->quit.load(std::memory_order_acquire)) {
+                    return;
+                }
+                work_on_jobs(*scratch);
+            }
+        });
     }
 }
 
@@ -400,7 +513,7 @@ void Engine::render_stopped_instruments(float* out, std::uint32_t frames) noexce
             track.notes_on = false;
         }
         track.last_position = -1;
-        float* scratch = track_mix_.data();
+        float* scratch = scratch_[0]->mix.data();
         std::fill(scratch, scratch + samples, 0.0f);
         instrument.process(scratch, frames, static_cast<std::uint32_t>(channels));
         for (const auto& effect : track.content->effects) {
@@ -425,7 +538,7 @@ void Engine::render_stopped_instruments(float* out, std::uint32_t frames) noexce
 
 // The notes of a region that start or end in this block, as events for an instrument plugin.
 // A note starts where the playhead passes its beginning (note_prev_ < start <= position).
-void Engine::schedule_notes(Track& track, const Region& region, const NoteData& notes,
+void Engine::schedule_notes(Scratch& s, Track& track, const Region& region, const NoteData& notes,
                             AudioEffect& instrument, std::uint32_t frames, std::int64_t lowest,
                             std::int64_t highest) noexcept {
     const std::int64_t begin = region.start;
@@ -442,8 +555,8 @@ void Engine::schedule_notes(Track& track, const Region& region, const NoteData& 
             continue;
         }
         for (std::uint32_t i = 0; i < frames; ++i) {
-            const std::int64_t position = track_pos_[i];
-            const std::int64_t previous = note_prev_[i];
+            const std::int64_t position = s.track_pos[i];
+            const std::int64_t previous = s.note_prev[i];
             if (position < 0) {
                 continue;
             }
@@ -1013,58 +1126,22 @@ void Engine::process_input(const float* in, float* out, std::uint32_t frames) no
     }
 }
 
-void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
-                       bool audible) noexcept {
+// One track for the block in block_frames_: its regions, instrument and effects, then its
+// fader, pan and automation, into its part of track_out_. Runs on the audio thread or on a
+// worker thread; it touches only this track and the scratch buffers it is given.
+void Engine::render_track(std::size_t t, Scratch& s) noexcept {
+    Track& track = tracks_[t];
+    const std::uint32_t frames = block_frames_;
     const std::size_t channels = channels_;
     const std::size_t samples = static_cast<std::size_t>(frames) * channels;
     const bool stereo = channels == 2;
     const float coef = gain_coef_;
-    const float decay = static_cast<float>(std::exp(
-        -static_cast<double>(frames) / (kMeterReleaseSeconds * static_cast<double>(sample_rate_))));
-
-    if (!audible) {
-        // Nothing sounds in this block: write silence and let the meters fall back.
-        std::fill(out, out + samples, 0.0f);
-        for (std::size_t t = 0; t < kMaxTracks; ++t) {
-            tracks_[t].meter = decayed_meter(tracks_[t].meter, decay, 0.0f);
-            track_peaks_[t].store(tracks_[t].meter, std::memory_order_relaxed);
-        }
-        for (std::size_t b = 0; b < kMaxBuses; ++b) {
-            buses_[b].meter = decayed_meter(buses_[b].meter, decay, 0.0f);
-            bus_peaks_[b].store(buses_[b].meter, std::memory_order_relaxed);
-        }
-        master_meter_ = decayed_meter(master_meter_, decay, 0.0f);
-        master_peak_.store(master_meter_, std::memory_order_relaxed);
-        render_stopped_instruments(out, frames);
-        render_live(out, frames);
-        process_input(in, out, frames);
-        return;
-    }
-
-    const std::size_t bus_stride = static_cast<std::size_t>(kBlockFrames) * channels;
-    std::array<bool, kMaxBuses> bus_used{};
-    float* master = master_mix_.data();
-    std::fill(master, master + samples, 0.0f);
-
-    // The range of timeline frames this block touches, to skip regions that lie elsewhere.
-    std::int64_t block_low = std::numeric_limits<std::int64_t>::max();
-    std::int64_t block_high = -1;
-    for (std::uint32_t i = 0; i < frames; ++i) {
-        const std::int64_t position = frame_pos_[i];
-        if (position >= 0) {
-            block_low = std::min(block_low, position);
-            block_high = std::max(block_high, position);
-        }
-    }
-
-    // Tracks -> buses or master.
-    for (std::size_t t = 0; t < kMaxTracks; ++t) {
-        Track& track = tracks_[t];
-        float peak = 0.0f;
-
-        if (track.content != nullptr) {
+    const std::int64_t block_low = block_low_;
+    const std::int64_t block_high = block_high_;
+    float peak = 0.0f;
+    {
             // Collect the track's regions (with their fades) in a scratch buffer first.
-            float* scratch = track_mix_.data();
+            float* scratch = s.mix.data();
             bool any_region = false;
             std::uint64_t misses = 0;
             // Delay compensation: a track whose plugins delay its sound reads its regions that
@@ -1075,15 +1152,15 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
             std::int64_t track_high = block_high;
             if (ahead > 0) {
                 for (std::uint32_t i = 0; i < frames; ++i) {
-                    shifted_pos_[i] = frame_pos_[i] >= 0 ? frame_pos_[i] + ahead : frame_pos_[i];
+                    s.shifted_pos[i] = frame_pos_[i] >= 0 ? frame_pos_[i] + ahead : frame_pos_[i];
                 }
-                positions = shifted_pos_.data();
+                positions = s.shifted_pos.data();
                 if (block_high >= 0) {
                     track_low += ahead;
                     track_high += ahead;
                 }
             }
-            track_pos_ = positions;
+            s.track_pos = positions;
             // Automated plugin parameters get the value of their curve at the start of the block.
             if (block_high >= 0) {
                 for (const ParamCurve& curve : track.content->params) {
@@ -1105,7 +1182,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 for (std::uint32_t i = 0; i < frames; ++i) {
                     const std::int64_t position = positions[i];
                     if (position < 0) {
-                        note_prev_[i] = position;
+                        s.note_prev[i] = position;
                         continue;
                     }
                     if (previous < 0 || position < previous || position - previous > kMaxStep) {
@@ -1113,11 +1190,11 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                             instrument->add_note(i, false, -1, 0.0f);
                             track.notes_on = false;
                         }
-                        note_prev_[i] = position - 1;
+                        s.note_prev[i] = position - 1;
                     } else {
-                        note_prev_[i] = previous;
+                        s.note_prev[i] = previous;
                     }
-                    lowest_previous = std::min(lowest_previous, note_prev_[i]);
+                    lowest_previous = std::min(lowest_previous, s.note_prev[i]);
                     previous = position;
                 }
                 track.last_position = previous;
@@ -1141,7 +1218,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 // Note regions: the notes that sound somewhere in this block.
                 const NoteData* const note_data = region.clip->notes.get();
                 if (note_data != nullptr && instrument != nullptr) {
-                    schedule_notes(track, region, *note_data, *instrument, frames, lowest_previous,
+                    schedule_notes(s, track, region, *note_data, *instrument, frames, lowest_previous,
                                    track_high);
                     continue;
                 }
@@ -1176,15 +1253,15 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                         }
                     }
                 }
-                if (preset != nullptr && frames <= sf_pos_.size()) {
+                if (preset != nullptr && frames <= s.sf_pos.size()) {
                     // Recorded instruments: note by note over the whole block, so the SoundFont
                     // computes its envelopes once every few frames instead of for every frame.
                     bool inside = false;
                     for (std::uint32_t i = 0; i < frames; ++i) {
                         const std::int64_t position = positions[i];
                         if (position < begin || position >= end) {
-                            sf_pos_[i] = -1.0;
-                            sf_fade_[i] = 0.0f;
+                            s.sf_pos[i] = -1.0;
+                            s.sf_fade[i] = 0.0f;
                             continue;
                         }
                         const std::int64_t into = position - begin;
@@ -1200,31 +1277,31 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                                                       (static_cast<float>(remaining) + 0.5f) /
                                                           static_cast<float>(region.fade_out));
                         }
-                        sf_pos_[i] = static_cast<double>(region.offset) + static_cast<double>(into) +
+                        s.sf_pos[i] = static_cast<double>(region.offset) + static_cast<double>(into) +
                                      static_cast<double>(frame_frac_[i]);
-                        sf_fade_[i] = region_fade;
+                        s.sf_fade[i] = region_fade;
                         inside = true;
                     }
                     if (inside && active_count > 0) {
-                        std::fill(sf_left_.begin(), sf_left_.begin() + frames, 0.0f);
-                        std::fill(sf_right_.begin(), sf_right_.begin() + frames, 0.0f);
+                        std::fill(s.sf_left.begin(), s.sf_left.begin() + frames, 0.0f);
+                        std::fill(s.sf_right.begin(), s.sf_right.begin() + frames, 0.0f);
                         for (std::size_t k = 0; k < active_count; ++k) {
                             const Note& note = note_data->notes[active[k]];
                             const auto note_start = static_cast<double>(note.start);
                             for (std::uint32_t i = 0; i < frames; ++i) {
-                                sf_time_[i] = sf_pos_[i] < 0.0 ? -1.0 : sf_pos_[i] - note_start;
+                                s.sf_time[i] = s.sf_pos[i] < 0.0 ? -1.0 : s.sf_pos[i] - note_start;
                             }
-                            font->add_note_frames(*preset, note, sf_time_.data(), frames,
-                                                  static_cast<double>(sample_rate_), sf_left_.data(),
-                                                  sf_right_.data());
+                            font->add_note_frames(*preset, note, s.sf_time.data(), frames,
+                                                  static_cast<double>(sample_rate_), s.sf_left.data(),
+                                                  s.sf_right.data());
                         }
                         for (std::uint32_t i = 0; i < frames; ++i) {
-                            if (sf_pos_[i] < 0.0) {
+                            if (s.sf_pos[i] < 0.0) {
                                 continue;
                             }
                             float* note_dst = scratch + static_cast<std::size_t>(i) * channels;
-                            const float left = sf_left_[i] * sf_fade_[i];
-                            const float right = sf_right_[i] * sf_fade_[i];
+                            const float left = s.sf_left[i] * s.sf_fade[i];
+                            const float right = s.sf_right[i] * s.sf_fade[i];
                             if (channels >= 2) {
                                 note_dst[0] += left;
                                 note_dst[1] += right;
@@ -1385,16 +1462,7 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
             float pan_left = pan_curve != nullptr ? track.auto_pan_left : 1.0f;
             float pan_right = pan_curve != nullptr ? track.auto_pan_right : 1.0f;
 
-            float* destination = master;
-            if (track.bus >= 0) {
-                const auto bus = static_cast<std::size_t>(track.bus);
-                destination = bus_mix_.data() + bus * bus_stride;
-                if (!bus_used[bus]) {
-                    std::fill(destination, destination + samples, 0.0f);
-                    bus_used[bus] = true;
-                }
-            }
-
+            float* destination = track_out_.data() + t * static_cast<std::size_t>(kBlockFrames) * channels;
             for (std::uint32_t i = 0; i < frames; ++i) {
                 smooth(track.current_left, track.target_left, coef);
                 smooth(track.current_right, track.target_right, coef);
@@ -1419,26 +1487,149 @@ void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
                 if (stereo) {
                     const float left = src[0] * track.current_left * automation * pan_left;
                     const float right = src[1] * track.current_right * automation * pan_right;
-                    dst[0] += left;
-                    dst[1] += right;
+                    dst[0] = left;
+                    dst[1] = right;
                     peak = std::max(peak, std::max(std::fabs(left), std::fabs(right)));
                 } else {
                     for (std::size_t c = 0; c < channels; ++c) {
                         const float value = src[c] * track.current_left * automation;
-                        dst[c] += value;
+                        dst[c] = value;
                         peak = std::max(peak, std::fabs(value));
                     }
                 }
             }
+            track_has_out_[t] = any_region;
+            track_out_peak_[t] = peak;
+            (void)samples;
+    }
+}
+
+// Computes the tracks in jobs_: with worker threads they take tracks one by one, and this
+// thread takes part, then waits for the last one. Without them, one after another here.
+void Engine::run_track_jobs() noexcept {
+    const std::uint32_t count = job_count_;
+    Scratch& own = *scratch_[0];
+    const std::size_t helpers =
+        blocking_reads_ ? 0 : std::min<std::size_t>(workers_.size(), count > 1 ? count - 1 : 0);
+    if (helpers == 0) {
+        for (std::uint32_t j = 0; j < count; ++j) {
+            render_track(jobs_[j], own);
+        }
+        return;
+    }
+    ++job_generation_;
+    const std::uint64_t generation = static_cast<std::uint64_t>(job_generation_) << 32;
+    jobs_done_.store(0, std::memory_order_relaxed);
+    job_info_.store(generation | count, std::memory_order_release);
+    job_next_.store(generation, std::memory_order_release);
+    for (std::size_t k = 0; k < helpers; ++k) {
+        workers_[k]->wake.post();
+    }
+    work_on_jobs(own);
+    while (jobs_done_.load(std::memory_order_acquire) < count) {
+        std::this_thread::yield();
+    }
+}
+
+// Takes tracks of the current block until there are none left. A thread that wakes up late
+// sees that its claim belongs to an older block (the generation) and stops.
+void Engine::work_on_jobs(Scratch& s) noexcept {
+    for (;;) {
+        const std::uint64_t claim = job_next_.fetch_add(1, std::memory_order_acq_rel);
+        const std::uint64_t info = job_info_.load(std::memory_order_acquire);
+        const auto index = static_cast<std::uint32_t>(claim & 0xffffffffu);
+        if ((claim >> 32) != (info >> 32) || index >= static_cast<std::uint32_t>(info & 0xffffffffu)) {
+            return;
+        }
+        render_track(jobs_[index], s);
+        jobs_done_.fetch_add(1, std::memory_order_acq_rel);
+    }
+}
+void Engine::mix_block(const float* in, float* out, std::uint32_t frames,
+                       bool audible) noexcept {
+    const std::size_t channels = channels_;
+    const std::size_t samples = static_cast<std::size_t>(frames) * channels;
+    const float coef = gain_coef_;
+    const float decay = static_cast<float>(std::exp(
+        -static_cast<double>(frames) / (kMeterReleaseSeconds * static_cast<double>(sample_rate_))));
+
+    if (!audible) {
+        // Nothing sounds in this block: write silence and let the meters fall back.
+        std::fill(out, out + samples, 0.0f);
+        for (std::size_t t = 0; t < kMaxTracks; ++t) {
+            tracks_[t].meter = decayed_meter(tracks_[t].meter, decay, 0.0f);
+            track_peaks_[t].store(tracks_[t].meter, std::memory_order_relaxed);
+        }
+        for (std::size_t b = 0; b < kMaxBuses; ++b) {
+            buses_[b].meter = decayed_meter(buses_[b].meter, decay, 0.0f);
+            bus_peaks_[b].store(buses_[b].meter, std::memory_order_relaxed);
+        }
+        master_meter_ = decayed_meter(master_meter_, decay, 0.0f);
+        master_peak_.store(master_meter_, std::memory_order_relaxed);
+        render_stopped_instruments(out, frames);
+        render_live(out, frames);
+        process_input(in, out, frames);
+        return;
+    }
+
+    const std::size_t bus_stride = static_cast<std::size_t>(kBlockFrames) * channels;
+    std::array<bool, kMaxBuses> bus_used{};
+    float* master = master_mix_.data();
+    std::fill(master, master + samples, 0.0f);
+
+    // The range of timeline frames this block touches, to skip regions that lie elsewhere.
+    std::int64_t block_low = std::numeric_limits<std::int64_t>::max();
+    std::int64_t block_high = -1;
+    for (std::uint32_t i = 0; i < frames; ++i) {
+        const std::int64_t position = frame_pos_[i];
+        if (position >= 0) {
+            block_low = std::min(block_low, position);
+            block_high = std::max(block_high, position);
+        }
+    }
+
+    // Tracks: each one is computed on its own (by several threads when there are workers)...
+    block_frames_ = frames;
+    block_low_ = block_low;
+    block_high_ = block_high;
+    job_count_ = 0;
+    for (std::size_t t = 0; t < kMaxTracks; ++t) {
+        Track& track = tracks_[t];
+        track_has_out_[t] = false;
+        if (track.content != nullptr) {
+            jobs_[job_count_++] = static_cast<std::uint32_t>(t);
         } else {
             track.current_left = track.target_left;
             track.current_right = track.target_right;
         }
-
+    }
+    run_track_jobs();
+    // ... and then they are summed in order into their buses or the master, so the result is
+    // the same however many threads there are.
+    for (std::size_t t = 0; t < kMaxTracks; ++t) {
+        Track& track = tracks_[t];
+        float peak = 0.0f;
+        if (track.content != nullptr) {
+            float* destination = master;
+            if (track.bus >= 0) {
+                const auto bus = static_cast<std::size_t>(track.bus);
+                destination = bus_mix_.data() + bus * bus_stride;
+                if (!bus_used[bus]) {
+                    std::fill(destination, destination + samples, 0.0f);
+                    bus_used[bus] = true;
+                }
+            }
+            if (track_has_out_[t]) {
+                peak = track_out_peak_[t];
+                const float* source = track_out_.data() + t * bus_stride;
+                for (std::size_t k = 0; k < samples; ++k) {
+                    destination[k] += source[k];
+                }
+            }
+        }
         track.meter = decayed_meter(track.meter, decay, peak);
         track_peaks_[t].store(track.meter, std::memory_order_relaxed);
     }
-
     // Buses -> master.
     for (std::size_t b = 0; b < kMaxBuses; ++b) {
         Bus& bus = buses_[b];

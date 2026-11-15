@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.12
+
+- Several processor cores compute the tracks: each track (its regions, instrument and effects) is computed by one thread, the tracks are shared among the audio thread and helper threads, and then summed in their usual order, so the sound is exactly the same as on one core (a test checks it). Big projects can use the whole processor.
+- Settings > General > Performance: "Threads for the sound" (Automatic: all cores but one; or 1, 2, 4, 8 ...). The helper threads run at a high priority like the audio thread.
+
 ## 0.3.11
 
 - Fix: the Linux build failed since 0.3.9 (the track speed mixed two kinds of 64-bit numbers that are the same type on Windows but not on Linux). Nothing changes in use.

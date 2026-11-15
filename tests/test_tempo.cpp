@@ -150,6 +150,34 @@ TEST_CASE("One track can be made faster or slower") {
     CHECK(session.tracks()[0].regions[0].length == 8000);
 }
 
+TEST_CASE("Tracks sound the same on one thread and on several") {
+    const auto render = [](int threads) {
+        Session session;
+        session.set_audio_threads(threads);
+        for (int k = 0; k < 6; ++k) {
+            const std::size_t track = session.add_instrument_track("T", toh::core::Instrument::Keys, 0, 48000);
+            session.set_region_notes(track, 0, {toh::core::Note{0, 24000, static_cast<std::uint8_t>(60 + k), 0.7f}});
+        }
+        session.play();
+        std::vector<float> all;
+        std::vector<float> out(2 * 512);
+        for (int block = 0; block < 40; ++block) {
+            session.engine().render(out.data(), 512);
+            all.insert(all.end(), out.begin(), out.end());
+        }
+        return all;
+    };
+    const std::vector<float> one = render(1);
+    const std::vector<float> many = render(4);
+    REQUIRE(one.size() == many.size());
+    float loudest = 0.0f;
+    for (const float value : one) {
+        loudest = std::max(loudest, std::fabs(value));
+    }
+    CHECK(loudest > 0.01f);
+    CHECK(one == many);
+}
+
 TEST_CASE("Tempo changes can be taken back and done again") {
     Session session;
     toh::app::MetronomeSettings metronome = session.metronome();

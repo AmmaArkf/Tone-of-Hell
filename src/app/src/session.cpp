@@ -312,6 +312,7 @@ Session::Session(const audio::DeviceConfig& config)
       engine_(config.sample_rate, config.channels),
       // A first guess for the way through the sound card: one buffer out and one buffer in.
       record_offset_(2 * static_cast<std::int64_t>(config.buffer_frames)) {
+    set_audio_threads(-1);
     saved_state_ = state_text();  // an empty project counts as saved
     clear_history();
     loader_ = std::thread([this] { loader_main(); });
@@ -1733,6 +1734,29 @@ void Session::render_audio(const float* in, float* out, std::uint32_t frames) no
     dsp_load_.store(std::max(load, before * 0.98f), std::memory_order_relaxed);
     if (load > 1.0f) {
         dsp_overloads_.fetch_add(1, std::memory_order_relaxed);
+    }
+}
+
+void Session::set_audio_threads(int threads) {
+    audio_threads_ = threads;
+    unsigned helpers = 0;
+    if (threads < 0) {
+        const unsigned cores = std::thread::hardware_concurrency();
+        helpers = cores > 2 ? cores - 2 : 0;  // the audio thread plus all but one of the rest
+    } else if (threads > 1) {
+        helpers = static_cast<unsigned>(threads - 1);
+    }
+    helpers = std::min(helpers, core::Engine::kMaxWorkers);
+    if (helpers == engine_.worker_threads()) {
+        return;
+    }
+    const bool running = device_.running();
+    if (running) {
+        device_.stop();  // the engine may change its threads only while it is not rendering
+    }
+    engine_.set_worker_threads(helpers);
+    if (running) {
+        device_.start(config_, &render_callback, this, nullptr);
     }
 }
 

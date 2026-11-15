@@ -7,4 +7,6 @@ add_library(toh_core STATIC
     src/synth.cpp)
 
 target_include_directories(toh_core PUBLIC include)
+find_package(Threads REQUIRED)
+target_link_libraries(toh_core PUBLIC Threads::Threads)
 target_link_libraries(toh_core PRIVATE toh_warnings)

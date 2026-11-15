@@ -73,6 +73,8 @@ struct Settings {
     std::string input_device;   ///< Name of the input device; empty for the system default.
     /// The size of one audio block in frames.
     std::uint32_t buffer_frames = 256;
+    /// Threads that compute the tracks: -1 automatic, 1 only the audio thread.
+    int audio_threads = -1;
     float master_gain = 1.0f;
     float input_gain = 1.0f;
     /// Latency correction for recordings in frames; negative means "use the default".

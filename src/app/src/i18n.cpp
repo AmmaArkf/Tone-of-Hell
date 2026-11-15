@@ -337,6 +337,11 @@ const Entry kRussian[] = {
      "Слышать микрофон или инструмент, который записываете, через выход. Используйте наушники: "
      "с колонками микрофон слышит сам себя и начинает выть."},
     {"Buffer size", "Размер буфера"},
+    {"Threads for the sound", "Потоки для звука"},
+    {"Automatic", "Автоматически"},
+    {"Automatic (%u of %u)", "Автоматически (%u из %u)"},
+    {"Tracks are computed on several processor cores at once. 1: only one core.",
+     "Дорожки считаются сразу на нескольких ядрах процессора. 1 — только на одном ядре."},
     {"%d frames (%.1f ms)", "%d сэмплов (%.1f мс)"},
     {"A bigger buffer stops crackling when many tracks and effects play, but the sound reacts a little later.",
      "Буфер побольше убирает хруст, когда играет много дорожек и эффектов, но звук откликается чуть позже."},
