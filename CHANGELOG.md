@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.8
+
+- The Tune editor has the tools of a pitch-correction plugin: Move notes, a Pencil that draws the pitch the sound should have, a Line for slides from note to note, and Scissors that cut notes.
+- Correction of every note like the knobs of such a plugin: Speed, Note transition and Ratio; the targets are the scale (with the reference pitch of A4) or the notes of a MIDI track ("Receive MIDI"); segmentation tolerance; natural vibrato from 0 to 200 % and a synthetic vibrato with depth, rate, delay and attack.
+- Retuning now uses pitch-synchronous overlap-add, which keeps the formants: a voice keeps its colour. "Shift everything" transposes the whole sound; "Notes to a MIDI track" writes the notes found onto a new instrument track ("Export MIDI").
+
 ## 0.4.7
 
 - The pitch editor grew into a graphic editor for Tune: the "Editor" button of a Tune effect (in FX and in the effect list under the library) opens it on the recorded sound of the track and shares the key and scale with the effect.

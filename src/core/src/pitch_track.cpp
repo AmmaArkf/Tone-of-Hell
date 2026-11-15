@@ -101,7 +101,139 @@ PitchCurve track_pitch(const float* interleaved, std::size_t frames, std::size_t
     return curve;
 }
 
-std::vector<PitchNote> find_pitch_notes(const PitchCurve& curve) {
+std::vector<float> psola_retune(const float* in, std::size_t frames, std::size_t channels, double rate,
+                                const PitchCurve& curve, const std::vector<float>& shift) {
+    std::vector<float> out(in, in + frames * channels);
+    if (channels == 0 || frames == 0 || rate <= 0.0) {
+        return out;
+    }
+    const std::size_t hop = std::max<std::size_t>(curve.hop, 1);
+    const std::size_t hops = std::min(curve.midi.size(), shift.size());
+    const auto period_of = [&](std::size_t h) {
+        return rate / (440.0 * std::pow(2.0, (static_cast<double>(curve.midi[h]) - 69.0) / 12.0));
+    };
+    // The shift at a frame: between the middles of two hops it moves in a straight line.
+    const auto shift_at = [&](double frame) {
+        const double x = std::clamp(frame / static_cast<double>(hop) - 0.5, 0.0, static_cast<double>(hops - 1));
+        const auto low = static_cast<std::size_t>(std::floor(x));
+        const std::size_t high = std::min(low + 1, hops - 1);
+        const double t = x - static_cast<double>(low);
+        return static_cast<double>(shift[low]) * (1.0 - t) + static_cast<double>(shift[high]) * t;
+    };
+    const auto mono = [&](std::int64_t frame) {
+        float sum = 0.0f;
+        for (std::size_t c = 0; c < channels; ++c) {
+            sum += in[static_cast<std::size_t>(frame) * channels + c];
+        }
+        return sum;
+    };
+    const auto total = static_cast<std::int64_t>(frames);
+    std::size_t h = 0;
+    while (h < hops) {
+        if (curve.midi[h] < 0.0f) {
+            ++h;
+            continue;
+        }
+        // A run of hops with a pitch, and whether anything in it moves.
+        std::size_t end = h;
+        bool moves = false;
+        while (end < hops && curve.midi[end] >= 0.0f) {
+            moves = moves || std::fabs(shift[end]) > 0.005f;
+            ++end;
+        }
+        const auto a = static_cast<std::int64_t>(h * hop);
+        const std::int64_t b = std::min(static_cast<std::int64_t>(end * hop), total);
+        h = end;
+        if (!moves || b - a < 64) {
+            continue;
+        }
+        // The marks: one at the peak of every period.
+        const auto refine = [&](std::int64_t guess, double period) {
+            const auto reach = static_cast<std::int64_t>(period * 0.2);
+            std::int64_t best = guess;
+            float highest = -1e30f;
+            for (std::int64_t t = std::max(guess - reach, a); t <= std::min(guess + reach, b - 1); ++t) {
+                const float value = mono(t);
+                if (value > highest) {
+                    highest = value;
+                    best = t;
+                }
+            }
+            return best;
+        };
+        std::vector<std::int64_t> marks;
+        std::vector<double> periods;
+        double period = period_of(static_cast<std::size_t>(a) / hop);
+        std::int64_t mark = refine(a + static_cast<std::int64_t>(period * 0.5), period);
+        while (mark < b) {
+            const std::size_t at = std::min(static_cast<std::size_t>(mark) / hop, hops - 1);
+            if (curve.midi[at] >= 0.0f) {
+                period = period_of(at);
+            }
+            marks.push_back(mark);
+            periods.push_back(period);
+            std::int64_t next = refine(mark + std::llround(period), period);
+            if (next <= mark) {
+                next = mark + std::max<std::int64_t>(std::llround(period), 1);
+            }
+            mark = next;
+        }
+        if (marks.size() < 3) {
+            continue;
+        }
+        // Laid down again: a piece of two periods at every new mark, the new marks a period
+        // divided by the ratio apart; the sum is divided by the sum of the windows.
+        const auto span = static_cast<std::size_t>(b - a);
+        std::vector<double> sum(span * channels, 0.0);
+        std::vector<double> weight(span, 0.0);
+        double place = static_cast<double>(marks.front());
+        std::size_t nearest = 0;
+        while (place < static_cast<double>(b)) {
+            while (nearest + 1 < marks.size() &&
+                   std::fabs(static_cast<double>(marks[nearest + 1]) - place) <
+                       std::fabs(static_cast<double>(marks[nearest]) - place)) {
+                ++nearest;
+            }
+            const std::int64_t source = marks[nearest];
+            const double p = periods[nearest];
+            const auto half = std::max<std::int64_t>(std::llround(p), 2);
+            const auto centre = static_cast<std::int64_t>(std::llround(place));
+            for (std::int64_t j = -half; j <= half; ++j) {
+                const std::int64_t from = source + j;
+                const std::int64_t to = centre + j;
+                if (from < 0 || from >= total || to < a || to >= b) {
+                    continue;
+                }
+                const double w = 0.5 + 0.5 * std::cos(3.14159265358979 * static_cast<double>(j) / static_cast<double>(half));
+                const auto index = static_cast<std::size_t>(to - a);
+                for (std::size_t c = 0; c < channels; ++c) {
+                    sum[index * channels + c] += static_cast<double>(in[static_cast<std::size_t>(from) * channels + c]) * w;
+                }
+                weight[index] += w;
+            }
+            const double ratio = std::pow(2.0, shift_at(place) / 12.0);
+            place += p / ratio;
+        }
+        // Written back, blended with the original over 5 ms at the edges of the run.
+        const auto fade = std::max<std::int64_t>(static_cast<std::int64_t>(0.005 * rate), 1);
+        for (std::int64_t t = a; t < b; ++t) {
+            const auto index = static_cast<std::size_t>(t - a);
+            if (weight[index] < 1e-3) {
+                continue;
+            }
+            const double edge = std::min({1.0, static_cast<double>(t - a) / static_cast<double>(fade),
+                                          static_cast<double>(b - 1 - t) / static_cast<double>(fade)});
+            for (std::size_t c = 0; c < channels; ++c) {
+                const std::size_t k = static_cast<std::size_t>(t) * channels + c;
+                const double moved = sum[index * channels + c] / weight[index];
+                out[k] = static_cast<float>(in[k] + (moved - in[k]) * edge);
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<PitchNote> find_pitch_notes(const PitchCurve& curve, float tolerance) {
     std::vector<PitchNote> notes;
     const std::size_t hops = curve.midi.size();
     const auto hop = static_cast<std::int64_t>(curve.hop);
@@ -145,10 +277,10 @@ std::vector<PitchNote> find_pitch_notes(const PitchCurve& curve) {
             std::sort(recent.begin(), recent.end());
             centre = recent[1];
         }
-        if (std::fabs(pitch - centre) > 0.6f) {
+        if (std::fabs(pitch - centre) > tolerance) {
             bool holds = true;
             for (std::size_t k = h + 1; k < std::min(h + 3, hops); ++k) {
-                if (curve.midi[k] < 0.0f || std::fabs(curve.midi[k] - pitch) > 0.6f) {
+                if (curve.midi[k] < 0.0f || std::fabs(curve.midi[k] - pitch) > tolerance) {
                     holds = false;
                 }
             }

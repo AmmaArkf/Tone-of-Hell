@@ -1659,6 +1659,58 @@ bool Session::shift_region_pitch(std::size_t track, std::size_t region, const st
     return true;
 }
 
+bool Session::retune_region_pitch(std::size_t track, std::size_t region, const std::vector<float>& target,
+                                  std::string* error) {
+    RegionInfo* info = find_region(track, region);
+    if (info == nullptr || info->has_notes()) {
+        set_error(error, "choose a region with recorded sound");
+        return false;
+    }
+    if (std::none_of(target.begin(), target.end(), [](float value) { return value >= 0.0f; })) {
+        set_error(error, "nothing to move");
+        return false;
+    }
+    const std::size_t channels = config_.channels;
+    const double rate = static_cast<double>(config_.sample_rate);
+    bool changed = false;
+    const auto process = [&](std::vector<float>& samples) {
+        const std::size_t frames = samples.size() / channels;
+        const core::PitchCurve curve = core::track_pitch(samples.data(), frames, channels, rate);
+        std::vector<float> shift(curve.midi.size(), 0.0f);
+        for (std::size_t h = 0; h < shift.size() && h < target.size(); ++h) {
+            if (target[h] >= 0.0f && curve.midi[h] >= 0.0f) {
+                shift[h] = std::clamp(target[h] - curve.midi[h], -24.0f, 24.0f);
+                changed = changed || std::fabs(shift[h]) > 0.005f;
+            }
+        }
+        if (changed) {
+            samples = core::psola_retune(samples.data(), frames, channels, rate, curve, shift);
+        }
+    };
+    // Check first that something moves, so that nothing is rewritten for nothing.
+    {
+        core::PitchCurve curve;
+        if (!analyse_region_pitch(track, region, &curve, nullptr)) {
+            return false;
+        }
+        bool any = false;
+        for (std::size_t h = 0; h < curve.midi.size() && h < target.size() && !any; ++h) {
+            any = target[h] >= 0.0f && curve.midi[h] >= 0.0f && std::fabs(target[h] - curve.midi[h]) > 0.005f;
+        }
+        if (!any) {
+            set_error(error, "nothing to move");
+            return false;
+        }
+    }
+    if (!rewrite_region_sound(*info, process, 1.0, error)) {
+        return false;
+    }
+    pending_label_ = "Retune";
+    sync_track_regions(track);
+    update_length();
+    return true;
+}
+
 // ---- Clip grid ---------------------------------------------------------------------------
 
 const RegionInfo* Session::clip_slot(std::size_t track, int scene) const noexcept {

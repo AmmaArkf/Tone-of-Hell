@@ -555,6 +555,12 @@ public:
     /// (the edges blend over 10 ms). The region gets a sound of its own; undo brings the old one.
     bool shift_region_pitch(std::size_t track, std::size_t region, const std::vector<PitchMove>& moves,
                             std::string* error = nullptr);
+    /// Retunes an audio region to a pitch line: one value per hop of its pitch curve (see
+    /// analyse_region_pitch), a MIDI note with fractions, or -1 where the sound stays as it is.
+    /// Pitch-synchronous overlap-add keeps the formants (the colour of a voice). Returns false
+    /// (and changes nothing) when no value moves anything.
+    bool retune_region_pitch(std::size_t track, std::size_t region, const std::vector<float>& target,
+                             std::string* error = nullptr);
 
     /// The markers, in order of time. Adding, moving, renaming and removing them are edits
     /// that can be undone, and they are saved with the project.

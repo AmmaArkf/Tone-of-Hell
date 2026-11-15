@@ -405,6 +405,25 @@ TEST_CASE("The notes of a recorded voice are found and retuned") {
     REQUIRE(session.undo());
     REQUIRE(session.analyse_region_pitch(0, 0, nullptr, &found));
     CHECK(found.front().pitch == doctest::Approx(57.0f).epsilon(0.003));
+
+    // A drawn pitch line: the whole first note to C4, the second note stays.
+    toh::core::PitchCurve line;
+    REQUIRE(session.analyse_region_pitch(0, 0, &line, &found));
+    std::vector<float> target(line.midi.size(), -1.0f);
+    for (std::size_t h = 0; h * line.hop < 24000 && h < target.size(); ++h) {
+        target[h] = 60.0f;
+    }
+    REQUIRE(session.retune_region_pitch(0, 0, target));
+    session.commit_edits();
+    CHECK(session.undo_label() == "Retune");
+    REQUIRE(session.analyse_region_pitch(0, 0, nullptr, &found));
+    REQUIRE(found.size() >= 2);
+    CHECK(found.front().pitch == doctest::Approx(60.0f).epsilon(0.004));
+    CHECK(found.back().pitch == doctest::Approx(64.0f).epsilon(0.003));
+    CHECK(session.tracks()[0].regions[0].length == 48000);
+    // A line that moves nothing changes nothing.
+    std::vector<float> none(line.midi.size(), -1.0f);
+    CHECK_FALSE(session.retune_region_pitch(0, 0, none));
 }
 
 TEST_CASE("The mastering chain reaches the target loudness under the ceiling") {

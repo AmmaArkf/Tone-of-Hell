@@ -26,6 +26,14 @@ PitchCurve track_pitch(const float* interleaved, std::size_t frames, std::size_t
 
 /// Cuts a pitch curve into notes: a new note begins where the pitch jumps by more than half a
 /// semitone and stays there, or after a gap. Very short notes are left out.
-std::vector<PitchNote> find_pitch_notes(const PitchCurve& curve);
+std::vector<PitchNote> find_pitch_notes(const PitchCurve& curve, float tolerance = 0.6f);
+
+/// Retunes interleaved audio with pitch-synchronous overlap-add (PSOLA): pieces two periods
+/// long are taken at every period of the sound and laid down closer together or further apart.
+/// That changes the pitch but keeps the formants (the colour of a voice). `shift` gives, per hop
+/// of `curve`, the semitones to move (0: stays); parts without pitch stay as they are. The
+/// result is as long as the input.
+std::vector<float> psola_retune(const float* interleaved, std::size_t frames, std::size_t channels, double sample_rate,
+                                const PitchCurve& curve, const std::vector<float>& shift);
 
 }  // namespace toh::core

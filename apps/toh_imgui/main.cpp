@@ -335,6 +335,25 @@ struct UiState {
     float pitch_view0 = 0.0f;     // the part of the sound in view (0..1), for the overview
     float pitch_view1 = 1.0f;
     float pitch_jump = -1.0f;     // a place clicked on the overview, to scroll to
+    int pitch_tool = 0;           // 0 move notes, 1 pencil, 2 line, 3 scissors
+    std::vector<float> pitch_drawn;  // the pitch line being drawn, per hop (-1: none)
+    bool pitch_drawing = false;
+    long long pitch_last_hop = 0;
+    float pitch_last_pitch = 60.0f;
+    long long pitch_line_hop = 0;
+    float pitch_line_pitch = 60.0f;
+    int pitch_midi_track = -1;    // the notes are pulled to this MIDI track instead of the scale
+    float pitch_reference = 440.0f;
+    float pitch_tolerance = 60.0f;  // cents
+    float pitch_speed = 20.0f;      // ms
+    float pitch_transition = 40.0f; // ms
+    float pitch_natural = 100.0f;   // percent of the sung vibrato
+    bool pitch_synth = false;
+    float pitch_vib_depth = 30.0f;  // cents
+    float pitch_vib_rate = 5.5f;    // Hz
+    float pitch_vib_delay = 200.0f; // ms
+    float pitch_vib_attack = 300.0f;
+    int pitch_transpose = 0;
     // The tempo found in the region of the region menu, kept while the region stays the same.
     const void* tempo_source = nullptr;
     std::int64_t tempo_offset = -1;
@@ -6914,9 +6933,75 @@ void draw_mastering(Session& session, UiState& ui) {
 
 // ---- Pitch editor ------------------------------------------------------------------------
 
-// The notes of a recorded voice or instrument on a grid of keys: the line is the pitch that
-// sounds, the bars are the notes found in it. Dragging a note up or down retunes that part of
-// the sound (to whole semitones; Alt: freely).
+// The target of a hop for "Apply to every note": the note it belongs to pulled to its goal with
+// the speed, note transition and ratio of the editor, plus the vibrato as set.
+std::vector<float> correction_line(Session& session, const UiState& ui, const RegionInfo& region) {
+    const double rate = static_cast<double>(session.sample_rate());
+    const std::size_t hop = std::max<std::size_t>(ui.pitch_curve.hop, 1);
+    std::vector<float> target(ui.pitch_curve.midi.size(), -1.0f);
+    const double reference = 12.0 * std::log2(static_cast<double>(ui.pitch_reference) / 440.0);
+    // The notes of the chosen MIDI track at a frame of this sound, or -1.
+    const auto midi_note_at = [&](std::int64_t frame) -> float {
+        if (ui.pitch_midi_track < 0 || static_cast<std::size_t>(ui.pitch_midi_track) >= session.tracks().size()) {
+            return -1.0f;
+        }
+        const std::int64_t timeline = region.start + std::llround(static_cast<double>(frame) / region.rate);
+        for (const RegionInfo& notes : session.tracks()[static_cast<std::size_t>(ui.pitch_midi_track)].regions) {
+            if (!notes.has_notes() || timeline < notes.start || timeline >= notes.end()) {
+                continue;
+            }
+            const std::int64_t inside = timeline - notes.start + notes.offset;
+            for (const toh::core::Note& note : notes.source->clip->notes->notes) {
+                if (inside >= note.start && inside < note.start + note.length) {
+                    return static_cast<float>(note.pitch);
+                }
+            }
+        }
+        return -1.0f;
+    };
+    for (const toh::core::PitchNote& note : ui.pitch_notes) {
+        double goal = 0.0;
+        if (ui.pitch_midi_track >= 0) {
+            const float midi = midi_note_at(note.start + note.length / 2);
+            if (midi < 0.0f) {
+                continue;  // no MIDI note there: this sung note stays
+            }
+            goal = midi + reference;
+        } else {
+            goal = scale_target(note.pitch - reference, ui.pitch_key, ui.pitch_scale) + reference;
+        }
+        const double centre = note.pitch + (goal - note.pitch) * ui.pitch_ratio / 100.0;
+        for (std::size_t h = static_cast<std::size_t>(note.start) / hop;
+             h < target.size() && static_cast<std::int64_t>(h * hop) < note.start + note.length; ++h) {
+            const float sung = ui.pitch_curve.midi[h];
+            if (sung < 0.0f) {
+                continue;
+            }
+            const double since = static_cast<double>(static_cast<std::int64_t>(h * hop) - note.start) / rate * 1000.0;
+            const double until = static_cast<double>(note.start + note.length - static_cast<std::int64_t>(h * hop)) / rate * 1000.0;
+            // Speed: how much of the way it has gone; note transition: natural at both ends.
+            const double reached = ui.pitch_speed <= 0.5f ? 1.0 : 1.0 - std::exp(-since / ui.pitch_speed);
+            const double inner = ui.pitch_transition <= 0.5f
+                                     ? 1.0
+                                     : std::clamp(std::min(since, until) / ui.pitch_transition, 0.0, 1.0);
+            const double pulled = note.pitch + (centre - note.pitch) * reached * inner;
+            // The singer's own wobble around the note, scaled.
+            const double wobble = (sung - note.pitch) * ui.pitch_natural / 100.0;
+            double value = pulled + wobble * inner + (sung - note.pitch) * (1.0 - inner);
+            if (ui.pitch_synth && since > ui.pitch_vib_delay) {
+                const double t = (since - ui.pitch_vib_delay) / 1000.0;
+                const double grow = ui.pitch_vib_attack <= 0.5f ? 1.0 : std::min(1.0, t * 1000.0 / ui.pitch_vib_attack);
+                value += ui.pitch_vib_depth / 100.0 * grow * std::sin(6.283185307 * ui.pitch_vib_rate * t);
+            }
+            target[h] = static_cast<float>(value);
+        }
+    }
+    return target;
+}
+
+// The notes of recorded sound on a grid of keys, with tools like a pitch-correction plugin:
+// move notes, draw the pitch with a pencil or a line, cut notes; a correction of every note to
+// a scale or to a MIDI track with speed, note transition, ratio and vibrato.
 void draw_pitch_editor(Session& session, UiState& ui) {
     if (!ui.pitch_open) {
         return;
@@ -6930,27 +7015,59 @@ void draw_pitch_editor(Session& session, UiState& ui) {
     const RegionInfo& region = session.tracks()[ui.pitch_track].regions[ui.pitch_region];
     if (ui.pitch_source != region.source.get() || ui.pitch_offset != region.offset ||
         ui.pitch_length != region.length) {
-        session.analyse_region_pitch(ui.pitch_track, ui.pitch_region, &ui.pitch_curve, &ui.pitch_notes);
+        session.analyse_region_pitch(ui.pitch_track, ui.pitch_region, &ui.pitch_curve, nullptr);
+        ui.pitch_notes = toh::core::find_pitch_notes(ui.pitch_curve, ui.pitch_tolerance / 100.0f);
         ui.pitch_source = region.source.get();
         ui.pitch_offset = region.offset;
         ui.pitch_length = region.length;
         ui.pitch_drag = -1;
+        ui.pitch_drawn.assign(ui.pitch_curve.midi.size(), -1.0f);
+        ui.pitch_drawing = false;
     }
     const ImGuiIO& io = ImGui::GetIO();
     const float font = ImGui::GetFontSize();
-    ImGui::SetNextWindowSize(ImVec2(60.0f * font, 28.0f * font), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(72.0f * font, 34.0f * font), ImGuiCond_FirstUseEver);
     const std::string title = std::string(T_("Pitch editor")) + ": " + region.source->name + "###pitch editor";
     if (!ImGui::Begin(title.c_str(), &ui.pitch_open)) {
         ImGui::End();
         return;
     }
     const double rate = static_cast<double>(session.sample_rate());
-    // The key and the scale: those of the Tune effect the editor was opened from, or its own.
+    const std::size_t hop = std::max<std::size_t>(ui.pitch_curve.hop, 1);
+    const auto apply = [&](const std::vector<float>& target) {
+        std::string error;
+        if (session.retune_region_pitch(ui.pitch_track, ui.pitch_region, target, &error)) {
+            ui.pitch_source = nullptr;  // analyse the new sound
+        } else if (error != "nothing to move") {
+            ui.error = error;
+        }
+    };
     if (ui.pitch_tune) {
         ui.pitch_key = std::clamp(static_cast<int>(std::lround(ui.pitch_tune->param_value(0))), 0, 11);
         ui.pitch_scale = std::clamp(static_cast<int>(std::lround(ui.pitch_tune->param_value(1))), 0, 5);
+    }
+
+    // ---- The panel on the left: settings like the knobs of the plugin ----
+    ImGui::BeginChild("tune settings", ImVec2(17.0f * font, 0.0f), ImGuiChildFlags_Borders);
+    const float wide = 15.5f * font;
+    ImGui::SeparatorText(T_("Tools"));
+    static const char* const tools[] = {"Move notes", "Pencil", "Line", "Scissors##tune"};
+    static const char* const tool_tips[] = {"Drag notes up or down; Alt: freely, not to whole semitones.",
+                                            "Draw the pitch the sound should have; it is applied when the mouse is let go.",
+                                            "Drag a straight line of pitch, for example a slide from one note to another.",
+                                            "Click a note to cut it in two, so each part can be moved by itself."};
+    for (int k = 0; k < 4; ++k) {
+        if (k % 2 == 1) {
+            ImGui::SameLine();
+        }
+        if (toggle_button(T_(tools[k]), ui.pitch_tool == k, ImVec4(0.85f, 0.45f, 0.15f, 1.0f), false)) {
+            ui.pitch_tool = k;
+        }
+        tooltip(T_(tool_tips[k]));
+    }
+    ImGui::SeparatorText(T_("Targets"));
+    if (ui.pitch_tune) {
         ImGui::TextDisabled("%s", T_("Tune"));
-        ImGui::SameLine();
     }
     ImGui::SetNextItemWidth(4.0f * font);
     if (ImGui::BeginCombo(T_("Key##pitch"), kPitchKeys[ui.pitch_key])) {
@@ -6964,8 +7081,7 @@ void draw_pitch_editor(Session& session, UiState& ui) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(10.0f * font);
+    ImGui::SetNextItemWidth(wide - 4.0f * font);
     if (ImGui::BeginCombo(T_("Scale##pitch"), T_(kPitchScales[ui.pitch_scale]))) {
         for (int k = 0; k < 6; ++k) {
             if (ImGui::Selectable(T_(kPitchScales[k]), k == ui.pitch_scale)) {
@@ -6977,34 +7093,116 @@ void draw_pitch_editor(Session& session, UiState& ui) {
         }
         ImGui::EndCombo();
     }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(9.0f * font);
-    ImGui::SliderFloat("##pitch ratio", &ui.pitch_ratio, 0.0f, 100.0f, T_("Strength: %.0f%%"), ImGuiSliderFlags_AlwaysClamp);
+    // The goal of the notes: the scale, or the notes of a MIDI track (like "Receive MIDI").
+    {
+        std::string current = T_("The scale");
+        if (ui.pitch_midi_track >= 0 && static_cast<std::size_t>(ui.pitch_midi_track) < session.tracks().size()) {
+            current = std::to_string(ui.pitch_midi_track + 1) + ". " + session.tracks()[static_cast<std::size_t>(ui.pitch_midi_track)].name;
+        } else {
+            ui.pitch_midi_track = -1;
+        }
+        ImGui::SetNextItemWidth(wide);
+        if (ImGui::BeginCombo("##goal", current.c_str())) {
+            if (ImGui::Selectable(T_("The scale"), ui.pitch_midi_track < 0)) {
+                ui.pitch_midi_track = -1;
+            }
+            for (std::size_t t = 0; t < session.tracks().size(); ++t) {
+                if (!session.is_instrument_track(t)) {
+                    continue;
+                }
+                const std::string name = std::string(T_("The notes of a MIDI track")) + ": " + std::to_string(t + 1) +
+                                         ". " + session.tracks()[t].name;
+                if (ImGui::Selectable(name.c_str(), ui.pitch_midi_track == static_cast<int>(t))) {
+                    ui.pitch_midi_track = static_cast<int>(t);
+                }
+            }
+            ImGui::EndCombo();
+        }
+        tooltip(T_("Every sung note is pulled to the note that the chosen MIDI track plays at that moment."));
+    }
+    ImGui::SetNextItemWidth(wide);
+    ImGui::SliderFloat("##reference", &ui.pitch_reference, 415.0f, 466.0f, T_("Reference: %.1f Hz"));
+    if (double_clicked()) {
+        ui.pitch_reference = 440.0f;
+    }
+    tooltip(T_("The pitch of A4. 440 Hz is usual; old recordings and some bands tune lower or higher."));
+
+    ImGui::SeparatorText(T_("Segmentation"));
+    ImGui::SetNextItemWidth(wide);
+    if (ImGui::SliderFloat("##tolerance", &ui.pitch_tolerance, 10.0f, 200.0f, T_("Tolerance: %.0f cents"))) {
+        ui.pitch_notes = toh::core::find_pitch_notes(ui.pitch_curve, ui.pitch_tolerance / 100.0f);
+    }
+    tooltip(T_("How far the pitch may wander before a new note begins."));
+
+    ImGui::SeparatorText(T_("Correction"));
+    ImGui::SetNextItemWidth(wide);
+    ImGui::SliderFloat("##speed", &ui.pitch_speed, 0.0f, 400.0f, T_("Speed: %.0f ms"));
+    tooltip(T_("How fast a note is pulled onto its target. 0: at once, like a robot; slower keeps the slides into the notes."));
+    ImGui::SetNextItemWidth(wide);
+    ImGui::SliderFloat("##transition", &ui.pitch_transition, 0.0f, 400.0f, T_("Note transition: %.0f ms"));
+    tooltip(T_("How long the beginning and the end of a note stay natural, so the moves between notes sound sung."));
+    ImGui::SetNextItemWidth(wide);
+    ImGui::SliderFloat("##ratio", &ui.pitch_ratio, 0.0f, 100.0f, T_("Ratio: %.0f%%"));
     tooltip(T_("100%: every note lands exactly on the scale. Less keeps some of the singer's own pitch."));
+
+    ImGui::SeparatorText(T_("Vibrato"));
+    ImGui::SetNextItemWidth(wide);
+    ImGui::SliderFloat("##natural", &ui.pitch_natural, 0.0f, 200.0f, T_("Natural: %.0f%%"));
+    tooltip(T_("The singer's own vibrato and wobble: 0% flat, 100% as sung, 200% twice as much."));
+    ImGui::Checkbox(T_("Synthetic vibrato"), &ui.pitch_synth);
+    if (ui.pitch_synth) {
+        ImGui::SetNextItemWidth(wide);
+        ImGui::SliderFloat("##depth", &ui.pitch_vib_depth, 0.0f, 100.0f, T_("Depth: %.0f cents"));
+        ImGui::SetNextItemWidth(wide);
+        ImGui::SliderFloat("##rate", &ui.pitch_vib_rate, 1.0f, 10.0f, T_("Rate: %.1f Hz"));
+        ImGui::SetNextItemWidth(wide);
+        ImGui::SliderFloat("##delay", &ui.pitch_vib_delay, 0.0f, 1000.0f, T_("Delay: %.0f ms"));
+        ImGui::SetNextItemWidth(wide);
+        ImGui::SliderFloat("##attack", &ui.pitch_vib_attack, 0.0f, 1000.0f, T_("Attack: %.0f ms"));
+    }
+    ImGui::Spacing();
+    if (ImGui::Button(T_("Apply to every note"), ImVec2(wide, 0.0f))) {
+        apply(correction_line(session, ui, region));
+    }
+    tooltip(T_("Retunes every note with the settings above. The formants stay, so the voice keeps its colour. Ctrl+Z takes it back."));
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(wide * 0.55f);
+    ImGui::SliderInt("##shift", &ui.pitch_transpose, -12, 12, T_("Shift: %d semitones"));
     ImGui::SameLine();
-    if (ImGui::Button(T_("Correct to the scale"))) {
-        std::vector<toh::app::PitchMove> moves;
-        for (const toh::core::PitchNote& note : ui.pitch_notes) {
-            const double delta = (scale_target(note.pitch, ui.pitch_key, ui.pitch_scale) - note.pitch) *
-                                 static_cast<double>(ui.pitch_ratio) / 100.0;
-            if (std::fabs(delta) > 0.03) {
-                moves.push_back({note.start, note.length, delta});
+    if (ImGui::Button(T_("Shift everything")) && ui.pitch_transpose != 0) {
+        std::vector<float> target(ui.pitch_curve.midi.size(), -1.0f);
+        for (std::size_t h = 0; h < target.size(); ++h) {
+            if (ui.pitch_curve.midi[h] >= 0.0f) {
+                target[h] = ui.pitch_curve.midi[h] + static_cast<float>(ui.pitch_transpose);
             }
         }
-        std::string error;
-        if (!moves.empty() && session.shift_region_pitch(ui.pitch_track, ui.pitch_region, moves, &error)) {
-            ui.pitch_source = nullptr;  // analyse the tuned sound again
-        } else if (!moves.empty()) {
-            ui.error = error;
+        apply(target);
+    }
+    tooltip(T_("Moves the whole sound up or down by whole semitones, keeping the formants."));
+    if (ImGui::Button(T_("Notes to a MIDI track"), ImVec2(wide, 0.0f)) && !ui.pitch_notes.empty()) {
+        std::vector<toh::core::Note> notes;
+        for (const toh::core::PitchNote& found : ui.pitch_notes) {
+            toh::core::Note note;
+            note.start = std::llround(static_cast<double>(found.start) / region.rate);
+            note.length = std::max<std::int64_t>(std::llround(static_cast<double>(found.length) / region.rate), 1);
+            note.pitch = static_cast<std::uint8_t>(std::clamp(static_cast<int>(std::lround(found.pitch)), 0, 127));
+            note.velocity = 0.8f;
+            notes.push_back(note);
+        }
+        char name[300];
+        std::snprintf(name, sizeof(name), T_("Notes of %s"), session.tracks()[ui.pitch_track].name.c_str());
+        const std::size_t made = session.add_instrument_track(name, toh::core::Instrument::Keys, region.start, region.length);
+        if (made < session.tracks().size()) {
+            session.set_region_notes(made, 0, std::move(notes));
         }
     }
-    tooltip(T_("Moves every note towards the nearest note of the scale. Ctrl+Z takes it back."));
-    ImGui::SameLine();
+    tooltip(T_("Writes the notes found in the sound onto a new instrument track, for example to double the voice with a synthesizer."));
     ImGui::Text(T_("Notes: %d"), static_cast<int>(ui.pitch_notes.size()));
-    ImGui::TextDisabled("%s", T_("Drag a note up or down to retune it (Alt: freely). Double-click a note: cut it in two. "
-                                 "Wheel: zoom; over the keys: their height. Light rows: the notes of the scale."));
+    ImGui::EndChild();
+    ImGui::SameLine();
 
-    // The overview: the whole sound, with the part in view; a click goes there.
+    // ---- The right side: the overview and the grid ----
+    ImGui::BeginGroup();
     {
         const float strip_h = 2.2f * font;
         const ImVec2 at = ImGui::GetCursorScreenPos();
@@ -7071,10 +7269,14 @@ void draw_pitch_editor(Session& session, UiState& ui) {
     const bool hovered = ImGui::IsItemHovered();
     ImDrawList* d = ImGui::GetWindowDrawList();
     const auto pitch_y = [&](float pitch) { return origin.y + (127.5f - pitch) * key_h; };
+    const auto y_pitch = [&](float y) { return 127.5f - (y - origin.y) / key_h; };
     const auto frame_x = [&](double frame) {
         return origin.x + keys_w + static_cast<float>(frame / rate) * ui.pitch_px;
     };
-    // Rows of keys, darker for the black keys, with the names of the Cs.
+    const auto x_hop = [&](float x) {
+        const double frame = static_cast<double>(x - origin.x - keys_w) / ui.pitch_px * rate;
+        return static_cast<long long>(std::floor(frame / static_cast<double>(hop)));
+    };
     const float view_left = window_pos.x;
     for (int pitch = 0; pitch < 128; ++pitch) {
         const float top = origin.y + static_cast<float>(127 - pitch) * key_h;
@@ -7083,7 +7285,6 @@ void draw_pitch_editor(Session& session, UiState& ui) {
                          in_scale(pitch, ui.pitch_key, ui.pitch_scale) ? IM_COL32(44, 46, 58, 255)
                                                                        : IM_COL32(24, 24, 28, 255));
         d->AddLine(ImVec2(origin.x + keys_w, top + key_h), ImVec2(origin.x + width, top + key_h), IM_COL32(50, 50, 58, 255));
-        // The keys stay at the left edge while scrolling sideways.
         d->AddRectFilled(ImVec2(view_left, top), ImVec2(view_left + keys_w, top + key_h),
                          black ? IM_COL32(20, 20, 20, 255) : IM_COL32(215, 215, 215, 255));
         if (pitch % 12 == 0 && key_h >= font * 0.6f) {
@@ -7093,7 +7294,7 @@ void draw_pitch_editor(Session& session, UiState& ui) {
     }
     d->PushClipRect(ImVec2(view_left + keys_w, window_pos.y), ImVec2(view_left + 10000.0f, window_pos.y + 10000.0f), true);
 
-    // The notes, and the one under the mouse.
+    // The note under the mouse.
     int under = -1;
     for (std::size_t k = 0; k < ui.pitch_notes.size(); ++k) {
         const toh::core::PitchNote& note = ui.pitch_notes[k];
@@ -7104,82 +7305,132 @@ void draw_pitch_editor(Session& session, UiState& ui) {
             under = static_cast<int>(k);
         }
     }
-    // A double-click cuts a note in two (only here: the sound is not changed), so that each part
-    // can be moved by itself.
-    bool split_done = false;
-    if (hovered && under >= 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
-        toh::core::PitchNote& note = ui.pitch_notes[static_cast<std::size_t>(under)];
-        const auto at = static_cast<std::int64_t>(static_cast<double>(io.MousePos.x - origin.x - keys_w) / ui.pitch_px * rate);
-        const std::int64_t margin = static_cast<std::int64_t>(rate * 0.02);
-        if (at > note.start + margin && at < note.start + note.length - margin) {
-            const auto median = [&](std::int64_t from, std::int64_t to) {
-                std::vector<float> values;
-                const std::size_t hop = std::max<std::size_t>(ui.pitch_curve.hop, 1);
-                for (std::size_t h = static_cast<std::size_t>(from) / hop;
-                     h < ui.pitch_curve.midi.size() && static_cast<std::int64_t>(h * hop) < to; ++h) {
-                    if (ui.pitch_curve.midi[h] >= 0.0f) {
-                        values.push_back(ui.pitch_curve.midi[h]);
-                    }
-                }
-                if (values.empty()) {
-                    return note.pitch;
-                }
-                std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2), values.end());
-                return values[values.size() / 2];
-            };
-            toh::core::PitchNote second = note;
-            second.start = at;
-            second.length = note.start + note.length - at;
-            second.pitch = median(second.start, second.start + second.length);
-            note.length = at - note.start;
-            note.pitch = median(note.start, at);
-            ui.pitch_notes.insert(ui.pitch_notes.begin() + under + 1, second);
+    // Cutting a note in two (only here: the sound is not changed).
+    const auto split = [&](int index, float x) {
+        toh::core::PitchNote& note = ui.pitch_notes[static_cast<std::size_t>(index)];
+        const auto at = static_cast<std::int64_t>(static_cast<double>(x - origin.x - keys_w) / ui.pitch_px * rate);
+        const auto margin = static_cast<std::int64_t>(rate * 0.02);
+        if (at <= note.start + margin || at >= note.start + note.length - margin) {
+            return;
         }
-        under = -1;
-        split_done = true;
-        ui.pitch_drag = -1;
-    }
-    if (hovered && under >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-        ui.pitch_drag = under;
-        ui.pitch_drag_y = io.MousePos.y;
-    }
-    float drag_delta = 0.0f;
-    if (ui.pitch_drag >= 0 && ui.pitch_drag < static_cast<int>(ui.pitch_notes.size())) {
-        const toh::core::PitchNote& note = ui.pitch_notes[static_cast<std::size_t>(ui.pitch_drag)];
-        drag_delta = (ui.pitch_drag_y - io.MousePos.y) / key_h;
-        if (!io.KeyAlt) {
-            drag_delta = std::round(note.pitch + drag_delta) - note.pitch;  // to a whole semitone
-        }
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
-        ImGui::SetTooltip(T_("%s, %+.2f semitones"), pitch_name(std::clamp(static_cast<int>(std::lround(note.pitch + drag_delta)), 0, 127)).c_str(),
-                          static_cast<double>(drag_delta));
-        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            const std::size_t index = static_cast<std::size_t>(ui.pitch_drag);
-            ui.pitch_drag = -1;
-            if (std::fabs(drag_delta) > 0.01f) {
-                std::string error;
-                const toh::app::PitchMove move{note.start, note.length, static_cast<double>(drag_delta)};
-                if (session.shift_region_pitch(ui.pitch_track, ui.pitch_region, {move}, &error)) {
-                    // Keep the analysis: move that note and its part of the line along.
-                    ui.pitch_notes[index].pitch += drag_delta;
-                    const std::size_t hop = std::max<std::size_t>(ui.pitch_curve.hop, 1);
-                    for (std::size_t h = static_cast<std::size_t>(move.from) / hop;
-                         h < ui.pitch_curve.midi.size() && static_cast<std::int64_t>(h * hop) < move.from + move.length; ++h) {
-                        if (ui.pitch_curve.midi[h] >= 0.0f) {
-                            ui.pitch_curve.midi[h] += drag_delta;
-                        }
-                    }
-                    const RegionInfo& changed = session.tracks()[ui.pitch_track].regions[ui.pitch_region];
-                    ui.pitch_source = changed.source.get();
-                    ui.pitch_offset = changed.offset;
-                    ui.pitch_length = changed.length;
-                } else {
-                    ui.error = error;
+        const auto median = [&](std::int64_t from, std::int64_t to) {
+            std::vector<float> values;
+            for (std::size_t h = static_cast<std::size_t>(from) / hop;
+                 h < ui.pitch_curve.midi.size() && static_cast<std::int64_t>(h * hop) < to; ++h) {
+                if (ui.pitch_curve.midi[h] >= 0.0f) {
+                    values.push_back(ui.pitch_curve.midi[h]);
                 }
             }
-            drag_delta = 0.0f;
+            if (values.empty()) {
+                return note.pitch;
+            }
+            std::nth_element(values.begin(), values.begin() + static_cast<std::ptrdiff_t>(values.size() / 2), values.end());
+            return values[values.size() / 2];
+        };
+        toh::core::PitchNote second = note;
+        second.start = at;
+        second.length = note.start + note.length - at;
+        second.pitch = median(second.start, second.start + second.length);
+        note.length = at - note.start;
+        note.pitch = median(note.start, at);
+        ui.pitch_notes.insert(ui.pitch_notes.begin() + index + 1, second);
+    };
+    bool clicked_something = false;
+    if (hovered && under >= 0 && (ui.pitch_tool == 3 || (ui.pitch_tool == 0 && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))) &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        split(under, io.MousePos.x);
+        under = -1;
+        clicked_something = true;
+        ui.pitch_drag = -1;
+    }
+
+    // Moving notes.
+    float drag_delta = 0.0f;
+    if (ui.pitch_tool == 0) {
+        if (hovered && under >= 0 && !clicked_something && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            ui.pitch_drag = under;
+            ui.pitch_drag_y = io.MousePos.y;
+            clicked_something = true;
+        }
+        if (ui.pitch_drag >= 0 && ui.pitch_drag < static_cast<int>(ui.pitch_notes.size())) {
+            const toh::core::PitchNote note = ui.pitch_notes[static_cast<std::size_t>(ui.pitch_drag)];
+            drag_delta = (ui.pitch_drag_y - io.MousePos.y) / key_h;
+            if (!io.KeyAlt) {
+                drag_delta = std::round(note.pitch + drag_delta) - note.pitch;
+            }
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+            ImGui::SetTooltip(T_("%s, %+.2f semitones"),
+                              pitch_name(std::clamp(static_cast<int>(std::lround(note.pitch + drag_delta)), 0, 127)).c_str(),
+                              static_cast<double>(drag_delta));
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                ui.pitch_drag = -1;
+                if (std::fabs(drag_delta) > 0.01f) {
+                    std::vector<float> target(ui.pitch_curve.midi.size(), -1.0f);
+                    for (std::size_t h = static_cast<std::size_t>(note.start) / hop;
+                         h < target.size() && static_cast<std::int64_t>(h * hop) < note.start + note.length; ++h) {
+                        if (ui.pitch_curve.midi[h] >= 0.0f) {
+                            target[h] = ui.pitch_curve.midi[h] + drag_delta;
+                        }
+                    }
+                    apply(target);
+                }
+                drag_delta = 0.0f;
+            }
         }
     }
+
+    // Drawing with the pencil or a line.
+    if ((ui.pitch_tool == 1 || ui.pitch_tool == 2) && ui.pitch_drawn.size() == ui.pitch_curve.midi.size()) {
+        const long long hops = static_cast<long long>(ui.pitch_drawn.size());
+        const long long here = std::clamp<long long>(x_hop(io.MousePos.x), 0, std::max<long long>(hops - 1, 0));
+        const float pitch = std::clamp(y_pitch(io.MousePos.y), 0.0f, 127.0f);
+        if (hovered && !clicked_something && ImGui::IsMouseClicked(ImGuiMouseButton_Left) && hops > 0) {
+            ui.pitch_drawing = true;
+            std::fill(ui.pitch_drawn.begin(), ui.pitch_drawn.end(), -1.0f);
+            ui.pitch_last_hop = here;
+            ui.pitch_last_pitch = pitch;
+            ui.pitch_line_hop = here;
+            ui.pitch_line_pitch = pitch;
+            ui.pitch_drawn[static_cast<std::size_t>(here)] = pitch;
+            clicked_something = true;
+        }
+        if (ui.pitch_drawing) {
+            if (ui.pitch_tool == 1) {
+                // Every hop the mouse passed gets a value, in a straight line from the last one.
+                const long long from = ui.pitch_last_hop;
+                const long long steps = std::llabs(here - from);
+                for (long long s = 0; s <= steps; ++s) {
+                    const long long h = steps == 0 ? here : from + (here - from) * s / steps;
+                    const float t = steps == 0 ? 1.0f : static_cast<float>(s) / static_cast<float>(steps);
+                    ui.pitch_drawn[static_cast<std::size_t>(h)] = ui.pitch_last_pitch + (pitch - ui.pitch_last_pitch) * t;
+                }
+                ui.pitch_last_hop = here;
+                ui.pitch_last_pitch = pitch;
+            } else {
+                // A line from where the mouse went down to where it is.
+                std::fill(ui.pitch_drawn.begin(), ui.pitch_drawn.end(), -1.0f);
+                const long long a = ui.pitch_line_hop;
+                const long long steps = std::llabs(here - a);
+                for (long long s = 0; s <= steps; ++s) {
+                    const long long h = steps == 0 ? here : a + (here - a) * s / steps;
+                    const float t = steps == 0 ? 1.0f : static_cast<float>(s) / static_cast<float>(steps);
+                    ui.pitch_drawn[static_cast<std::size_t>(h)] = ui.pitch_line_pitch + (pitch - ui.pitch_line_pitch) * t;
+                }
+            }
+            if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+                ui.pitch_drawing = false;
+                apply(ui.pitch_drawn);
+                std::fill(ui.pitch_drawn.begin(), ui.pitch_drawn.end(), -1.0f);
+            }
+        }
+        if (hovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            ImGui::SetTooltip("%s %+d", pitch_name(std::clamp(static_cast<int>(std::lround(pitch)), 0, 127)).c_str(),
+                              static_cast<int>(std::lround((pitch - std::round(pitch)) * 100.0f)));
+        }
+    }
+
+    // The notes.
     for (std::size_t k = 0; k < ui.pitch_notes.size(); ++k) {
         const toh::core::PitchNote& note = ui.pitch_notes[k];
         const float x0 = frame_x(static_cast<double>(note.start));
@@ -7188,20 +7439,19 @@ void draw_pitch_editor(Session& session, UiState& ui) {
         const float shown = note.pitch + (dragged ? drag_delta : 0.0f);
         const float y = pitch_y(shown);
         const ImU32 fill = dragged ? IM_COL32(255, 170, 60, 200)
-                           : static_cast<int>(k) == under ? IM_COL32(120, 190, 255, 200)
-                                                          : IM_COL32(80, 150, 230, 150);
+                           : static_cast<int>(k) == under ? IM_COL32(255, 160, 110, 170)
+                                                          : IM_COL32(230, 120, 80, 110);
         d->AddRectFilled(ImVec2(x0, y - key_h * 0.45f), ImVec2(x1, y + key_h * 0.45f), fill, 3.0f);
-        // Where the scale would put it.
+        d->AddRect(ImVec2(x0, y - key_h * 0.45f), ImVec2(x1, y + key_h * 0.45f), IM_COL32(255, 140, 90, 230), 3.0f);
         const double goal = scale_target(shown, ui.pitch_key, ui.pitch_scale);
-        if (std::fabs(goal - shown) > 0.03) {
+        if (std::fabs(goal - shown) > 0.03 && ui.pitch_midi_track < 0) {
             const float gy = pitch_y(static_cast<float>(goal));
             d->AddLine(ImVec2(x0, gy), ImVec2(x1, gy), IM_COL32(120, 230, 120, 160), 1.0f);
         }
-        if (dragged) {  // where it was
+        if (dragged) {
             const float was = pitch_y(note.pitch);
             d->AddRect(ImVec2(x0, was - key_h * 0.45f), ImVec2(x1, was + key_h * 0.45f), IM_COL32(255, 255, 255, 90), 3.0f);
         }
-        // How far the note is from the nearest semitone, in cents.
         if (x1 - x0 > 3.5f * font && key_h >= font * 0.7f) {
             char cents[32];
             std::snprintf(cents, sizeof(cents), "%s %+d", pitch_name(std::clamp(static_cast<int>(std::lround(shown)), 0, 127)).c_str(),
@@ -7210,7 +7460,6 @@ void draw_pitch_editor(Session& session, UiState& ui) {
         }
     }
     // The line of the pitch that sounds.
-    const std::size_t hop = std::max<std::size_t>(ui.pitch_curve.hop, 1);
     for (std::size_t h = 1; h < ui.pitch_curve.midi.size(); ++h) {
         const float a = ui.pitch_curve.midi[h - 1];
         const float b = ui.pitch_curve.midi[h];
@@ -7218,7 +7467,17 @@ void draw_pitch_editor(Session& session, UiState& ui) {
             continue;
         }
         d->AddLine(ImVec2(frame_x(static_cast<double>((h - 1) * hop)), pitch_y(a)),
-                   ImVec2(frame_x(static_cast<double>(h * hop)), pitch_y(b)), IM_COL32(255, 230, 120, 230), 1.5f);
+                   ImVec2(frame_x(static_cast<double>(h * hop)), pitch_y(b)), IM_COL32(150, 230, 90, 230), 1.5f);
+    }
+    // What is being drawn.
+    for (std::size_t h = 1; h < ui.pitch_drawn.size(); ++h) {
+        const float a = ui.pitch_drawn[h - 1];
+        const float b = ui.pitch_drawn[h];
+        if (a < 0.0f || b < 0.0f) {
+            continue;
+        }
+        d->AddLine(ImVec2(frame_x(static_cast<double>((h - 1) * hop)), pitch_y(a)),
+                   ImVec2(frame_x(static_cast<double>(h * hop)), pitch_y(b)), IM_COL32(255, 255, 255, 240), 2.5f);
     }
     // The playhead.
     const double play = static_cast<double>(session.position_frames() - region.start) * region.rate;
@@ -7227,13 +7486,13 @@ void draw_pitch_editor(Session& session, UiState& ui) {
         d->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + height), IM_COL32(255, 80, 80, 220), 1.5f);
     }
     d->PopClipRect();
-    if (hovered && !split_done && under < 0 && ui.pitch_drag < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
-        io.MousePos.x > window_pos.x + keys_w) {
-        // A click elsewhere moves the playhead there.
+    if (hovered && !clicked_something && under < 0 && ui.pitch_drag < 0 && ui.pitch_tool == 0 &&
+        ImGui::IsMouseClicked(ImGuiMouseButton_Left) && io.MousePos.x > window_pos.x + keys_w) {
         const double frame = static_cast<double>(io.MousePos.x - origin.x - keys_w) / ui.pitch_px * rate;
         session.seek_frames(region.start + static_cast<std::int64_t>(std::llround(frame / region.rate)));
     }
     ImGui::EndChild();
+    ImGui::EndGroup();
     ImGui::End();
 }
 
