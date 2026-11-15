@@ -75,6 +75,10 @@ struct Settings {
     std::uint32_t buffer_frames = 256;
     /// Threads that compute the tracks: -1 automatic, 1 only the audio thread.
     int audio_threads = -1;
+    /// The library on the left: sounds, instruments, parts, effects and files to drag.
+    bool show_library = true;
+    /// The folder of "My files" in the library (UTF-8); empty for the Music folder.
+    std::string library_folder;
     float master_gain = 1.0f;
     float input_gain = 1.0f;
     /// Latency correction for recordings in frames; negative means "use the default".

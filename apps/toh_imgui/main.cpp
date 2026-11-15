@@ -4,6 +4,7 @@
 // not contain audio or project logic, so that other user interfaces stay equivalent.
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -23,11 +24,13 @@
 
 #include "toh/app/build_info.h"
 #include "toh/app/i18n.h"
+#include "toh/app/library.h"
 #include "toh/app/log.h"
 #include "toh/app/midi_input.h"
 #include "toh/app/settings.h"
 #include "toh/app/session.h"
 #include "toh/core/clip.h"
+#include "toh/core/stock_sounds.h"
 
 namespace {
 
@@ -44,6 +47,27 @@ inline const char* T_(const char* english) { return toh::app::tr(english); }
 // ---- Files waiting to be loaded ----------------------------------------------------------
 
 // The file dialog may answer on another thread, so the list is protected by a mutex.
+// A file or folder shown under "My files" in the library.
+struct LibraryFile {
+    std::filesystem::path path;
+    bool folder = false;
+};
+
+// What is dragged from the library onto the tracks.
+struct LibraryDrag {
+    int kind = 0;  // 0 a stock sound, 1 an instrument (program), 2 a part, 3 an effect, 4 a file
+    int index = 0;
+};
+constexpr const char* kLibraryPayload = "TOH_LIBRARY";
+
+// A drop from the library, carried out after the tracks are drawn (it may add a track).
+struct PendingDrop {
+    bool active = false;
+    LibraryDrag drag;
+    std::size_t track = 0;  // tracks().size(): a new track
+    std::int64_t frame = 0;
+};
+
 struct PendingFiles {
     std::mutex mutex;
     std::vector<std::string> paths;  // UTF-8
@@ -192,6 +216,11 @@ struct UiState {
     std::size_t sampler_track = 0;      // the track that gets the sound chosen in the dialog
     std::int64_t tempo_frame = 0;       // the tempo menu of the ruler: where, which tempo, and
     float track_speed = 100.0f;         // the speed chosen in a track's speed box, in percent
+    float library_width = 0.0f;         // the library panel on the left
+    std::filesystem::path library_dir;  // the folder shown under "My files"
+    std::vector<LibraryFile> library_files;
+    bool library_listed = false;
+    PendingDrop pending_drop;
     bool middle_pan = false;            // the middle mouse button drags the timeline
     float track_zoom = 1.0f;            // the height of the tracks (1 = normal)
     bool ruler_hovered = false;         // the mouse was over the ruler in the last frame
@@ -1360,6 +1389,354 @@ void add_effect(Session& session, UiState& ui, std::size_t track, const toh::plu
     if (!session.add_effect(track, info, &error)) {
         ui.error = std::string(T_("Effect: ")) + error;
     }
+}
+
+// ---- Library -----------------------------------------------------------------------------
+
+std::string lower_extension(const std::filesystem::path& path) {
+    std::string extension = path.extension().u8string();
+    for (char& c : extension) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return extension;
+}
+
+bool is_audio_file(const std::filesystem::path& path) {
+    const std::string e = lower_extension(path);
+    return e == ".wav" || e == ".flac" || e == ".mp3" || e == ".ogg" || e == ".aif" || e == ".aiff";
+}
+
+bool is_midi_path(const std::filesystem::path& path) {
+    const std::string e = lower_extension(path);
+    return e == ".mid" || e == ".midi";
+}
+
+// The folder "My files" starts in: the one chosen, or the user's Music folder.
+std::filesystem::path library_root(const UiState& ui) {
+    if (!ui.settings.library_folder.empty()) {
+        return std::filesystem::u8path(ui.settings.library_folder);
+    }
+    const char* music = SDL_GetUserFolder(SDL_FOLDER_MUSIC);
+    return music != nullptr ? std::filesystem::u8path(music) : std::filesystem::path();
+}
+
+// Reads the folders, audio files and MIDI files of the current folder of "My files".
+void list_library_folder(UiState& ui) {
+    ui.library_files.clear();
+    ui.library_listed = true;
+    if (ui.library_dir.empty()) {
+        ui.library_dir = library_root(ui);
+    }
+    std::error_code code;
+    std::filesystem::directory_iterator it(ui.library_dir,
+                                           std::filesystem::directory_options::skip_permission_denied, code);
+    for (; !code && it != std::filesystem::directory_iterator() && ui.library_files.size() < 2000;
+         it.increment(code)) {
+        std::error_code type_code;
+        const bool folder = it->is_directory(type_code);
+        if (folder || is_audio_file(it->path()) || is_midi_path(it->path())) {
+            ui.library_files.push_back(LibraryFile{it->path(), folder});
+        }
+    }
+    std::sort(ui.library_files.begin(), ui.library_files.end(), [](const LibraryFile& a, const LibraryFile& b) {
+        if (a.folder != b.folder) {
+            return a.folder;
+        }
+        return a.path.filename().u8string() < b.path.filename().u8string();
+    });
+}
+
+// What a drop from the library does: on a track it goes onto that track where it was let go;
+// below the tracks (track = tracks().size()) it makes a new track.
+void handle_library_drop(Session& session, UiState& ui, const LibraryDrag& drag, std::size_t track,
+                         std::int64_t frame) {
+    std::string error;
+    const bool existing = track < session.tracks().size();
+    frame = std::max<std::int64_t>(frame, 0);
+    const auto has_sound = [&session](std::size_t index) {
+        for (const RegionInfo& region : session.tracks()[index].regions) {
+            if (!region.has_notes()) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const auto new_track = [&session, &ui](const std::string& name) {
+        const std::size_t index = session.add_empty_track(name);
+        if (index >= session.tracks().size()) {
+            ui.error = T_("The track limit is reached.");
+        }
+        return index;
+    };
+    switch (drag.kind) {
+        case 0: {  // a stock sound
+            if (drag.index < 0 || static_cast<std::size_t>(drag.index) >= toh::core::stock_sound_count()) {
+                return;
+            }
+            const auto index = static_cast<std::size_t>(drag.index);
+            const std::string name = T_(toh::core::stock_sound_info(index).name);
+            const std::size_t target = existing && !session.is_instrument_track(track) ? track : new_track(name);
+            if (target >= session.tracks().size()) {
+                return;
+            }
+            if (!session.add_clip_region(target, frame, name,
+                                         toh::core::make_stock_sound(index, session.sample_rate(), session.config().channels),
+                                         &error)) {
+                ui.error = error;
+            }
+            break;
+        }
+        case 1: {  // an instrument: it plays the notes of an instrument track, or starts a new one
+            const int program = drag.index;
+            if (existing && session.is_instrument_track(track)) {
+                session.set_track_program(track, program);
+            } else {
+                const std::int64_t length = std::llround(session.bar_frames() * 4.0);
+                const std::size_t index = session.add_instrument_track(
+                    sound_name(session, program, toh::core::Instrument::Keys), toh::core::Instrument::Keys, frame,
+                    length, program);
+                if (index >= session.tracks().size()) {
+                    ui.error = T_("The track limit is reached.");
+                }
+            }
+            break;
+        }
+        case 2: {  // a ready-made part
+            const auto& parts = toh::app::library_parts();
+            if (drag.index < 0 || static_cast<std::size_t>(drag.index) >= parts.size()) {
+                return;
+            }
+            const toh::app::PartInfo& part = parts[static_cast<std::size_t>(drag.index)];
+            std::int64_t length = 0;
+            std::vector<toh::core::Note> notes = toh::app::part_notes(session, part, frame, &length);
+            if (existing && !has_sound(track)) {
+                const bool was_empty = session.tracks()[track].regions.empty();
+                session.add_note_region(track, frame, length, T_(part.name), std::move(notes));
+                if (was_empty) {
+                    session.set_track_program(track, part.program);
+                }
+            } else {
+                const std::size_t index = session.add_instrument_track(T_(part.name), toh::core::Instrument::Keys,
+                                                                       frame, length, part.program);
+                if (index >= session.tracks().size()) {
+                    ui.error = T_("The track limit is reached.");
+                    return;
+                }
+                session.set_region_notes(index, 0, std::move(notes));
+            }
+            break;
+        }
+        case 3: {  // an effect
+            if (!existing) {
+                ui.error = T_("Drop an effect onto a track.");
+                return;
+            }
+            if (drag.index >= 0 && static_cast<std::size_t>(drag.index) < ui.plugin_list.size()) {
+                add_effect(session, ui, track, ui.plugin_list[static_cast<std::size_t>(drag.index)]);
+            }
+            break;
+        }
+        case 4: {  // a file
+            if (drag.index < 0 || static_cast<std::size_t>(drag.index) >= ui.library_files.size()) {
+                return;
+            }
+            const std::filesystem::path path = ui.library_files[static_cast<std::size_t>(drag.index)].path;
+            if (is_midi_path(path)) {
+                if (!session.import_midi(path, &error)) {
+                    ui.error = error;
+                }
+                break;
+            }
+            const std::string name = path.filename().u8string();
+            const std::size_t target = existing && !session.is_instrument_track(track) ? track : new_track(name);
+            if (target >= session.tracks().size()) {
+                return;
+            }
+            if (!session.add_file_region(target, path, frame, &error)) {
+                ui.error = error;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// One row of the library that can be dragged onto the tracks.
+void library_item(const std::string& text, const std::string& id, LibraryDrag drag, const char* tip = nullptr) {
+    ImGui::Selectable((text + "##" + id).c_str());
+    if (tip != nullptr) {
+        tooltip(tip);
+    }
+    if (ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload(kLibraryPayload, &drag, sizeof(drag));
+        ImGui::TextUnformatted(text.c_str());
+        ImGui::EndDragDropSource();
+    }
+}
+
+// Takes a drop from the library on the last item, to be carried out after the tracks.
+void library_drop_target(UiState& ui, std::size_t track, std::int64_t frame) {
+    if (!ImGui::BeginDragDropTarget()) {
+        return;
+    }
+    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kLibraryPayload)) {
+        ui.pending_drop.active = true;
+        ui.pending_drop.drag = *static_cast<const LibraryDrag*>(payload->Data);
+        ui.pending_drop.track = track;
+        ui.pending_drop.frame = frame;
+    }
+    ImGui::EndDragDropTarget();
+}
+
+// The library on the left: stock sounds, instruments, ready-made parts, effects and the
+// user's files, all to drag onto the tracks.
+void draw_library(Session& session, UiState& ui, float height) {
+    const float font = ImGui::GetFontSize();
+    if (ui.library_width <= 0.0f) {
+        ui.library_width = 16.0f * font;
+    }
+    ImGui::BeginChild("library", ImVec2(ui.library_width, height), ImGuiChildFlags_Borders | ImGuiChildFlags_ResizeX);
+    ui.library_width = std::clamp(ImGui::GetWindowWidth(), 8.0f * font, 40.0f * font);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextUnformatted(T_("Library"));
+    ImGui::SameLine();
+    if (ImGui::SmallButton("<<")) {
+        ui.settings.show_library = false;
+        ui.settings_changed = true;
+    }
+    tooltip(T_("Hide the library (View > Library shows it again)."));
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", T_("Drag onto a track, or below the tracks for a new one."));
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+    ImGui::BeginChild("library items");
+
+    if (ImGui::CollapsingHeader(T_("Sounds"), ImGuiTreeNodeFlags_DefaultOpen)) {
+        std::string category;
+        bool open = false;
+        for (std::size_t k = 0; k < toh::core::stock_sound_count(); ++k) {
+            const toh::core::StockSoundInfo info = toh::core::stock_sound_info(k);
+            if (category != info.category) {
+                if (open) {
+                    ImGui::TreePop();
+                }
+                category = info.category;
+                open = ImGui::TreeNode((std::string(T_(info.category)) + "##sounds").c_str());
+            }
+            if (open) {
+                library_item(T_(info.name), "sound" + std::to_string(k), LibraryDrag{0, static_cast<int>(k)});
+            }
+        }
+        if (open) {
+            ImGui::TreePop();
+        }
+    }
+
+    if (ImGui::CollapsingHeader(T_("Instruments"))) {
+        const auto& font_ptr = session.soundfont();
+        if (!font_ptr) {
+            ImGui::TextDisabled("%s", T_("No SoundFont: only the simple synthesizers"));
+        } else {
+            static const char* const families[] = {
+                "Pianos", "Chromatic percussion", "Organs", "Guitars", "Basses", "Strings",
+                "Ensembles", "Brass", "Reeds", "Pipes", "Synth leads", "Synth pads",
+                "Synth effects", "Ethnic", "Percussive", "Sound effects"};
+            for (int family = 0; family < 16; ++family) {
+                if (!ImGui::TreeNode((std::string(T_(families[family])) + "##library").c_str())) {
+                    continue;
+                }
+                for (int p = family * 8; p < family * 8 + 8; ++p) {
+                    if (const auto* preset = font_ptr->find(p)) {
+                        library_item(preset->name, "program" + std::to_string(p), LibraryDrag{1, p});
+                    }
+                }
+                ImGui::TreePop();
+            }
+            if (font_ptr->find(toh::core::SoundFont::kDrums) != nullptr) {
+                library_item(T_("Drums"), "program128", LibraryDrag{1, toh::core::SoundFont::kDrums});
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader(T_("Parts"))) {
+        const auto& parts = toh::app::library_parts();
+        std::string category;
+        bool open = false;
+        for (std::size_t k = 0; k < parts.size(); ++k) {
+            if (category != parts[k].category) {
+                if (open) {
+                    ImGui::TreePop();
+                }
+                category = parts[k].category;
+                open = ImGui::TreeNode((std::string(T_(parts[k].category)) + "##parts").c_str());
+            }
+            if (open) {
+                library_item(T_(parts[k].name), "part" + std::to_string(k), LibraryDrag{2, static_cast<int>(k)});
+            }
+        }
+        if (open) {
+            ImGui::TreePop();
+        }
+    }
+
+    if (ImGui::CollapsingHeader(T_("Effects"))) {
+        if (!ui.plugins_scanned) {
+            scan_plugins(ui);
+        }
+        for (std::size_t k = 0; k < ui.plugin_list.size(); ++k) {
+            const auto& info = ui.plugin_list[k];
+            if (info.instrument) {
+                continue;
+            }
+            library_item(info.name, "effect" + std::to_string(k), LibraryDrag{3, static_cast<int>(k)},
+                         info.description.empty() ? nullptr : info.description.c_str());
+        }
+    }
+
+    if (ImGui::CollapsingHeader(T_("My files"))) {
+        if (!ui.library_listed) {
+            list_library_folder(ui);
+        }
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextDisabled("%s", ui.library_dir.u8string().c_str());
+        ImGui::PopTextWrapPos();
+        if (ImGui::SmallButton(T_("Up"))) {
+            ui.library_dir = ui.library_dir.parent_path();
+            list_library_folder(ui);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T_("Refresh"))) {
+            list_library_folder(ui);
+        }
+        ImGui::SameLine();
+        if (ImGui::SmallButton(T_("Start here"))) {
+            ui.settings.library_folder = ui.library_dir.u8string();
+            ui.settings_changed = true;
+        }
+        tooltip(T_("Open \"My files\" in this folder from now on."));
+        if (ui.library_files.empty()) {
+            ImGui::TextDisabled("%s", T_("No audio or MIDI files here."));
+        }
+        for (std::size_t k = 0; k < ui.library_files.size(); ++k) {
+            const LibraryFile& file = ui.library_files[k];
+            const std::string name = file.path.filename().u8string();
+            if (file.folder) {
+                const std::string label = "[" + name + "]##folder" + std::to_string(k);
+                if (ImGui::Selectable(label.c_str(), false, ImGuiSelectableFlags_AllowDoubleClick) &&
+                    ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                    ui.library_dir = file.path;
+                    list_library_folder(ui);
+                    break;
+                }
+                tooltip(T_("Double-click to open the folder."));
+            } else {
+                library_item(name, "file" + std::to_string(k), LibraryDrag{4, static_cast<int>(k)});
+            }
+        }
+    }
+    ImGui::EndChild();
+    ImGui::EndChild();
 }
 
 void add_effect_from_file(Session& session, UiState& ui, const std::string& path) {
@@ -2802,6 +3179,9 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         }
         ImGui::Separator();
         ImGui::MenuItem(T_("Follow the playhead"), nullptr, &ui.follow);
+        if (ImGui::MenuItem(T_("Library"), nullptr, &ui.settings.show_library)) {
+            ui.settings_changed = true;
+        }
         const bool full_screen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
         if (ImGui::MenuItem(T_("Full screen"), key_label(ui, Action::FullScreen), full_screen)) {
             SDL_SetWindowFullscreen(window, !full_screen);
@@ -4276,6 +4656,9 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
     const float width = view.lane_width;
     ImGui::InvisibleButton("lane", ImVec2(width, row_height));
     const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::GetDragDropPayload() != nullptr) {
+        library_drop_target(ui, track_index, magnet_seek_frame(session, ui, x_to_frame(session, view, io.MousePos.x)));
+    }
     const bool dragging_here = ui.drag != DragKind::None && ui.drag_owner == track_index;
     if (ui.lane_spans.size() <= track_index) {
         ui.lane_spans.resize(track_index + 1);
@@ -5849,9 +6232,26 @@ void draw_tracks(Session& session, UiState& ui) {
         if (draw_track_header(session, ui, i, header_width, row_height)) {
             remove_index = i;
         }
+        library_drop_target(ui, i, session.position_frames());  // on the header: at the playhead
         ImGui::SameLine();
         draw_lane(session, ui, i, row_height);
         ImGui::PopID();
+    }
+
+    // Below the tracks, while something is dragged from the library: a new track.
+    if (ImGui::GetDragDropPayload() != nullptr) {
+        const ImVec2 free_size(std::max(ImGui::GetContentRegionAvail().x, 1.0f),
+                               std::max(ImGui::GetContentRegionAvail().y, 3.0f * font));
+        ImGui::InvisibleButton("##library drop", free_size);
+        const std::int64_t frame = io.MousePos.x > view.lane_origin_x
+                                       ? magnet_seek_frame(session, ui, x_to_frame(session, view, io.MousePos.x))
+                                       : session.position_frames();
+        library_drop_target(ui, session.tracks().size(), frame);
+    }
+    if (ui.pending_drop.active) {
+        const PendingDrop drop = ui.pending_drop;
+        ui.pending_drop.active = false;
+        handle_library_drop(session, ui, drop.drag, drop.track, drop.frame);
     }
 
     if (remove_index < session.tracks().size()) {
@@ -6312,6 +6712,10 @@ int main(int argc, char* argv[]) {
             const ImGuiStyle& style = ImGui::GetStyle();
             const float below = 0.8f * ImGui::GetFontSize() + ImGui::GetFrameHeight() +
                                 3.0f * style.ItemSpacing.y + 2.0f;
+            if (ui.settings.show_library) {
+                draw_library(session, ui, -below);
+                ImGui::SameLine();
+            }
             ImGui::BeginChild("tracks", ImVec2(0.0f, -below), ImGuiChildFlags_None,
                               ui.selected ? ImGuiWindowFlags_None
                                           : ImGuiWindowFlags_NoScrollWithMouse);

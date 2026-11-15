@@ -8,6 +8,7 @@ endif()
 add_library(toh_app STATIC
     src/build_info.cpp
     src/i18n.cpp
+    src/library.cpp
     src/log.cpp
     src/midi_file.cpp
     src/midi_input.cpp

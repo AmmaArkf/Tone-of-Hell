@@ -551,11 +551,97 @@ bool Session::add_track_from_file(const std::filesystem::path& path, std::string
         set_error(error, "the track limit is reached");
         return false;
     }
+    Overview overview;
+    auto clip = decode_to_cache(path, &overview, error);
+    if (!clip) {
+        return false;
+    }
+    return add_track(path.filename().u8string(), std::move(clip), error, &overview);
+}
+
+bool Session::add_clip_region(std::size_t track, std::int64_t start, std::string name,
+                              std::shared_ptr<const core::ClipData> clip, std::string* error,
+                              Overview* overview) {
+    if (track >= tracks_.size()) {
+        set_error(error, "the track does not exist");
+        return false;
+    }
+    if (is_instrument_track(track)) {
+        set_error(error, "a track with notes cannot hold recorded sound");
+        return false;
+    }
+    if (!clip || clip->channels != config_.channels || clip->sample_rate != config_.sample_rate ||
+        clip->frames() <= 0 || clip->notes != nullptr) {
+        set_error(error, "the sound does not match the session format");
+        return false;
+    }
+    auto source = std::make_shared<Source>();
+    source->name = std::move(name);
+    source->overview = overview != nullptr ? std::move(*overview) : make_overview(*clip);
+    source->clip = std::move(clip);
+    RegionInfo region;
+    region.start = std::max<std::int64_t>(start, 0);
+    region.length = source->clip->frames();
+    region.source = std::move(source);
+    auto& regions = tracks_[track].regions;
+    regions.push_back(std::move(region));
+    std::stable_sort(regions.begin(), regions.end(),
+                     [](const RegionInfo& a, const RegionInfo& b) { return a.start < b.start; });
+    sync_track_regions(track);
+    update_length();
+    return true;
+}
+
+bool Session::add_file_region(std::size_t track, const std::filesystem::path& path, std::int64_t start,
+                              std::string* error) {
+    if (track >= tracks_.size()) {
+        set_error(error, "the track does not exist");
+        return false;
+    }
+    Overview overview;
+    auto clip = decode_to_cache(path, &overview, error);
+    if (!clip) {
+        return false;
+    }
+    return add_clip_region(track, start, path.filename().u8string(), std::move(clip), error, &overview);
+}
+
+bool Session::add_note_region(std::size_t track, std::int64_t start, std::int64_t length, std::string name,
+                              std::vector<core::Note> notes) {
+    if (track >= tracks_.size() || length <= 0) {
+        return false;
+    }
+    auto& regions = tracks_[track].regions;
+    for (const RegionInfo& region : regions) {
+        if (!region.has_notes()) {
+            return false;  // a track with recorded sound
+        }
+    }
+    RegionInfo region;
+    region.source = note_source(std::move(name), {}, length, config_.channels, config_.sample_rate);
+    region.start = std::max<std::int64_t>(start, 0);
+    region.length = length;
+    const Source* const added = region.source.get();
+    regions.push_back(std::move(region));
+    std::stable_sort(regions.begin(), regions.end(),
+                     [](const RegionInfo& a, const RegionInfo& b) { return a.start < b.start; });
+    for (std::size_t r = 0; r < regions.size(); ++r) {
+        if (regions[r].source.get() == added) {
+            set_region_notes(track, r, std::move(notes));  // sorts and checks them, and syncs
+            break;
+        }
+    }
+    update_length();
+    return true;
+}
+
+std::shared_ptr<const core::ClipData> Session::decode_to_cache(const std::filesystem::path& path,
+                                                               Overview* overview, std::string* error) {
     CacheWriter writer;
     const std::filesystem::path cache = new_cache_file("import");
     if (cache.empty() || !writer.open(cache, config_.channels, config_.sample_rate)) {
         set_error(error, "cannot create a cache file in the folder for temporary files");
-        return false;
+        return nullptr;
     }
     const std::int64_t frames = audio::decode_stream(
         path, config_.sample_rate, config_.channels,
@@ -563,24 +649,19 @@ bool Session::add_track_from_file(const std::filesystem::path& path, std::string
         error);
     if (frames < 0) {
         writer.discard();
-        return false;
+        return nullptr;
     }
     if (writer.failed()) {
         writer.discard();
         set_error(error, "cannot write the cache file (is the disk full?)");
-        return false;
+        return nullptr;
     }
     if (frames == 0) {
         writer.discard();
         set_error(error, "the file contains no audio");
-        return false;
+        return nullptr;
     }
-    Overview overview;
-    auto clip = writer.finish(&overview, error);
-    if (!clip) {
-        return false;
-    }
-    return add_track(path.filename().u8string(), std::move(clip), error, &overview);
+    return writer.finish(overview, error);
 }
 
 bool Session::add_track(std::string name, std::shared_ptr<const core::ClipData> clip,

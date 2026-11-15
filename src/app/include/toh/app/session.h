@@ -231,6 +231,19 @@ public:
     /// frames long. Returns its index, or tracks().size() when the track limit is reached.
     std::size_t add_instrument_track(std::string name, core::Instrument instrument,
                                      std::int64_t start, std::int64_t length, int program = -1);
+    /// Puts a sound that is already in memory (a stock sound of the library, for example) onto
+    /// a track without notes, as a new region from `start`. `overview` may hand over a
+    /// waveform overview that is already built.
+    bool add_clip_region(std::size_t track, std::int64_t start, std::string name,
+                         std::shared_ptr<const core::ClipData> clip, std::string* error = nullptr,
+                         Overview* overview = nullptr);
+    /// Decodes an audio file (like add_track_from_file) onto a track without notes, from `start`.
+    bool add_file_region(std::size_t track, const std::filesystem::path& path, std::int64_t start,
+                         std::string* error = nullptr);
+    /// Adds a note region `length` frames long from `start` with `notes` (their times count
+    /// from the region's beginning) on a track without recorded sound.
+    bool add_note_region(std::size_t track, std::int64_t start, std::int64_t length, std::string name,
+                         std::vector<core::Note> notes);
     /// Replaces the notes of a note region. Notes are sorted by start; notes without a length,
     /// outside the region's note list or above pitch 127 are dropped, velocities are limited
     /// to 0..1. Returns false for an audio region.
@@ -735,6 +748,9 @@ private:
     std::vector<core::TempoChange> tempo_changes_;  // sorted by frame, all after frame 0
     std::vector<Marker> markers_;                   // sorted by frame
     void sort_markers();
+    /// Decodes a file into a new cache file; null on failure.
+    std::shared_ptr<const core::ClipData> decode_to_cache(const std::filesystem::path& path,
+                                                          Overview* overview, std::string* error);
     std::shared_ptr<const core::TempoMap> tempo_map_;
     void rebuild_tempo();
     // The instrument plugin each live key went to, so that its end goes there too.

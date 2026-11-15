@@ -2,6 +2,15 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.14
+
+- The library: a panel on the left (View > Library, or its "<<" button hides it; its edge can be dragged). Everything in it is dragged onto a track (placed where it is let go, with the magnet), onto a track header (at the playhead) or below the tracks (a new track):
+  - Sounds: 29 stock sounds that Tone of Hell synthesizes itself (drums, percussion, effects such as risers and impacts, tones such as a bass, a pad and a bell);
+  - Instruments: the General MIDI instruments and drums of the SoundFont (onto a note track: it plays them; elsewhere: a new instrument track);
+  - Parts: ready-made drum rhythms, bass lines, chords and arpeggios that follow the tempo of the project;
+  - Effects: the built-in and the found plugins;
+  - My files: the audio and MIDI files of the Music folder or any other ("Start here" remembers it).
+
 ## 0.3.13
 
 - "Threads for the sound" set to Automatic takes at most half of the processor's threads. The helper threads sleep while nothing plays, so an idle program stays on one or two threads.
