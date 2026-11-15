@@ -4,6 +4,14 @@ All notable changes to this project are listed here, newest first. The version n
 
 ## 0.3.17
 
+A release with everything since 0.3.0. In short:
+
+- Level 2 begins: markers on the timeline (M, Ctrl+Left and Ctrl+Right); the speed of one track; a library on the left with 29 synthesized stock sounds, the General MIDI instruments, ready-made parts (drum rhythms, bass lines, chords, arpeggios), effects and your own files, all dragged onto the tracks, with favorites; the effects of the selected track with all their settings under the library.
+- Speed: several processor cores compute the tracks (Settings > Performance), and instrument tracks with recorded instruments (SoundFont) take a fraction of the time they took. A buffer size setting and a load meter in the status bar.
+- Editing: copy, cut and paste of notes in the piano roll, a full-screen piano roll whose grid follows tempo changes, tempo changes that can be undone, the playhead sticking to region edges with the magnet, a click on empty space deselecting the tracks, the middle mouse button dragging the view, the wheel zooming the axis under the mouse, and a "Hear yourself" button for recording.
+
+The details of every step follow.
+
 - Favorites in the library: a star in front of every sound, instrument, part, effect and file marks it; the starred ones are together under Favorites at the top, and "Only favorites" hides the rest. The favorites are kept in the settings.
 
 ## 0.3.16
