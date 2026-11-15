@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.22
+
+- Groups of tracks: select tracks and right-click the track area > Groups and stacks > Group the selected tracks. A group sums its tracks on a bus of its own, with one fader, mute and level meter, in playback and in exports.
+- Stacks: the arrow on the row of a group folds its tracks into one row that shows the regions of all of them; double-click the row to open it again. Tracks can be put into a group or taken out of it from the same menu; the row's right-click menu renames, selects or removes the group.
+- Groups are saved with the project and their changes can be undone. The headers of grouped tracks carry the colour of their group.
+
 ## 0.3.21
 
 - Editing the sound of a region: right-click an audio region > Sound > Normalize, Louder (+3 dB), Quieter (-3 dB), Reverse, Invert the polarity, Silence. The region gets a sound of its own; Ctrl+Z takes it back.

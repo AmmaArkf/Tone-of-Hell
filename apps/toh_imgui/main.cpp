@@ -330,6 +330,9 @@ struct UiState {
     bool rename_open = false;  // open the rename box for rename_track
     std::size_t rename_track = 0;
     char rename_buffer[256] = {};
+    int remove_group = -1;         // a group to remove after the tracks are drawn
+    bool group_rename_open = false;
+    std::size_t group_rename = 0;
     bool armed = false;            // a track is chosen to record onto
     std::size_t armed_track = 0;
     bool show_help = false;
@@ -5559,6 +5562,210 @@ void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
     ImGui::EndPopup();
 }
 
+// The colour of a group, also used for the stripe on the headers of its tracks.
+ImU32 group_colour(int group, float alpha = 1.0f) {
+    static const ImVec4 colours[] = {
+        {0.92f, 0.50f, 0.20f, 1.0f}, {0.30f, 0.70f, 0.95f, 1.0f}, {0.55f, 0.85f, 0.35f, 1.0f},
+        {0.85f, 0.40f, 0.80f, 1.0f}, {0.95f, 0.80f, 0.25f, 1.0f}, {0.35f, 0.85f, 0.75f, 1.0f},
+        {0.95f, 0.45f, 0.50f, 1.0f}, {0.60f, 0.55f, 0.95f, 1.0f}};
+    ImVec4 colour = colours[static_cast<std::size_t>(std::max(group, 0)) % 8];
+    colour.w = alpha;
+    return ImGui::ColorConvertFloat4ToU32(colour);
+}
+
+// The row of a group above its first track: fold it into a stack, mute it, its fader and meter.
+// The lane next to it shows the regions of all its tracks, one thin band per track.
+void draw_group_row(Session& session, UiState& ui, std::size_t g, float header_width) {
+    const toh::app::GroupInfo& group = session.groups()[g];
+    const float font = ImGui::GetFontSize();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float height = ImGui::GetFrameHeight() + 0.5f * font + style.ItemSpacing.y +
+                         2.0f * style.WindowPadding.y + 2.0f;
+    const std::vector<std::size_t> members = session.group_tracks(g);
+    bool open_menu = false;
+    ImGui::PushID(static_cast<int>(100000 + g));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.14f, 0.14f, 0.18f, 1.0f));
+    ImGui::BeginChild("group", ImVec2(header_width, height), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    const ImVec2 corner = ImGui::GetWindowPos();
+    ImGui::GetWindowDrawList()->AddRectFilled(corner, ImVec2(corner.x + 0.25f * font, corner.y + height),
+                                              group_colour(static_cast<int>(g)));
+    if (ImGui::ArrowButton("fold", group.collapsed ? ImGuiDir_Right : ImGuiDir_Down)) {
+        session.set_group_collapsed(g, !group.collapsed);
+    }
+    tooltip(group.collapsed ? T_("Open the stack: show the tracks of the group")
+                            : T_("Fold the group into a stack: one row for all its tracks"));
+    ImGui::SameLine();
+    if (toggle_button(T_("M"), group.mute, ImVec4(0.75f, 0.55f, 0.15f, 1.0f))) {
+        session.set_group_mute(g, !group.mute);
+    }
+    tooltip(T_("Mute the group"));
+    ImGui::SameLine();
+    const float name_x = ImGui::GetCursorPosX();
+    const float name_width = 0.42f * (ImGui::GetWindowWidth() - name_x);
+    char title[320];
+    std::snprintf(title, sizeof(title), T_("%s (%d tracks)"), group.name.c_str(), static_cast<int>(members.size()));
+    ImGui::TextUnformatted(fit_text(title, name_width).c_str());
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::SetTooltip(T_("%s\n(double-click to rename, right-click for more)"), title);
+    }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        ui.group_rename_open = true;
+        ui.group_rename = g;
+        std::snprintf(ui.rename_buffer, sizeof(ui.rename_buffer), "%s", group.name.c_str());
+    }
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        open_menu = true;
+    }
+    ImGui::SameLine(name_x + name_width + style.ItemSpacing.x);
+    ImGui::BeginGroup();
+    const float slider_width = ImGui::GetContentRegionAvail().x - 0.25f * font;
+    float volume = group.gain * 100.0f;
+    ImGui::SetNextItemWidth(slider_width);
+    if (ImGui::SliderFloat("##group gain", &volume, 0.0f, 200.0f, T_("Volume: %.0f%%"),
+                           ImGuiSliderFlags_AlwaysClamp)) {
+        session.set_group_gain(g, volume / 100.0f);
+    }
+    if (double_clicked()) {
+        session.set_group_gain(g, 1.0f);
+    }
+    tooltip(T_("Double-click: back to 100%"));
+    draw_meter(session.group_peak(g), slider_width, 0.5f * font);
+    ImGui::EndGroup();
+    ImGui::EndChild();
+
+    ImGui::SameLine();
+    const View& view = ui.view;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float width = std::max(ImGui::GetContentRegionAvail().x, 1.0f);
+    ImGui::InvisibleButton("group lane", ImVec2(width, height));
+    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        open_menu = true;
+    }
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        session.set_group_collapsed(g, !group.collapsed);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::SetTooltip("%s", T_("The regions of the tracks in the group. Double-click: fold or open the stack."));
+    }
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const ImVec2 far_corner(origin.x + width, origin.y + height);
+    d->AddRectFilled(origin, far_corner, IM_COL32(28, 28, 36, 255));
+    d->PushClipRect(origin, far_corner, true);
+    if (!members.empty()) {
+        const float band = (height - 4.0f) / static_cast<float>(members.size());
+        for (std::size_t m = 0; m < members.size(); ++m) {
+            const float top = origin.y + 2.0f + band * static_cast<float>(m);
+            const bool heard = session.track_audible(members[m]);
+            for (const auto& region : session.tracks()[members[m]].regions) {
+                const float x0 = frame_to_x(session, view, region.start);
+                const float x1 = frame_to_x(session, view, region.end());
+                if (x1 < origin.x || x0 > far_corner.x) {
+                    continue;
+                }
+                d->AddRectFilled(ImVec2(x0, top), ImVec2(std::max(x1, x0 + 1.0f), top + std::max(band - 1.0f, 1.0f)),
+                                 group_colour(static_cast<int>(g), heard ? 0.75f : 0.25f), 2.0f);
+            }
+        }
+    }
+    d->PopClipRect();
+
+    if (open_menu) {
+        ImGui::OpenPopup("group menu");
+    }
+    if (ImGui::BeginPopup("group menu")) {
+        ImGui::TextDisabled("%s", group.name.c_str());
+        if (ImGui::MenuItem(T_("Rename the group..."))) {
+            ui.group_rename_open = true;
+            ui.group_rename = g;
+            std::snprintf(ui.rename_buffer, sizeof(ui.rename_buffer), "%s", group.name.c_str());
+        }
+        if (ImGui::MenuItem(group.collapsed ? T_("Open the stack") : T_("Fold into a stack"))) {
+            session.set_group_collapsed(g, !group.collapsed);
+        }
+        if (ImGui::MenuItem(T_("Select the tracks of the group"))) {
+            session.clear_track_selection();
+            for (const std::size_t member : members) {
+                session.set_track_selected(member, true);
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem(T_("Remove the group (the tracks stay)"))) {
+            ui.remove_group = static_cast<int>(g);
+        }
+        ImGui::EndPopup();
+    }
+    if (ui.group_rename_open && ui.group_rename == g) {
+        ImGui::OpenPopup("rename group");
+        ui.group_rename_open = false;
+    }
+    if (ImGui::BeginPopup("rename group")) {
+        ImGui::TextUnformatted(T_("Group name"));
+        if (ImGui::IsWindowAppearing()) {
+            ImGui::SetKeyboardFocusHere();
+        }
+        ImGui::SetNextItemWidth(16.0f * font);
+        const bool entered = ImGui::InputText(
+            "##group name", ui.rename_buffer, sizeof(ui.rename_buffer),
+            ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_AutoSelectAll);
+        if (entered || ImGui::Button(T_("OK"))) {
+            session.set_group_name(g, ui.rename_buffer);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(T_("Cancel"))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+}
+
+// The part of the track area menu that makes groups of the selected tracks.
+void draw_group_menu(Session& session) {
+    if (!ImGui::BeginMenu(T_("Groups and stacks"))) {
+        return;
+    }
+    std::vector<std::size_t> chosen;
+    for (std::size_t i = 0; i < session.tracks().size(); ++i) {
+        if (session.tracks()[i].selected) {
+            chosen.push_back(i);
+        }
+    }
+    if (chosen.empty()) {
+        ImGui::TextDisabled("%s", T_("Select tracks first (click their names; Ctrl adds more)."));
+    }
+    const bool room = session.groups().size() < Session::kMaxGroups;
+    if (ImGui::MenuItem(T_("Group the selected tracks"), nullptr, false, !chosen.empty() && room)) {
+        char name[64];
+        std::snprintf(name, sizeof(name), T_("Group %d"), static_cast<int>(session.groups().size() + 1));
+        session.add_group(name, chosen);
+    }
+    for (std::size_t g = 0; g < session.groups().size(); ++g) {
+        char label[320];
+        std::snprintf(label, sizeof(label), T_("Put into \"%s\""), session.groups()[g].name.c_str());
+        ImGui::PushID(static_cast<int>(g));
+        if (ImGui::MenuItem(label, nullptr, false, !chosen.empty())) {
+            for (const std::size_t track : chosen) {
+                session.set_track_group(track, static_cast<int>(g));
+            }
+        }
+        ImGui::PopID();
+    }
+    if (ImGui::MenuItem(T_("Take the selected tracks out of their groups"), nullptr, false, !chosen.empty())) {
+        for (const std::size_t track : chosen) {
+            session.set_track_group(track, -1);
+        }
+    }
+    ImGui::Separator();
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + 22.0f * ImGui::GetFontSize());
+    ImGui::TextDisabled("%s", T_("A group sums its tracks with one fader and mute. Fold it into a stack to see "
+                                 "all its tracks as one row."));
+    ImGui::PopTextWrapPos();
+    ImGui::EndMenu();
+}
+
 // The controls on the left of a lane. Returns true when the track should be removed.
 bool draw_track_header(Session& session, UiState& ui, std::size_t i, float header_width,
                        float row_height) {
@@ -5578,6 +5785,11 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
                       ImGuiWindowFlags_NoScrollbar);
     if (track.selected) {
         ImGui::PopStyleColor();
+    }
+    if (track.group >= 0) {  // the colour of its group along the left edge
+        const ImVec2 corner = ImGui::GetWindowPos();
+        ImGui::GetWindowDrawList()->AddRectFilled(
+            corner, ImVec2(corner.x + 0.25f * font, corner.y + row_height), group_colour(track.group));
     }
 
     // The picture on the left of the controls: click it to choose another.
@@ -5764,6 +5976,9 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     }
     if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
         ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        if (!track.selected) {
+            session.select_only_track(i);  // the menu works on this track
+        }
         ui.open_track_menu = true;  // empty part of the track header
     }
     if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemHovered() &&
@@ -6513,7 +6728,22 @@ void draw_tracks(Session& session, UiState& ui) {
     }
 
     std::size_t remove_index = session.tracks().size();
+    std::vector<bool> group_drawn(session.groups().size(), false);
     for (std::size_t i = 0; i < session.tracks().size(); ++i) {
+        const int g = session.tracks()[i].group;
+        if (g >= 0 && static_cast<std::size_t>(g) < group_drawn.size()) {
+            if (!group_drawn[static_cast<std::size_t>(g)]) {
+                group_drawn[static_cast<std::size_t>(g)] = true;
+                draw_group_row(session, ui, static_cast<std::size_t>(g), header_width);
+            }
+            if (session.groups()[static_cast<std::size_t>(g)].collapsed) {
+                if (ui.lane_spans.size() <= i) {
+                    ui.lane_spans.resize(i + 1);
+                }
+                ui.lane_spans[i] = {-1.0e9f, -1.0e9f};  // folded into its stack: no lane
+                continue;
+            }
+        }
         ImGui::PushID(static_cast<int>(i));
         if (draw_track_header(session, ui, i, header_width, row_height)) {
             remove_index = i;
@@ -6540,6 +6770,10 @@ void draw_tracks(Session& session, UiState& ui) {
         handle_library_drop(session, ui, drop.drag, drop.track, drop.frame);
     }
 
+    if (ui.remove_group >= 0) {
+        session.remove_group(static_cast<std::size_t>(ui.remove_group));
+        ui.remove_group = -1;
+    }
     if (remove_index < session.tracks().size()) {
         session.remove_track(remove_index);
         ui.selected = false;
@@ -6593,6 +6827,7 @@ void draw_tracks(Session& session, UiState& ui) {
                 open_path_dialog(session, ui, PendingPath::Kind::SamplerSound);
             }
         }
+        draw_group_menu(session);
         draw_playback_menu(session, ui);
         ImGui::EndPopup();
     }

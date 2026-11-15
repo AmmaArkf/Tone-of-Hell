@@ -96,6 +96,82 @@ TEST_CASE("The sound of a region is normalized, reversed and stretched, and can 
     CHECK(session.tracks()[0].regions[0].length == 48000);
 }
 
+namespace {
+
+// The loudest sample of the last tenth of a second, after a second has played.
+float settled_peak(Session& session) {
+    session.seek_frames(0);
+    session.play();
+    std::vector<float> block(2 * 4800);
+    float peak = 0.0f;
+    for (int k = 0; k < 10; ++k) {
+        session.engine().render(block.data(), 4800);
+    }
+    for (const float value : block) {
+        peak = std::max(peak, std::fabs(value));
+    }
+    session.stop();
+    return peak;
+}
+
+}  // namespace
+
+TEST_CASE("Tracks in a group sum on its bus, with its fader and mute") {
+    Session session;
+    REQUIRE(session.add_track("A", toh::core::make_sine_clip(441.0, 3.0, 48000, 2, 0.25f)));
+    REQUIRE(session.add_track("B", toh::core::make_sine_clip(441.0, 3.0, 48000, 2, 0.25f)));
+    REQUIRE(session.add_track("C", toh::core::make_sine_clip(441.0, 3.0, 48000, 2, 0.25f)));
+    session.commit_edits();
+    const float all = settled_peak(session);
+    REQUIRE(all > 0.5f);
+
+    const std::size_t group = session.add_group("  Backing  ", {0, 1});
+    REQUIRE(group == 0);
+    session.commit_edits();
+    CHECK(session.undo_label() == "Make a group");
+    CHECK(session.groups()[0].name == "Backing");
+    CHECK(session.group_tracks(0) == std::vector<std::size_t>{0, 1});
+    CHECK(settled_peak(session) == doctest::Approx(all).epsilon(0.01));
+
+    REQUIRE(session.set_group_gain(0, 0.5f));
+    CHECK(settled_peak(session) == doctest::Approx(all * 2.0f / 3.0f).epsilon(0.02));
+    REQUIRE(session.set_group_mute(0, true));
+    CHECK(settled_peak(session) == doctest::Approx(all / 3.0f).epsilon(0.02));
+    REQUIRE(session.set_group_mute(0, false));
+    session.commit_edits();
+
+    // Saved and opened again.
+    const auto folder = std::filesystem::temp_directory_path() / "toh_groups";
+    std::filesystem::create_directories(folder);
+    const auto file = folder / "g.tohp";
+    std::string error;
+    REQUIRE(session.set_group_collapsed(0, true));
+    REQUIRE_MESSAGE(session.save_project(file, &error), error);
+    Session reopened;
+    REQUIRE_MESSAGE(reopened.open_project(file, &error), error);
+    REQUIRE(reopened.groups().size() == 1);
+    CHECK(reopened.groups()[0].name == "Backing");
+    CHECK(reopened.groups()[0].gain == doctest::Approx(0.5f));
+    CHECK(reopened.groups()[0].collapsed);
+    CHECK(reopened.tracks()[1].group == 0);
+    CHECK(reopened.tracks()[2].group == -1);
+    CHECK(settled_peak(reopened) == doctest::Approx(all * 2.0f / 3.0f).epsilon(0.02));
+    std::filesystem::remove_all(folder);
+
+    // Removing the group sends its tracks to the master again; undo brings it back.
+    REQUIRE(session.remove_group(0));
+    CHECK(session.tracks()[0].group == -1);
+    session.commit_edits();
+    CHECK(settled_peak(session) == doctest::Approx(all).epsilon(0.01));
+    REQUIRE(session.undo());
+    REQUIRE(session.groups().size() == 1);
+    CHECK(session.tracks()[1].group == 0);
+    CHECK(settled_peak(session) == doctest::Approx(all * 2.0f / 3.0f).epsilon(0.02));
+    CHECK_FALSE(session.set_track_group(2, 3));
+    REQUIRE(session.set_track_group(2, 0));
+    CHECK(session.group_tracks(0).size() == 3);
+}
+
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {
     REQUIRE(toh::core::stock_sound_count() >= 20);
     for (std::size_t k = 0; k < toh::core::stock_sound_count(); ++k) {

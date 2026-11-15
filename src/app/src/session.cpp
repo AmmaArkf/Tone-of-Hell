@@ -1089,6 +1089,7 @@ void Session::sync_engine_tracks(std::size_t first) {
         engine_.set_track_pan(slot, track.pan);
         engine_.set_track_mute(slot, silenced(track));
         engine_.set_track_solo(slot, track.solo);
+        engine_.set_track_output(slot, track.group);
     }
     if (tracks_.size() < core::Engine::kMaxTracks) {
         const auto slot = static_cast<std::uint32_t>(tracks_.size());
@@ -1097,6 +1098,7 @@ void Session::sync_engine_tracks(std::size_t first) {
         engine_.set_track_pan(slot, 0.0f);
         engine_.set_track_mute(slot, false);
         engine_.set_track_solo(slot, false);
+        engine_.set_track_output(slot, core::Engine::kMasterOutput);
     }
 }
 
@@ -1293,6 +1295,130 @@ bool Session::set_track_icon(std::size_t index, std::string icon) {
     }
     tracks_[index].icon = std::move(icon);
     return true;
+}
+
+// ---- Groups --------------------------------------------------------------------------------
+
+namespace {
+
+std::string trimmed(const std::string& text) {
+    const char* const blanks = " \t\r\n";
+    const std::size_t first = text.find_first_not_of(blanks);
+    return first == std::string::npos ? std::string()
+                                      : text.substr(first, text.find_last_not_of(blanks) - first + 1);
+}
+
+}  // namespace
+
+void Session::sync_groups() {
+    for (std::uint32_t bus = 0; bus < core::Engine::kMaxBuses; ++bus) {
+        const bool used = bus < groups_.size();
+        engine_.set_bus_gain(bus, used ? groups_[bus].gain : 1.0f);
+        engine_.set_bus_mute(bus, used && groups_[bus].mute);
+    }
+}
+
+std::size_t Session::add_group(std::string name, const std::vector<std::size_t>& tracks) {
+    if (groups_.size() >= kMaxGroups) {
+        return groups_.size();
+    }
+    GroupInfo group;
+    group.name = trimmed(name);
+    if (group.name.empty()) {
+        group.name = "Group " + std::to_string(groups_.size() + 1);
+    }
+    groups_.push_back(std::move(group));
+    const int index = static_cast<int>(groups_.size() - 1);
+    for (const std::size_t track : tracks) {
+        if (track < tracks_.size()) {
+            tracks_[track].group = index;
+            engine_.set_track_output(static_cast<std::uint32_t>(track), index);
+        }
+    }
+    sync_groups();
+    pending_label_ = "Make a group";
+    return groups_.size() - 1;
+}
+
+bool Session::remove_group(std::size_t group) {
+    if (group >= groups_.size()) {
+        return false;
+    }
+    groups_.erase(groups_.begin() + static_cast<std::ptrdiff_t>(group));
+    const int removed = static_cast<int>(group);
+    for (std::size_t i = 0; i < tracks_.size(); ++i) {
+        int& member = tracks_[i].group;
+        if (member == removed) {
+            member = -1;
+        } else if (member > removed) {
+            --member;
+        }
+        engine_.set_track_output(static_cast<std::uint32_t>(i), member);
+    }
+    sync_groups();
+    pending_label_ = "Remove a group";
+    return true;
+}
+
+bool Session::set_track_group(std::size_t track, int group) {
+    if (track >= tracks_.size() || group < -1 || group >= static_cast<int>(groups_.size())) {
+        return false;
+    }
+    tracks_[track].group = group;
+    engine_.set_track_output(static_cast<std::uint32_t>(track), group);
+    pending_label_ = "Change the group of a track";
+    return true;
+}
+
+bool Session::set_group_name(std::size_t group, const std::string& name) {
+    std::string clean = trimmed(name);
+    if (group >= groups_.size() || clean.empty()) {
+        return false;
+    }
+    groups_[group].name = std::move(clean);
+    pending_label_ = "Rename a group";
+    return true;
+}
+
+bool Session::set_group_gain(std::size_t group, float linear) {
+    if (group >= groups_.size() || !(linear >= 0.0f && linear <= 8.0f)) {
+        return false;
+    }
+    groups_[group].gain = linear;
+    engine_.set_bus_gain(static_cast<std::uint32_t>(group), linear);
+    pending_label_ = "Group volume";
+    return true;
+}
+
+bool Session::set_group_mute(std::size_t group, bool mute) {
+    if (group >= groups_.size()) {
+        return false;
+    }
+    groups_[group].mute = mute;
+    engine_.set_bus_mute(static_cast<std::uint32_t>(group), mute);
+    return true;
+}
+
+bool Session::set_group_collapsed(std::size_t group, bool collapsed) {
+    if (group >= groups_.size()) {
+        return false;
+    }
+    groups_[group].collapsed = collapsed;
+    return true;
+}
+
+float Session::group_peak(std::size_t group) const noexcept {
+    return group < groups_.size() ? engine_.bus_peak(static_cast<std::uint32_t>(group)) : 0.0f;
+}
+
+std::vector<std::size_t> Session::group_tracks(std::size_t group) const {
+    std::vector<std::size_t> members;
+    for (std::size_t i = 0; i < tracks_.size(); ++i) {
+        if (tracks_[i].group == static_cast<int>(group)) {
+            members.push_back(i);
+        }
+    }
+    return members;
 }
 
 float Session::track_peak(std::size_t index) const noexcept {
@@ -2294,6 +2420,13 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
     out << "beat_unit=" << metronome_.beat_unit << "\n";
     out << "metronome_volume=" << metronome_.volume << "\n";
     out << "grid_step=" << static_cast<int>(grid_step_) << "\n";
+    for (const GroupInfo& group : groups_) {
+        out << "\n[group]\n";
+        out << "name=" << one_line(group.name) << "\n";
+        out << "gain=" << group.gain << "\n";
+        out << "mute=" << (group.mute ? 1 : 0) << "\n";
+        out << "collapsed=" << (group.collapsed ? 1 : 0) << "\n";
+    }
     for (const Marker& marker : markers_) {
         out << "\n[marker]\n";
         out << "frame=" << marker.frame << "\n";
@@ -2369,6 +2502,9 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
         }
         out << "mute=" << (track.mute ? 1 : 0) << "\n";
         out << "solo=" << (track.solo ? 1 : 0) << "\n";
+        if (track.group >= 0) {
+            out << "group=" << track.group << "\n";
+        }
         for (const RegionInfo& region : track.regions) {
             out << "[region]\n";
             out << "source=" << index_of[region.source.get()] << "\n";
@@ -2788,6 +2924,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         std::vector<std::string> param_curves;
         bool mute = false;
         bool solo = false;
+        long long group = -1;
         long long instrument = 0;
         long long program = -1;
         bool sampler = false;
@@ -2809,8 +2946,9 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     std::string tempo_text;
     long long grid = static_cast<long long>(grid_step_);
     std::filesystem::path original;  // in recovery files: the project file they belong to
-    enum class Section { Head, Source, Track, Region, Effect, Marker } section = Section::Head;
+    enum class Section { Head, Source, Track, Region, Effect, Marker, Group } section = Section::Head;
     std::vector<Marker> markers;
+    std::vector<GroupInfo> groups;
 
     while (std::getline(in, line)) {
         if (!line.empty() && line.back() == '\r') {
@@ -2835,6 +2973,11 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             }
             tracks.back().regions.emplace_back();
             section = Section::Region;
+            continue;
+        }
+        if (line == "[group]") {
+            groups.emplace_back();
+            section = Section::Group;
             continue;
         }
         if (line == "[marker]") {
@@ -2916,6 +3059,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().mute = integer != 0;
                 } else if (key == "solo") {
                     tracks.back().solo = integer != 0;
+                } else if (key == "group") {
+                    tracks.back().group = integer;
                 } else if (key == "instrument") {
                     tracks.back().instrument = integer;
                 } else if (key == "program") {
@@ -2960,6 +3105,17 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                 }
                 break;
             }
+            case Section::Group:
+                if (key == "name") {
+                    groups.back().name = value;
+                } else if (key == "gain") {
+                    groups.back().gain = std::clamp(static_cast<float>(real), 0.0f, 8.0f);
+                } else if (key == "mute") {
+                    groups.back().mute = integer != 0;
+                } else if (key == "collapsed") {
+                    groups.back().collapsed = integer != 0;
+                }
+                break;
             case Section::Marker:
                 if (key == "frame") {
                     markers.back().frame = std::max<long long>(integer, 0);
@@ -3109,6 +3265,14 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     };
 
     open_warnings_.clear();
+    if (groups.size() > kMaxGroups) {
+        groups.resize(kMaxGroups);
+    }
+    for (std::size_t g = 0; g < groups.size(); ++g) {
+        if (trimmed(groups[g].name).empty()) {
+            groups[g].name = "Group " + std::to_string(g + 1);
+        }
+    }
     std::vector<TrackInfo> fresh;
     for (const TrackEntry& entry : tracks) {
         if (fresh.size() >= core::Engine::kMaxTracks) {
@@ -3120,6 +3284,9 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                                                            : entry.icon;
         track.gain = entry.gain;
         track.pan = entry.pan;
+        track.group = entry.group >= 0 && entry.group < static_cast<long long>(groups.size())
+                          ? static_cast<int>(entry.group)
+                          : -1;
         track.pan_curve = parse_curve(entry.pan_curve, -1.0f, 1.0f);
         // "frame:value,frame:value"
         for (const char* cursor = entry.volume_curve.c_str(); *cursor != '\0';) {
@@ -3287,6 +3454,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     engine_.stop();
     const std::size_t old_count = tracks_.size();
     tracks_ = std::move(fresh);
+    groups_ = std::move(groups);
+    sync_groups();
     sync_engine_tracks(0);
     for (std::size_t slot = tracks_.size() + 1; slot < old_count; ++slot) {
         clear_engine_slot(slot);
@@ -3332,6 +3501,8 @@ void Session::new_project() {
     seek_frames(0);
     tempo_changes_.clear();
     markers_.clear();
+    groups_.clear();
+    sync_groups();
     set_loop_range(0, -1);
     rebuild_tempo();
     ++project_generation_;
@@ -3398,7 +3569,7 @@ std::string Session::edit_text() const {
     for (const TrackInfo& track : tracks_) {
         out << "T|" << track.name << "|" << track.icon << "|" << track.gain << "|" << track.pan << "|"
             << static_cast<int>(track.instrument) << "|" << track.program << "|"
-            << static_cast<const void*>(track.sampler.get()) << "\n";
+            << static_cast<const void*>(track.sampler.get()) << "|" << track.group << "\n";
         for (const EffectSlot& slot : track.effects) {
             out << "E|" << static_cast<const void*>(slot.plugin.get()) << "|" << (slot.enabled ? 1 : 0)
                 << "\n";
@@ -3427,6 +3598,9 @@ std::string Session::edit_text() const {
                 << region.rate << "\n";
         }
     }
+    for (const GroupInfo& group : groups_) {
+        out << "G|" << group.name << "|" << group.gain << "\n";
+    }
     // Markers and the tempo are part of the edits, too, so their changes can be taken back.
     for (const Marker& marker : markers_) {
         out << "K|" << marker.frame << "|" << marker.name << "\n";
@@ -3446,11 +3620,20 @@ Session::Snapshot Session::capture(std::string text, std::string label) const {
     snapshot.label = std::move(label);
     snapshot.tempo = tempo_changes_;
     snapshot.markers = markers_;
+    snapshot.groups = groups_;
     snapshot.bpm = metronome_.bpm;
     return snapshot;
 }
 
 void Session::restore_tempo(const Snapshot& snapshot) {
+    // Mute and folding are not edits: they stay as they are for the groups that remain.
+    std::vector<GroupInfo> groups = snapshot.groups;
+    for (std::size_t g = 0; g < groups.size() && g < groups_.size(); ++g) {
+        groups[g].mute = groups_[g].mute;
+        groups[g].collapsed = groups_[g].collapsed;
+    }
+    groups_ = std::move(groups);
+    sync_groups();
     markers_ = snapshot.markers;
     tempo_changes_ = snapshot.tempo;
     if (snapshot.bpm != metronome_.bpm) {
@@ -3764,6 +3947,11 @@ bool Session::render_project(const std::function<bool(const float*, std::uint32_
         offline->set_track_pan(slot, track.pan);
         offline->set_track_mute(slot, silenced(track));
         offline->set_track_solo(slot, track.solo);
+        offline->set_track_output(slot, track.group);
+    }
+    for (std::size_t g = 0; g < groups_.size(); ++g) {
+        offline->set_bus_gain(static_cast<std::uint32_t>(g), groups_[g].gain);
+        offline->set_bus_mute(static_cast<std::uint32_t>(g), groups_[g].mute);
     }
     offline->set_gain(master_gain_);
     offline->set_blocking_reads(true);  // an export may wait for the disk

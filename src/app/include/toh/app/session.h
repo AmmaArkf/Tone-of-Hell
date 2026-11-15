@@ -148,6 +148,16 @@ struct Marker {
     std::string name;
 };
 
+/// A group of tracks. Their sound is summed on a bus of the engine with its own fader and mute
+/// before it reaches the master. A collapsed group is a stack: user interfaces show its tracks
+/// as one row.
+struct GroupInfo {
+    std::string name;  // UTF-8
+    float gain = 1.0f;
+    bool mute = false;
+    bool collapsed = false;
+};
+
 /// What a user interface needs to know about one track.
 struct TrackInfo {
     std::string name;  // UTF-8
@@ -180,6 +190,8 @@ struct TrackInfo {
     bool mute = false;
     bool solo = false;
     bool selected = false;  // see Session::set_play_selected_only()
+    /// The group the track belongs to (an index of Session::groups()), or -1 for none.
+    int group = -1;
 };
 
 /// Settings of the built-in metronome. `bpm` counts quarter notes per minute; the time
@@ -341,6 +353,27 @@ public:
     /// Sets the picture of a track (see TrackInfo::icon).
     bool set_track_icon(std::size_t index, std::string icon);
     float track_peak(std::size_t index) const noexcept;
+
+    // ---- Groups and stacks ---------------------------------------------------------------
+
+    static constexpr std::size_t kMaxGroups = core::Engine::kMaxBuses;
+    const std::vector<GroupInfo>& groups() const noexcept { return groups_; }
+    /// Makes a group of tracks (they leave the groups they were in). Returns its index, or
+    /// groups().size() when there are kMaxGroups groups already. An empty name gives "Group N".
+    std::size_t add_group(std::string name, const std::vector<std::size_t>& tracks);
+    /// Removes a group; its tracks go straight to the master again.
+    bool remove_group(std::size_t group);
+    /// Puts a track into a group, or into none with -1.
+    bool set_track_group(std::size_t track, int group);
+    bool set_group_name(std::size_t group, const std::string& name);
+    /// The fader of a group (0 to 8, 1 = unchanged).
+    bool set_group_gain(std::size_t group, float linear);
+    bool set_group_mute(std::size_t group, bool mute);
+    /// Folds a group into a stack (one row) or opens it again. Not an edit of its own.
+    bool set_group_collapsed(std::size_t group, bool collapsed);
+    float group_peak(std::size_t group) const noexcept;
+    /// The tracks of a group, in order.
+    std::vector<std::size_t> group_tracks(std::size_t group) const;
 
     // ---- Regions -------------------------------------------------------------------------
     // Edits never interrupt playback. Each returns false when the track or region does not
@@ -724,6 +757,7 @@ private:
         std::string label;  // what the step that follows (or was undone) did
         std::vector<core::TempoChange> tempo;  // the tempo changes of the project
         std::vector<Marker> markers;
+        std::vector<GroupInfo> groups;
         double bpm = 120.0;                     // and its tempo at the start
     };
     /// The tracks and the tempo as they are now.
@@ -805,6 +839,9 @@ private:
     std::int64_t sync_token_ = 0;
     std::vector<core::TempoChange> tempo_changes_;  // sorted by frame, all after frame 0
     std::vector<Marker> markers_;                   // sorted by frame
+    std::vector<GroupInfo> groups_;                 // group g sums on bus g of the engine
+    /// Sends the faders and mutes of the groups to the buses of the engine.
+    void sync_groups();
     void sort_markers();
     /// Gives a region a new sound made by `process` from the part of its source it plays.
     /// `length_factor` changes its length on the timeline (for stretching).
