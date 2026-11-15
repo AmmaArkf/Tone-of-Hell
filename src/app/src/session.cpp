@@ -1571,6 +1571,94 @@ bool Session::adopt_region_tempo(std::size_t track, std::size_t region, std::str
     return true;
 }
 
+// ---- Pitch of recorded sound -------------------------------------------------------------
+
+bool Session::analyse_region_pitch(std::size_t track, std::size_t region, core::PitchCurve* curve,
+                                   std::vector<core::PitchNote>* notes) const {
+    if (track >= tracks_.size() || region >= tracks_[track].regions.size()) {
+        return false;
+    }
+    const RegionInfo& info = tracks_[track].regions[region];
+    if (info.has_notes() || !info.source || !info.source->clip) {
+        return false;
+    }
+    const core::ClipData& clip = *info.source->clip;
+    const std::size_t channels = std::max<std::size_t>(clip.channels, 1);
+    const auto frames = static_cast<std::size_t>(
+        std::min<std::int64_t>(info.source_frames(), static_cast<std::int64_t>(600.0 * config_.sample_rate)));
+    std::vector<float> samples(frames * channels);
+    const std::size_t got = core::read_clip_frames(clip, info.offset, frames, samples.data());
+    core::PitchCurve found = core::track_pitch(samples.data(), got, channels, static_cast<double>(config_.sample_rate));
+    if (notes != nullptr) {
+        *notes = core::find_pitch_notes(found);
+    }
+    if (curve != nullptr) {
+        *curve = std::move(found);
+    }
+    return true;
+}
+
+bool Session::shift_region_pitch(std::size_t track, std::size_t region, const std::vector<PitchMove>& moves,
+                                 std::string* error) {
+    RegionInfo* info = find_region(track, region);
+    if (info == nullptr || info->has_notes()) {
+        set_error(error, "choose a region with recorded sound");
+        return false;
+    }
+    std::vector<PitchMove> valid;
+    for (const PitchMove& move : moves) {
+        if (move.length > 0 && std::fabs(move.semitones) > 1e-4 && std::fabs(move.semitones) <= 24.0) {
+            valid.push_back(move);
+        }
+    }
+    if (valid.empty()) {
+        set_error(error, "nothing to move");
+        return false;
+    }
+    const std::size_t channels = config_.channels;
+    const auto process = [&](std::vector<float>& samples) {
+        const auto frames = static_cast<std::int64_t>(samples.size() / channels);
+        const std::vector<float> original = samples;
+        for (const PitchMove& move : valid) {
+            const std::int64_t begin = std::clamp<std::int64_t>(move.from, 0, frames);
+            const std::int64_t end = std::clamp<std::int64_t>(move.from + move.length, 0, frames);
+            if (end <= begin) {
+                continue;
+            }
+            // Some sound around the part, so that the shifter is settled at its edges.
+            const std::int64_t pad = 4096;
+            const std::int64_t low = std::max<std::int64_t>(begin - pad, 0);
+            const std::int64_t high = std::min<std::int64_t>(end + pad, frames);
+            const std::vector<float> shifted =
+                core::pitch_shift(original.data() + static_cast<std::size_t>(low) * channels,
+                                  static_cast<std::size_t>(high - low), channels, move.semitones);
+            const std::int64_t fade =
+                std::max<std::int64_t>(std::min<std::int64_t>(config_.sample_rate / 100, (end - begin) / 4), 1);
+            for (std::int64_t f = begin; f < end; ++f) {
+                float blend = 1.0f;
+                if (f - begin < fade) {
+                    blend = (static_cast<float>(f - begin) + 0.5f) / static_cast<float>(fade);
+                } else if (end - f <= fade) {
+                    blend = (static_cast<float>(end - f) - 0.5f) / static_cast<float>(fade);
+                }
+                for (std::size_t c = 0; c < channels; ++c) {
+                    const std::size_t at = static_cast<std::size_t>(f) * channels + c;
+                    const std::size_t from = static_cast<std::size_t>(f - low) * channels + c;
+                    const float moved = from < shifted.size() ? shifted[from] : samples[at];
+                    samples[at] += (moved - samples[at]) * blend;
+                }
+            }
+        }
+    };
+    if (!rewrite_region_sound(*info, process, 1.0, error)) {
+        return false;
+    }
+    pending_label_ = valid.size() == 1 ? "Change the pitch of a note" : "Tune the notes";
+    sync_track_regions(track);
+    update_length();
+    return true;
+}
+
 // ---- Clip grid ---------------------------------------------------------------------------
 
 const RegionInfo* Session::clip_slot(std::size_t track, int scene) const noexcept {

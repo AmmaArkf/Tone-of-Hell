@@ -14,6 +14,7 @@
 #include "toh/core/stock_sounds.h"
 #include "toh/core/stretch.h"
 #include "toh/core/tempo_detect.h"
+#include "toh/core/pitch_track.h"
 
 using toh::app::Session;
 
@@ -363,6 +364,46 @@ TEST_CASE("Smart tempo finds the tempo of a recording and gives it to the projec
     Session quiet;
     REQUIRE(quiet.add_track("Tone", toh::core::make_sine_clip(441.0, 10.0, 48000, 2, 0.25f)));
     CHECK_FALSE(quiet.detect_region_tempo(0, 0, &bpm));
+}
+
+TEST_CASE("The notes of a recorded voice are found and retuned") {
+    // Half a second of A3 (220 Hz), then half a second of E4 (329.63 Hz).
+    auto clip = std::make_shared<toh::core::ClipData>();
+    clip->channels = 2;
+    clip->sample_rate = 48000;
+    clip->samples.resize(2 * 48000);
+    double phase = 0.0;
+    for (std::size_t i = 0; i < 48000; ++i) {
+        phase += 6.283185307 * (i < 24000 ? 220.0 : 329.63) / 48000.0;
+        const float value = 0.4f * static_cast<float>(std::sin(phase));
+        clip->samples[2 * i] = value;
+        clip->samples[2 * i + 1] = value;
+    }
+    const auto curve = toh::core::track_pitch(clip->samples.data(), 48000, 2, 48000.0);
+    const auto notes = toh::core::find_pitch_notes(curve);
+    REQUIRE(notes.size() == 2);
+    CHECK(notes[0].pitch == doctest::Approx(57.0f).epsilon(0.003));
+    CHECK(notes[1].pitch == doctest::Approx(64.0f).epsilon(0.003));
+    CHECK(notes[1].start == doctest::Approx(24000.0).epsilon(0.05));
+
+    Session session;
+    REQUIRE(session.add_track("Voice", clip));
+    session.commit_edits();
+    std::vector<toh::core::PitchNote> found;
+    REQUIRE(session.analyse_region_pitch(0, 0, nullptr, &found));
+    REQUIRE(found.size() == 2);
+    // The first note up a whole tone: B3.
+    REQUIRE(session.shift_region_pitch(0, 0, {{found[0].start, found[0].length, 2.0}}));
+    session.commit_edits();
+    CHECK(session.undo_label() == "Change the pitch of a note");
+    CHECK(session.tracks()[0].regions[0].length == 48000);
+    REQUIRE(session.analyse_region_pitch(0, 0, nullptr, &found));
+    REQUIRE(found.size() >= 2);
+    CHECK(found.front().pitch == doctest::Approx(59.0f).epsilon(0.004));
+    CHECK(found.back().pitch == doctest::Approx(64.0f).epsilon(0.003));
+    REQUIRE(session.undo());
+    REQUIRE(session.analyse_region_pitch(0, 0, nullptr, &found));
+    CHECK(found.front().pitch == doctest::Approx(57.0f).epsilon(0.003));
 }
 
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {

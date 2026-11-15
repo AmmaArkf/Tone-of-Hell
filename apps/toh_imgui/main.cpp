@@ -305,6 +305,20 @@ struct UiState {
     int roll_preview = -1;                     // the note sounding while a note is dragged
     bool roll_score = false;                   // show the notes as a score instead
     bool show_clip_grid = false;               // the clip grid window
+    // The pitch editor: the notes of a recorded voice or instrument, like on a piano roll.
+    bool pitch_open = false;
+    std::size_t pitch_track = 0;
+    std::size_t pitch_region = 0;
+    const void* pitch_source = nullptr;  // the analysis belongs to this sound
+    std::int64_t pitch_offset = -1;
+    std::int64_t pitch_length = -1;
+    toh::core::PitchCurve pitch_curve;
+    std::vector<toh::core::PitchNote> pitch_notes;
+    int pitch_drag = -1;          // the note being dragged
+    float pitch_drag_y = 0.0f;
+    float pitch_px = 120.0f;      // pixels per second
+    float pitch_key_zoom = 1.0f;
+    bool pitch_scroll = false;    // scroll to the notes once
     // The tempo found in the region of the region menu, kept while the region stays the same.
     const void* tempo_source = nullptr;
     std::int64_t tempo_offset = -1;
@@ -5078,6 +5092,13 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                 ui.show_clip_grid = true;
             }
         }
+        if (region != nullptr && !region->has_notes() && ImGui::MenuItem(T_("Notes of the sound (pitch editor)..."))) {
+            ui.pitch_open = true;
+            ui.pitch_track = ui.selected_track;
+            ui.pitch_region = ui.selected_region;
+            ui.pitch_source = nullptr;  // analyse it when the window opens
+            ui.pitch_scroll = true;
+        }
         // Smart tempo: the tempo of the recording, for the project or to fit the project.
         if (region != nullptr && !region->has_notes() && ImGui::BeginMenu(T_("Tempo##region"))) {
             if (ui.tempo_source != region->source.get() || ui.tempo_offset != region->offset ||
@@ -6596,6 +6617,222 @@ void draw_clip_grid(Session& session, UiState& ui) {
     ImGui::End();
 }
 
+// ---- Pitch editor ------------------------------------------------------------------------
+
+// The notes of a recorded voice or instrument on a grid of keys: the line is the pitch that
+// sounds, the bars are the notes found in it. Dragging a note up or down retunes that part of
+// the sound (to whole semitones; Alt: freely).
+void draw_pitch_editor(Session& session, UiState& ui) {
+    if (!ui.pitch_open) {
+        return;
+    }
+    if (ui.pitch_track >= session.tracks().size() ||
+        ui.pitch_region >= session.tracks()[ui.pitch_track].regions.size() ||
+        session.tracks()[ui.pitch_track].regions[ui.pitch_region].has_notes()) {
+        ui.pitch_open = false;
+        return;
+    }
+    const RegionInfo& region = session.tracks()[ui.pitch_track].regions[ui.pitch_region];
+    if (ui.pitch_source != region.source.get() || ui.pitch_offset != region.offset ||
+        ui.pitch_length != region.length) {
+        session.analyse_region_pitch(ui.pitch_track, ui.pitch_region, &ui.pitch_curve, &ui.pitch_notes);
+        ui.pitch_source = region.source.get();
+        ui.pitch_offset = region.offset;
+        ui.pitch_length = region.length;
+        ui.pitch_drag = -1;
+    }
+    const ImGuiIO& io = ImGui::GetIO();
+    const float font = ImGui::GetFontSize();
+    ImGui::SetNextWindowSize(ImVec2(60.0f * font, 28.0f * font), ImGuiCond_FirstUseEver);
+    const std::string title = std::string(T_("Pitch editor")) + ": " + region.source->name + "###pitch editor";
+    if (!ImGui::Begin(title.c_str(), &ui.pitch_open)) {
+        ImGui::End();
+        return;
+    }
+    const double rate = static_cast<double>(session.sample_rate());
+    if (ImGui::Button(T_("Tune every note to the nearest semitone"))) {
+        std::vector<toh::app::PitchMove> moves;
+        for (const toh::core::PitchNote& note : ui.pitch_notes) {
+            const double delta = std::round(static_cast<double>(note.pitch)) - static_cast<double>(note.pitch);
+            if (std::fabs(delta) > 0.03) {
+                moves.push_back({note.start, note.length, delta});
+            }
+        }
+        std::string error;
+        if (!moves.empty() && session.shift_region_pitch(ui.pitch_track, ui.pitch_region, moves, &error)) {
+            for (toh::core::PitchNote& note : ui.pitch_notes) {
+                note.pitch = std::round(note.pitch);
+            }
+            ui.pitch_source = nullptr;  // analyse the tuned sound again
+        } else if (!moves.empty()) {
+            ui.error = error;
+        }
+    }
+    tooltip(T_("Pulls every note that is a little off onto the nearest semitone. Ctrl+Z takes it back."));
+    ImGui::SameLine();
+    ImGui::Text(T_("Notes: %d"), static_cast<int>(ui.pitch_notes.size()));
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", T_("Drag a note up or down to retune it (Alt: freely, not to whole semitones). "
+                                 "Wheel: zoom; over the keys: their height. For one voice or instrument at a time."));
+
+    const float key_h = std::max(0.8f * font * ui.pitch_key_zoom, 4.0f);
+    const float keys_w = 3.5f * font;
+    const double seconds = static_cast<double>(region.source_frames()) / rate;
+    const float width = keys_w + static_cast<float>(seconds) * ui.pitch_px + font;
+    const float height = 128.0f * key_h;
+    ImGui::SetNextWindowContentSize(ImVec2(width, height));
+    ImGui::BeginChild("pitch canvas", ImVec2(0.0f, 0.0f), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_HorizontalScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    const ImVec2 window_pos = ImGui::GetWindowPos();
+    if (ImGui::IsWindowHovered() && io.MouseWheel != 0.0f) {
+        if (io.MousePos.x < window_pos.x + keys_w || io.KeyCtrl) {
+            ui.pitch_key_zoom = std::clamp(ui.pitch_key_zoom * std::pow(1.15f, io.MouseWheel), 0.4f, 4.0f);
+        } else {
+            ui.pitch_px = std::clamp(ui.pitch_px * std::pow(1.25f, io.MouseWheel), 10.0f, 2000.0f);
+        }
+    }
+    if (ImGui::IsWindowHovered() && ImGui::IsMouseDragging(ImGuiMouseButton_Middle, 0.0f)) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeAll);
+        ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
+        ImGui::SetScrollY(ImGui::GetScrollY() - io.MouseDelta.y);
+    }
+    if (ui.pitch_scroll) {
+        float middle = 60.0f;
+        if (!ui.pitch_notes.empty()) {
+            middle = ui.pitch_notes[ui.pitch_notes.size() / 2].pitch;
+        }
+        ImGui::SetScrollY((127.0f - middle) * key_h - ImGui::GetWindowHeight() * 0.5f);
+        ui.pitch_scroll = false;
+    }
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("pitch", ImVec2(width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    const auto pitch_y = [&](float pitch) { return origin.y + (127.5f - pitch) * key_h; };
+    const auto frame_x = [&](double frame) {
+        return origin.x + keys_w + static_cast<float>(frame / rate) * ui.pitch_px;
+    };
+    // Rows of keys, darker for the black keys, with the names of the Cs.
+    const float view_left = window_pos.x;
+    for (int pitch = 0; pitch < 128; ++pitch) {
+        const float top = origin.y + static_cast<float>(127 - pitch) * key_h;
+        const bool black = is_black_key(pitch);
+        d->AddRectFilled(ImVec2(origin.x + keys_w, top), ImVec2(origin.x + width, top + key_h),
+                         black ? IM_COL32(28, 28, 33, 255) : IM_COL32(36, 36, 42, 255));
+        d->AddLine(ImVec2(origin.x + keys_w, top + key_h), ImVec2(origin.x + width, top + key_h), IM_COL32(50, 50, 58, 255));
+        // The keys stay at the left edge while scrolling sideways.
+        d->AddRectFilled(ImVec2(view_left, top), ImVec2(view_left + keys_w, top + key_h),
+                         black ? IM_COL32(20, 20, 20, 255) : IM_COL32(215, 215, 215, 255));
+        if (pitch % 12 == 0 && key_h >= font * 0.6f) {
+            d->AddText(ImVec2(view_left + 2.0f, top + (key_h - font) * 0.5f), IM_COL32(40, 40, 40, 255),
+                       pitch_name(pitch).c_str());
+        }
+    }
+    d->PushClipRect(ImVec2(view_left + keys_w, window_pos.y), ImVec2(view_left + 10000.0f, window_pos.y + 10000.0f), true);
+
+    // The notes, and the one under the mouse.
+    int under = -1;
+    for (std::size_t k = 0; k < ui.pitch_notes.size(); ++k) {
+        const toh::core::PitchNote& note = ui.pitch_notes[k];
+        const float x0 = frame_x(static_cast<double>(note.start));
+        const float x1 = frame_x(static_cast<double>(note.start + note.length));
+        const float y = pitch_y(note.pitch);
+        if (hovered && io.MousePos.x >= x0 && io.MousePos.x <= x1 && std::fabs(io.MousePos.y - y) <= key_h * 0.6f) {
+            under = static_cast<int>(k);
+        }
+    }
+    if (hovered && under >= 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        ui.pitch_drag = under;
+        ui.pitch_drag_y = io.MousePos.y;
+    }
+    float drag_delta = 0.0f;
+    if (ui.pitch_drag >= 0 && ui.pitch_drag < static_cast<int>(ui.pitch_notes.size())) {
+        const toh::core::PitchNote& note = ui.pitch_notes[static_cast<std::size_t>(ui.pitch_drag)];
+        drag_delta = (ui.pitch_drag_y - io.MousePos.y) / key_h;
+        if (!io.KeyAlt) {
+            drag_delta = std::round(note.pitch + drag_delta) - note.pitch;  // to a whole semitone
+        }
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        ImGui::SetTooltip(T_("%s, %+.2f semitones"), pitch_name(std::clamp(static_cast<int>(std::lround(note.pitch + drag_delta)), 0, 127)).c_str(),
+                          static_cast<double>(drag_delta));
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+            const std::size_t index = static_cast<std::size_t>(ui.pitch_drag);
+            ui.pitch_drag = -1;
+            if (std::fabs(drag_delta) > 0.01f) {
+                std::string error;
+                const toh::app::PitchMove move{note.start, note.length, static_cast<double>(drag_delta)};
+                if (session.shift_region_pitch(ui.pitch_track, ui.pitch_region, {move}, &error)) {
+                    // Keep the analysis: move that note and its part of the line along.
+                    ui.pitch_notes[index].pitch += drag_delta;
+                    const std::size_t hop = std::max<std::size_t>(ui.pitch_curve.hop, 1);
+                    for (std::size_t h = static_cast<std::size_t>(move.from) / hop;
+                         h < ui.pitch_curve.midi.size() && static_cast<std::int64_t>(h * hop) < move.from + move.length; ++h) {
+                        if (ui.pitch_curve.midi[h] >= 0.0f) {
+                            ui.pitch_curve.midi[h] += drag_delta;
+                        }
+                    }
+                    const RegionInfo& changed = session.tracks()[ui.pitch_track].regions[ui.pitch_region];
+                    ui.pitch_source = changed.source.get();
+                    ui.pitch_offset = changed.offset;
+                    ui.pitch_length = changed.length;
+                } else {
+                    ui.error = error;
+                }
+            }
+            drag_delta = 0.0f;
+        }
+    }
+    for (std::size_t k = 0; k < ui.pitch_notes.size(); ++k) {
+        const toh::core::PitchNote& note = ui.pitch_notes[k];
+        const float x0 = frame_x(static_cast<double>(note.start));
+        const float x1 = std::max(frame_x(static_cast<double>(note.start + note.length)), x0 + 2.0f);
+        const bool dragged = static_cast<int>(k) == ui.pitch_drag;
+        const float shown = note.pitch + (dragged ? drag_delta : 0.0f);
+        const float y = pitch_y(shown);
+        const ImU32 fill = dragged ? IM_COL32(255, 170, 60, 200)
+                           : static_cast<int>(k) == under ? IM_COL32(120, 190, 255, 200)
+                                                          : IM_COL32(80, 150, 230, 150);
+        d->AddRectFilled(ImVec2(x0, y - key_h * 0.45f), ImVec2(x1, y + key_h * 0.45f), fill, 3.0f);
+        if (dragged) {  // where it was
+            const float was = pitch_y(note.pitch);
+            d->AddRect(ImVec2(x0, was - key_h * 0.45f), ImVec2(x1, was + key_h * 0.45f), IM_COL32(255, 255, 255, 90), 3.0f);
+        }
+        // How far the note is from the nearest semitone, in cents.
+        if (x1 - x0 > 3.5f * font && key_h >= font * 0.7f) {
+            char cents[32];
+            std::snprintf(cents, sizeof(cents), "%s %+d", pitch_name(std::clamp(static_cast<int>(std::lround(shown)), 0, 127)).c_str(),
+                          static_cast<int>(std::lround((shown - std::round(shown)) * 100.0f)));
+            d->AddText(ImVec2(x0 + 3.0f, y - font * 0.5f), IM_COL32(255, 255, 255, 230), cents);
+        }
+    }
+    // The line of the pitch that sounds.
+    const std::size_t hop = std::max<std::size_t>(ui.pitch_curve.hop, 1);
+    for (std::size_t h = 1; h < ui.pitch_curve.midi.size(); ++h) {
+        const float a = ui.pitch_curve.midi[h - 1];
+        const float b = ui.pitch_curve.midi[h];
+        if (a < 0.0f || b < 0.0f || std::fabs(a - b) > 3.0f) {
+            continue;
+        }
+        d->AddLine(ImVec2(frame_x(static_cast<double>((h - 1) * hop)), pitch_y(a)),
+                   ImVec2(frame_x(static_cast<double>(h * hop)), pitch_y(b)), IM_COL32(255, 230, 120, 230), 1.5f);
+    }
+    // The playhead.
+    const double play = static_cast<double>(session.position_frames() - region.start) * region.rate;
+    if (play >= 0.0 && play <= static_cast<double>(region.source_frames())) {
+        const float x = frame_x(play);
+        d->AddLine(ImVec2(x, origin.y), ImVec2(x, origin.y + height), IM_COL32(255, 80, 80, 220), 1.5f);
+    }
+    d->PopClipRect();
+    if (hovered && under < 0 && ui.pitch_drag < 0 && ImGui::IsMouseClicked(ImGuiMouseButton_Left) &&
+        io.MousePos.x > window_pos.x + keys_w) {
+        // A click elsewhere moves the playhead there.
+        const double frame = static_cast<double>(io.MousePos.x - origin.x - keys_w) / ui.pitch_px * rate;
+        session.seek_frames(region.start + static_cast<std::int64_t>(std::llround(frame / region.rate)));
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 void draw_piano_roll(Session& session, UiState& ui) {
     ui.roll_focused = false;
     if (!ui.roll_open) {
@@ -7823,6 +8060,7 @@ int main(int argc, char* argv[]) {
             draw_settings_window(session, ui);
             draw_piano_roll(session, ui);
             draw_clip_grid(session, ui);
+            draw_pitch_editor(session, ui);
             draw_effect_windows(session, ui);
             if (ui.settings_changed) {
                 save_settings(session, ui);

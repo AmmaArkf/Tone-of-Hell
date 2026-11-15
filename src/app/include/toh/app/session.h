@@ -20,6 +20,7 @@
 #include "toh/audio/wav_writer.h"
 #include "toh/core/clip.h"
 #include "toh/core/engine.h"
+#include "toh/core/pitch_track.h"
 #include "toh/plugins/clap_plugin.h"
 
 namespace toh::app {
@@ -141,6 +142,14 @@ enum class SoundEdit {
     Silence,    ///< nothing
     Stretch,    ///< longer or shorter by `amount` (2 = twice as long), the pitch stays
     Pitch,      ///< higher or lower by `amount` semitones, the length stays
+};
+
+/// A part of the sound of an audio region moved up or down (see Session::shift_region_pitch).
+/// `from` counts frames of the sound from the first one the region plays.
+struct PitchMove {
+    std::int64_t from = 0;
+    std::int64_t length = 0;
+    double semitones = 0.0;
 };
 
 /// A named place on the timeline, to find a part of the song again (verse, chorus...).
@@ -532,6 +541,15 @@ public:
     /// `bpm` other than 0 is used instead of the tempo found (for example twice or half of it,
     /// when the beat was heard at the wrong speed).
     bool adopt_region_tempo(std::size_t track, std::size_t region, std::string* error = nullptr, double bpm = 0.0);
+    /// The notes of the sound of an audio region (one voice or instrument), from its first ten
+    /// minutes: the pitch curve and the notes found in it, in frames from the first frame the
+    /// region plays. Returns false for a note region.
+    bool analyse_region_pitch(std::size_t track, std::size_t region, core::PitchCurve* curve,
+                              std::vector<core::PitchNote>* notes) const;
+    /// Moves parts of the sound of an audio region up or down without changing their length
+    /// (the edges blend over 10 ms). The region gets a sound of its own; undo brings the old one.
+    bool shift_region_pitch(std::size_t track, std::size_t region, const std::vector<PitchMove>& moves,
+                            std::string* error = nullptr);
 
     /// The markers, in order of time. Adding, moving, renaming and removing them are edits
     /// that can be undone, and they are saved with the project.

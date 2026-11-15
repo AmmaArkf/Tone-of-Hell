@@ -2,6 +2,7 @@ add_library(toh_core STATIC
     src/clip.cpp
     src/engine.cpp
     src/paged_file.cpp
+    src/pitch_track.cpp
     src/sampler.cpp
     src/soundfont.cpp
     src/stock_sounds.cpp

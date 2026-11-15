@@ -457,6 +457,18 @@ const Entry kRussian[] = {
     {"Take the tempo of a region", "темп из фрагмента"},
     {"It is really twice as fast", "На самом деле вдвое быстрее"},
     {"It is really half as fast", "На самом деле вдвое медленнее"},
+    {"Notes of the sound (pitch editor)...", "Ноты звука (редактор высоты)..."},
+    {"Pitch editor", "Редактор высоты"},
+    {"Tune every note to the nearest semitone", "Подтянуть все ноты к ближайшему полутону"},
+    {"Pulls every note that is a little off onto the nearest semitone. Ctrl+Z takes it back.",
+     "Ноты, которые чуть промахиваются, встают точно на ближайший полутон. Ctrl+Z отменит."},
+    {"Drag a note up or down to retune it (Alt: freely, not to whole semitones). Wheel: zoom; over the keys: their height. "
+     "For one voice or instrument at a time.",
+     "Тяните ноту вверх или вниз, чтобы перестроить её (Alt — свободно, не по полутонам). Колёсико — масштаб; над "
+     "клавишами — их высота. Для одного голоса или инструмента."},
+    {"%s, %+.2f semitones", "%s, %+.2f полутона"},
+    {"Change the pitch of a note", "высота ноты"},
+    {"Tune the notes", "подстройка нот"},
     {"Saving...", "Сохранение..."},
     {"Still saving, a moment please.", "Ещё сохраняется, минутку."},
     {"Use the selection on the track", "Поставить выделенное на дорожку"},

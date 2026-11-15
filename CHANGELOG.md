@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.3
+
+- Pitch editor for recorded sound: right-click an audio region > "Notes of the sound (pitch editor)..." opens it like a piano roll. A yellow line shows the pitch that sounds and bars show the notes found in it, with how many cents each is off.
+- Drag a note up or down to retune that part of the sound without changing its length (to whole semitones; Alt: freely). "Tune every note to the nearest semitone" pulls notes that are a little off into tune. Every change can be undone. Works for one voice or instrument at a time (60 Hz to 1 kHz).
+
 ## 0.4.2
 
 - Smart tempo: right-click an audio region > Tempo shows the tempo found in its sound (from the onsets of the first two minutes). "Give the project this tempo and line the region up with the bars" sets the project tempo and moves the region so its beats fall on the bars; "Fit the region to the project tempo" stretches it to the project tempo and keeps its pitch.
