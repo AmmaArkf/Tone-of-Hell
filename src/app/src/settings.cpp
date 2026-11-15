@@ -123,6 +123,10 @@ bool Settings::load(const std::filesystem::path& path) {
             show_library = value == "1" || value == "true";
         } else if (key == "library_folder") {
             library_folder = value;
+        } else if (key == "favorite") {
+            if (!value.empty() && favorites.size() < 1000) {
+                favorites.push_back(value);
+            }
         } else if (key == "audio_threads") {
             const int number = std::atoi(value.c_str());
             if (number == -1 || (number >= 1 && number <= 32)) {
@@ -197,6 +201,9 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "audio_threads=" << audio_threads << "\n";
     file << "show_library=" << (show_library ? 1 : 0) << "\n";
     file << "library_folder=" << library_folder << "\n";
+    for (const std::string& favorite : favorites) {
+        file << "favorite=" << favorite << "\n";
+    }
     file << "reverse_starts_playback=" << (reverse_starts_playback ? 1 : 0) << "\n";
     file << "reverse_off_at_start=" << (reverse_off_at_start ? 1 : 0) << "\n";
     for (std::size_t i = 0; i < kActionCount; ++i) {

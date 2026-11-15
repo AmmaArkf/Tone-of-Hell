@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <mutex>
@@ -55,7 +56,8 @@ struct LibraryFile {
 
 // What is dragged from the library onto the tracks.
 struct LibraryDrag {
-    int kind = 0;  // 0 a stock sound, 1 an instrument (program), 2 a part, 3 an effect, 4 a file
+    int kind = 0;  // 0 a stock sound, 1 an instrument (program), 2 a part, 3 an effect, 4 a file,
+                   // 5 a favorite file (index into the favorites)
     int index = 0;
 };
 constexpr const char* kLibraryPayload = "TOH_LIBRARY";
@@ -220,6 +222,7 @@ struct UiState {
     std::filesystem::path library_dir;  // the folder shown under "My files"
     std::vector<LibraryFile> library_files;
     bool library_listed = false;
+    bool library_only_favorites = false;  // the library shows only the starred items
     PendingDrop pending_drop;
     bool middle_pan = false;            // the middle mouse button drags the timeline
     float track_zoom = 1.0f;            // the height of the tracks (1 = normal)
@@ -1545,11 +1548,18 @@ void handle_library_drop(Session& session, UiState& ui, const LibraryDrag& drag,
             }
             break;
         }
-        case 4: {  // a file
-            if (drag.index < 0 || static_cast<std::size_t>(drag.index) >= ui.library_files.size()) {
+        case 4:
+        case 5: {  // a file of "My files", or a starred file
+            std::filesystem::path path;
+            const auto index = static_cast<std::size_t>(std::max(drag.index, 0));
+            if (drag.kind == 4 && index < ui.library_files.size()) {
+                path = ui.library_files[index].path;
+            } else if (drag.kind == 5 && index < ui.settings.favorites.size() &&
+                       ui.settings.favorites[index].rfind("file:", 0) == 0) {
+                path = std::filesystem::u8path(ui.settings.favorites[index].substr(5));
+            } else {
                 return;
             }
-            const std::filesystem::path path = ui.library_files[static_cast<std::size_t>(drag.index)].path;
             if (is_midi_path(path)) {
                 if (!session.import_midi(path, &error)) {
                     ui.error = error;
@@ -1571,8 +1581,42 @@ void handle_library_drop(Session& session, UiState& ui, const LibraryDrag& drag,
     }
 }
 
-// One row of the library that can be dragged onto the tracks.
-void library_item(const std::string& text, const std::string& id, LibraryDrag drag, const char* tip = nullptr) {
+bool is_favorite(const UiState& ui, const std::string& key) {
+    return std::find(ui.settings.favorites.begin(), ui.settings.favorites.end(), key) != ui.settings.favorites.end();
+}
+
+void toggle_favorite(UiState& ui, const std::string& key) {
+    auto& favorites = ui.settings.favorites;
+    const auto found = std::find(favorites.begin(), favorites.end(), key);
+    if (found != favorites.end()) {
+        favorites.erase(found);
+    } else {
+        favorites.push_back(key);
+    }
+    ui.settings_changed = true;
+}
+
+std::string effect_favorite_key(const toh::plugins::PluginInfo& info) {
+    return "effect:" + info.format + "|" + info.path.u8string() + "|" + info.id;
+}
+
+// One row of the library that can be dragged onto the tracks, with a star in front that
+// marks it as a favorite. `key` names it in the favorites.
+void library_item(UiState& ui, const std::string& key, const std::string& text, const std::string& id,
+                  LibraryDrag drag, const char* tip = nullptr) {
+    const bool starred = is_favorite(ui, key);
+    if (ui.library_only_favorites && !starred) {
+        return;
+    }
+    ImGui::PushStyleColor(ImGuiCol_Text, starred ? ImVec4(1.0f, 0.80f, 0.20f, 1.0f)
+                                                 : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    if (ImGui::SmallButton(("*##star" + id).c_str())) {
+        toggle_favorite(ui, key);
+    }
+    ImGui::PopStyleColor(2);
+    tooltip(starred ? T_("Remove from the favorites") : T_("Add to the favorites"));
+    ImGui::SameLine();
     ImGui::Selectable((text + "##" + id).c_str());
     // The drag source must come right after its item: a tooltip in between is a window of its
     // own and would take the item's place (effects with a description could not be dragged).
@@ -1660,6 +1704,8 @@ void draw_library(Session& session, UiState& ui, float height) {
     ImGui::PushTextWrapPos(0.0f);
     ImGui::TextDisabled("%s", T_("Drag onto a track, or below the tracks for a new one."));
     ImGui::PopTextWrapPos();
+    ImGui::Checkbox(T_("Only favorites"), &ui.library_only_favorites);
+    tooltip(T_("Show only the items marked with a star."));
     ImGui::Separator();
     // The track whose effects are listed at the bottom: the selected one, or the one of the
     // selected region.
@@ -1677,6 +1723,50 @@ void draw_library(Session& session, UiState& ui, float height) {
     const float fx_height = fx_panel ? std::max(ImGui::GetContentRegionAvail().y * 0.45f, 8.0f * font) : 0.0f;
     ImGui::BeginChild("library items", ImVec2(0.0f, fx_panel ? -fx_height : 0.0f));
 
+    // The favorites of every kind together, at the top.
+    if (!ui.settings.favorites.empty() &&
+        ImGui::CollapsingHeader(T_("Favorites"), ImGuiTreeNodeFlags_DefaultOpen)) {
+        const std::vector<std::string> favorites = ui.settings.favorites;  // a star may change it
+        for (std::size_t f = 0; f < favorites.size(); ++f) {
+            const std::string& key = favorites[f];
+            const std::string id = "favorite" + std::to_string(f);
+            if (key.rfind("sound:", 0) == 0) {
+                for (std::size_t k = 0; k < toh::core::stock_sound_count(); ++k) {
+                    if (key.compare(6, std::string::npos, toh::core::stock_sound_info(k).name) == 0) {
+                        library_item(ui, key, T_(toh::core::stock_sound_info(k).name), id, LibraryDrag{0, static_cast<int>(k)});
+                    }
+                }
+            } else if (key.rfind("program:", 0) == 0) {
+                const int program = std::atoi(key.c_str() + 8);
+                const auto* preset = session.soundfont() ? session.soundfont()->find(program) : nullptr;
+                if (preset != nullptr) {
+                    const std::string name =
+                        program == toh::core::SoundFont::kDrums ? std::string(T_("Drums")) : preset->name;
+                    library_item(ui, key, name, id, LibraryDrag{1, program});
+                }
+            } else if (key.rfind("part:", 0) == 0) {
+                const auto& parts = toh::app::library_parts();
+                for (std::size_t k = 0; k < parts.size(); ++k) {
+                    if (key.compare(5, std::string::npos, parts[k].name) == 0) {
+                        library_item(ui, key, T_(parts[k].name), id, LibraryDrag{2, static_cast<int>(k)});
+                    }
+                }
+            } else if (key.rfind("effect:", 0) == 0) {
+                if (!ui.plugins_scanned) {
+                    scan_plugins(ui);
+                }
+                for (std::size_t k = 0; k < ui.plugin_list.size(); ++k) {
+                    if (effect_favorite_key(ui.plugin_list[k]) == key) {
+                        library_item(ui, key, ui.plugin_list[k].name, id, LibraryDrag{3, static_cast<int>(k)});
+                    }
+                }
+            } else if (key.rfind("file:", 0) == 0) {
+                const std::filesystem::path path = std::filesystem::u8path(key.substr(5));
+                library_item(ui, key, path.filename().u8string(), id, LibraryDrag{5, static_cast<int>(f)});
+            }
+        }
+    }
+
     if (ImGui::CollapsingHeader(T_("Sounds"), ImGuiTreeNodeFlags_DefaultOpen)) {
         std::string category;
         bool open = false;
@@ -1690,7 +1780,8 @@ void draw_library(Session& session, UiState& ui, float height) {
                 open = ImGui::TreeNode((std::string(T_(info.category)) + "##sounds").c_str());
             }
             if (open) {
-                library_item(T_(info.name), "sound" + std::to_string(k), LibraryDrag{0, static_cast<int>(k)});
+                library_item(ui, std::string("sound:") + info.name, T_(info.name), "sound" + std::to_string(k),
+                             LibraryDrag{0, static_cast<int>(k)});
             }
         }
         if (open) {
@@ -1713,13 +1804,14 @@ void draw_library(Session& session, UiState& ui, float height) {
                 }
                 for (int p = family * 8; p < family * 8 + 8; ++p) {
                     if (const auto* preset = font_ptr->find(p)) {
-                        library_item(preset->name, "program" + std::to_string(p), LibraryDrag{1, p});
+                        library_item(ui, "program:" + std::to_string(p), preset->name, "program" + std::to_string(p),
+                                     LibraryDrag{1, p});
                     }
                 }
                 ImGui::TreePop();
             }
             if (font_ptr->find(toh::core::SoundFont::kDrums) != nullptr) {
-                library_item(T_("Drums"), "program128", LibraryDrag{1, toh::core::SoundFont::kDrums});
+                library_item(ui, "program:128", T_("Drums"), "program128", LibraryDrag{1, toh::core::SoundFont::kDrums});
             }
         }
     }
@@ -1737,7 +1829,8 @@ void draw_library(Session& session, UiState& ui, float height) {
                 open = ImGui::TreeNode((std::string(T_(parts[k].category)) + "##parts").c_str());
             }
             if (open) {
-                library_item(T_(parts[k].name), "part" + std::to_string(k), LibraryDrag{2, static_cast<int>(k)});
+                library_item(ui, std::string("part:") + parts[k].name, T_(parts[k].name), "part" + std::to_string(k),
+                             LibraryDrag{2, static_cast<int>(k)});
             }
         }
         if (open) {
@@ -1754,7 +1847,8 @@ void draw_library(Session& session, UiState& ui, float height) {
             if (info.instrument) {
                 continue;
             }
-            library_item(info.name, "effect" + std::to_string(k), LibraryDrag{3, static_cast<int>(k)},
+            library_item(ui, effect_favorite_key(info), info.name, "effect" + std::to_string(k),
+                         LibraryDrag{3, static_cast<int>(k)},
                          info.description.empty() ? nullptr : info.description.c_str());
         }
     }
@@ -1796,7 +1890,8 @@ void draw_library(Session& session, UiState& ui, float height) {
                 }
                 tooltip(T_("Double-click to open the folder."));
             } else {
-                library_item(name, "file" + std::to_string(k), LibraryDrag{4, static_cast<int>(k)});
+                library_item(ui, "file:" + file.path.u8string(), name, "file" + std::to_string(k),
+                             LibraryDrag{4, static_cast<int>(k)});
             }
         }
     }

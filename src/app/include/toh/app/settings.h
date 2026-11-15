@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 #include "toh/app/i18n.h"
 
@@ -79,6 +80,9 @@ struct Settings {
     bool show_library = true;
     /// The folder of "My files" in the library (UTF-8); empty for the Music folder.
     std::string library_folder;
+    /// The starred items of the library: "sound:Kick", "program:33", "part:Rock beat",
+    /// "effect:<format>|<path>|<id>" or "file:<path>".
+    std::vector<std::string> favorites;
     float master_gain = 1.0f;
     float input_gain = 1.0f;
     /// Latency correction for recordings in frames; negative means "use the default".

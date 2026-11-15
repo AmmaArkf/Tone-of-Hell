@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.17
+
+- Favorites in the library: a star in front of every sound, instrument, part, effect and file marks it; the starred ones are together under Favorites at the top, and "Only favorites" hides the rest. The favorites are kept in the settings.
+
 ## 0.3.16
 
 - Under the library, the effects of the selected track (or of the selected region's track): each with a box to switch it on or off, folding open to all its settings as sliders, with Open and Remove. Effects can be dragged there from the library, too.
