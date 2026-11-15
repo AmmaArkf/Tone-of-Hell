@@ -248,6 +248,62 @@ TEST_CASE("The denoiser learns a noise and takes it out, keeping the sound") {
     CHECK(rms_through(*other, 0.0, 0.05, seed) < 0.35 * untouched);
 }
 
+namespace {
+
+// Plays two seconds of a sine of `hz` through a plugin and counts the upward zero crossings of
+// the last second: its frequency.
+double frequency_through(ClapPlugin& plugin, double hz) {
+    std::vector<float> block(2 * 512);
+    int crossings = 0;
+    float previous = 0.0f;
+    std::size_t n = 0;
+    std::size_t counted = 0;
+    for (int b = 0; b < 188; ++b) {
+        for (std::size_t i = 0; i < 512; ++i, ++n) {
+            const auto value = static_cast<float>(0.3 * std::sin(2.0 * 3.14159265358979 * hz * static_cast<double>(n) / 48000.0));
+            block[2 * i] = block[2 * i + 1] = value;
+        }
+        plugin.process(block.data(), 512, 2);
+        plugin.idle();
+        if (b >= 94) {
+            for (std::size_t i = 0; i < 512; ++i) {
+                if (previous < 0.0f && block[2 * i] >= 0.0f) {
+                    ++crossings;
+                }
+                previous = block[2 * i];
+                ++counted;
+            }
+        }
+    }
+    return static_cast<double>(crossings) / (static_cast<double>(counted) / 48000.0);
+}
+
+}  // namespace
+
+TEST_CASE("Tune pulls a voice onto the notes of the scale") {
+    std::string error;
+    auto tune = ClapPlugin::create(kExamples, "org.toneofhell.tune", 48000.0, 2, &error);
+    REQUIRE_MESSAGE(tune != nullptr, error);
+    REQUIRE(tune->params().size() == 5);
+    CHECK(tune->param_text(0, 9.0) == "A");
+    CHECK(tune->param_text(1, 2.0) == "Minor");
+    CHECK(tune->latency() > 0);
+    // 452 Hz is almost half a semitone above A (440 Hz): it is pulled down to A.
+    CHECK(frequency_through(*tune, 452.0) == doctest::Approx(440.0).epsilon(0.006));
+    // A sound in tune passes unchanged.
+    tune->reset();
+    CHECK(frequency_through(*tune, 440.0) == doctest::Approx(440.0).epsilon(0.004));
+    // In C major, G# (415.3 Hz) is not a note of the scale: it goes to G or A.
+    tune->reset();
+    REQUIRE(tune->set_param(1, 1.0));
+    const double moved = frequency_through(*tune, 415.3);
+    CHECK((std::fabs(moved - 392.0) < 3.0 || std::fabs(moved - 440.0) < 3.0));
+    // With the amount at 0 nothing is changed.
+    tune->reset();
+    REQUIRE(tune->set_param(3, 0.0));
+    CHECK(frequency_through(*tune, 452.0) == doctest::Approx(452.0).epsilon(0.004));
+}
+
 TEST_CASE("An instrument plugin plays the notes of its track, live keys too") {
     Session session;
     session.add_instrument_track("Synth", toh::core::Instrument::Keys, 0, 48000);

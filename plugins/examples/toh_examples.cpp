@@ -1,5 +1,6 @@
 // The CLAP plugins that come with Tone of Hell: Echo, Tremolo, Gain, Simple Synth, two against
-// noise (Noise Gate and Denoiser), and the mixing effects Equalizer, Compressor, Limiter and Reverb.
+// noise (Noise Gate and Denoiser), the mixing effects Equalizer, Compressor, Limiter and Reverb,
+// and Tune, which pulls a voice onto the notes of a scale.
 //
 // They are small on purpose: they show what a CLAP effect needs (a factory, audio ports,
 // parameters and a saved state), they give a new user a few effects to try, and the tests use
@@ -89,6 +90,22 @@ const char* const kDenoiseFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_P
                                         CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const char* const kSynthFeatures[] = {CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER,
                                       CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+const ParamDef kTuneParams[] = {{0, "Key", 0.0, 11.0, 0.0, "", true},
+                                {1, "Scale", 0.0, 5.0, 0.0, "", true},
+                                {2, "Speed", 0.0, 400.0, 40.0, "ms"},
+                                {3, "Amount", 0.0, 100.0, 100.0, "%"},
+                                {4, "Mix", 0.0, 100.0, 100.0, "%"}};
+const char* const kTuneFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_PITCH_CORRECTION,
+                                     CLAP_PLUGIN_FEATURE_STEREO, nullptr};
+const char* const kKeyNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
+const char* const kScaleNames[6] = {"Chromatic", "Major", "Minor", "Major pentatonic", "Minor pentatonic", "Blues"};
+// The notes of each scale, as a bit for every semitone above the key.
+const unsigned kScaleNotes[6] = {0xFFFu,
+                                 (1u << 0) | (1u << 2) | (1u << 4) | (1u << 5) | (1u << 7) | (1u << 9) | (1u << 11),
+                                 (1u << 0) | (1u << 2) | (1u << 3) | (1u << 5) | (1u << 7) | (1u << 8) | (1u << 10),
+                                 (1u << 0) | (1u << 2) | (1u << 4) | (1u << 7) | (1u << 9),
+                                 (1u << 0) | (1u << 3) | (1u << 5) | (1u << 7) | (1u << 10),
+                                 (1u << 0) | (1u << 3) | (1u << 5) | (1u << 6) | (1u << 7) | (1u << 10)};
 
 const clap_plugin_descriptor_t kEcho = {
     CLAP_VERSION_INIT, "org.toneofhell.echo", "Echo", "Tone of Hell",
@@ -137,7 +154,118 @@ const clap_plugin_descriptor_t kReverb = {
     "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
     "The sound of a room: many small echoes that melt into a tail.", kReverbFeatures};
 
-enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise, Equalizer, Compressor, Limiter, Reverb };
+const clap_plugin_descriptor_t kTune = {
+    CLAP_VERSION_INIT, "org.toneofhell.tune", "Tune", "Tone of Hell",
+    "https://github.com/AmmaArkf/Tone-of-Hell", "", "", "1.0.0",
+    "Pulls a voice or an instrument onto the notes of a scale while it plays: gently or like a robot.",
+    kTuneFeatures};
+
+enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise, Equalizer, Compressor, Limiter, Reverb, Tune };
+
+// The tuner: it follows the pitch of the sound (YIN on a copy at a quarter of the rate, every
+// 256 frames) and shifts it with two crossfading taps of a delay line that run faster or slower
+// than the sound. The dry sound is delayed by as much, so a sound in tune passes unchanged.
+struct Tune {
+    static constexpr std::size_t kDown = 4;
+    static constexpr std::size_t kStep = 256;     // frames between two pitch readings
+    static constexpr std::size_t kWindow = 300;   // samples of the quarter-rate copy per reading
+    static constexpr std::size_t kLongest = 200;  // the longest period read, in those samples (60 Hz at 48 kHz)
+    std::vector<float> low;          // the quarter-rate copy, a ring of kWindow + kLongest + 1 samples
+    std::size_t low_position = 0;
+    float low_sum = 0.0f;            // the average of kDown frames that becomes one sample
+    std::size_t low_count = 0;
+    std::size_t since = 0;           // frames since the last reading
+    std::vector<double> difference;
+    std::vector<float> line;         // the delay line, stereo
+    std::size_t length = 0;          // its frames
+    std::size_t write = 0;
+    double grain = 1440.0;           // the distance the two taps cover, in frames
+    double phase = 0.0;              // 0 .. 1 along it
+    double shift = 0.0;              // the correction now, in semitones
+    double target = 0.0;             // the correction wanted
+    double wet = 0.0;                // how much of the shifted sound is heard (0 while in tune)
+    std::size_t latency = 0;
+    float found = -1.0f;             // the last pitch found, MIDI note, or -1
+
+    void prepare(double rate) {
+        low.assign(kWindow + kLongest + 1, 0.0f);
+        difference.assign(kLongest + 2, 0.0);
+        grain = std::round(0.03 * rate);
+        length = static_cast<std::size_t>(grain) * 2 + 256;
+        line.assign(length * 2, 0.0f);
+        latency = static_cast<std::size_t>(grain / 2.0) + 64;
+        clear();
+    }
+    void clear() {
+        std::fill(low.begin(), low.end(), 0.0f);
+        std::fill(line.begin(), line.end(), 0.0f);
+        low_position = 0;
+        low_sum = 0.0f;
+        low_count = 0;
+        since = 0;
+        write = 0;
+        phase = 0.0;
+        shift = 0.0;
+        target = 0.0;
+        wet = 0.0;
+        found = -1.0f;
+    }
+    // The pitch of the last kWindow + kLongest quarter-rate samples, as a MIDI note, or -1.
+    float read_pitch(double rate) {
+        const std::size_t size = low.size();
+        const auto at = [&](std::size_t k) { return low[(low_position + k) % size]; };  // oldest first
+        double energy = 0.0;
+        for (std::size_t j = 0; j < kWindow; ++j) {
+            energy += static_cast<double>(at(j)) * at(j);
+        }
+        if (energy / static_cast<double>(kWindow) < 1e-6) {
+            return -1.0f;  // too quiet
+        }
+        const double quarter = rate / static_cast<double>(kDown);
+        const auto shortest = static_cast<std::size_t>(quarter / 1000.0);
+        double running = 0.0;
+        for (std::size_t tau = 1; tau <= kLongest + 1 && tau + kWindow < size + 1; ++tau) {
+            double sum = 0.0;
+            for (std::size_t j = 0; j < kWindow && j + tau < size; ++j) {
+                const double d = static_cast<double>(at(j)) - at(j + tau);
+                sum += d * d;
+            }
+            running += sum;
+            difference[tau] = running > 0.0 ? sum * static_cast<double>(tau) / running : 1.0;
+        }
+        for (std::size_t tau = std::max<std::size_t>(shortest, 2); tau <= kLongest; ++tau) {
+            if (difference[tau] < 0.15) {
+                while (tau + 1 <= kLongest && difference[tau + 1] < difference[tau]) {
+                    ++tau;
+                }
+                double period = static_cast<double>(tau);
+                const double a = difference[tau - 1];
+                const double b = difference[tau];
+                const double c = difference[tau + 1];
+                if (a - 2.0 * b + c > 0.0) {
+                    period += 0.5 * (a - c) / (a - 2.0 * b + c);
+                }
+                return static_cast<float>(69.0 + 12.0 * std::log2(quarter / period / 440.0));
+            }
+        }
+        return -1.0f;
+    }
+};
+
+// The note of a scale nearest to `pitch` (a MIDI note with fractions).
+double nearest_scale_note(double pitch, int key, int scale) {
+    const unsigned notes = kScaleNotes[std::clamp(scale, 0, 5)];
+    double best = std::round(pitch);
+    double distance = 1e9;
+    for (int n = static_cast<int>(std::floor(pitch)) - 6; n <= static_cast<int>(std::ceil(pitch)) + 6; ++n) {
+        const int degree = ((n - key) % 12 + 12) % 12;
+        if ((notes & (1u << degree)) != 0 && std::fabs(n - pitch) < distance) {
+            distance = std::fabs(n - pitch);
+            best = n;
+        }
+    }
+    return best;
+}
 
 // A reverb of the classic Schroeder kind: eight echo loops side by side (each a little duller
 // with every round), then four all-pass filters that smear them into a tail. The right side
@@ -342,6 +470,7 @@ struct Example {
     std::array<Biquad, 3> bands{};  // the equalizer: low, middle, high
     Limiter* limiter = nullptr;     // only for the limiter
     Reverb* reverb = nullptr;       // only for the reverb
+    Tune* tune = nullptr;           // only for the tuner
     float comp_level = 0.0f;        // the compressor: the level it follows, and
     float comp_reduction = 0.0f;    // how far it turns down now, in dB (0 or less)
 };
@@ -415,6 +544,7 @@ void plugin_destroy(const clap_plugin_t* plugin) {
     delete self(plugin).denoise;
     delete self(plugin).limiter;
     delete self(plugin).reverb;
+    delete self(plugin).tune;
     delete &self(plugin);
 }
 
@@ -426,6 +556,9 @@ bool plugin_activate(const clap_plugin_t* plugin, double rate, std::uint32_t, st
     }
     if (e.reverb != nullptr) {
         e.reverb->prepare(rate);
+    }
+    if (e.tune != nullptr) {
+        e.tune->prepare(rate);
     }
     if (e.kind == Kind::Echo) {
         e.delay_frames = static_cast<std::size_t>(rate * 2.1) + 1;  // a little over 2 seconds
@@ -459,6 +592,9 @@ void plugin_reset(const clap_plugin_t* plugin) {
     }
     if (e.reverb != nullptr) {
         e.reverb->clear();
+    }
+    if (e.tune != nullptr) {
+        e.tune->clear();
     }
 }
 
@@ -789,6 +925,71 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
             }
             break;
         }
+        case Kind::Tune: {
+            Tune& t = *e.tune;
+            const int key = static_cast<int>(std::lround(e.values[0].load()));
+            const int scale = static_cast<int>(std::lround(e.values[1].load()));
+            const double speed_ms = e.values[2].load();
+            const double amount = e.values[3].load() / 100.0;
+            const double mix = e.values[4].load() / 100.0;
+            // How fast the correction follows: 0 ms jumps at once (the robot voice).
+            const double follow = speed_ms <= 0.5 ? 1.0 : 1.0 - std::exp(-static_cast<double>(Tune::kStep) / (speed_ms / 1000.0 * e.rate));
+            const double fade = 1.0 - std::exp(-1.0 / (0.010 * e.rate));
+            const std::size_t length = t.length;
+            for (std::uint32_t i = 0; i < frames; ++i) {
+                const float left = input(0, i);
+                const float right = input(1, i);
+                t.line[t.write * 2] = left;
+                t.line[t.write * 2 + 1] = right;
+                // The quarter-rate copy for the pitch reading.
+                t.low_sum += 0.5f * (left + right);
+                if (++t.low_count == Tune::kDown) {
+                    t.low[t.low_position] = t.low_sum / static_cast<float>(Tune::kDown);
+                    t.low_position = (t.low_position + 1) % t.low.size();
+                    t.low_sum = 0.0f;
+                    t.low_count = 0;
+                }
+                if (++t.since >= Tune::kStep) {
+                    t.since = 0;
+                    t.found = t.read_pitch(e.rate);
+                    if (t.found > 0.0f) {
+                        const double wanted = nearest_scale_note(t.found, key, scale) - t.found;
+                        t.target = std::clamp(wanted * amount, -3.0, 3.0);
+                    } else {
+                        t.target = 0.0;  // nothing sung: let go
+                    }
+                    t.shift += (t.target - t.shift) * follow;
+                }
+                // The wet sound: two taps half a grain apart, each faded in and out along it.
+                const double ratio = std::pow(2.0, t.shift / 12.0);
+                t.phase += (1.0 - ratio) / t.grain;
+                t.phase -= std::floor(t.phase);
+                float wet[2] = {0.0f, 0.0f};
+                for (int tap = 0; tap < 2; ++tap) {
+                    const double p = std::fmod(t.phase + 0.5 * tap, 1.0);
+                    const double delay = 64.0 + p * t.grain;
+                    const double gain = std::sin(kPi * p);
+                    const double back = static_cast<double>(t.write) - delay + static_cast<double>(length);
+                    const auto a = static_cast<std::size_t>(std::floor(back)) % length;
+                    const std::size_t b = (a + 1) % length;
+                    const auto frac = static_cast<float>(back - std::floor(back));
+                    for (std::size_t c = 0; c < 2; ++c) {
+                        const float va = t.line[a * 2 + c];
+                        const float vb = t.line[b * 2 + c];
+                        wet[c] += static_cast<float>(gain * gain) * (va + (vb - va) * frac);
+                    }
+                }
+                // In tune: the dry sound, delayed like the taps on average.
+                const std::size_t dry_at = (t.write + length - t.latency) % length;
+                const double want_wet = std::fabs(t.shift) > 0.02 ? 1.0 : 0.0;
+                t.wet += (want_wet - t.wet) * fade;
+                const auto w = static_cast<float>(t.wet * mix);
+                const float dry[2] = {t.line[dry_at * 2], t.line[dry_at * 2 + 1]};
+                output(i, dry[0] + (wet[0] - dry[0]) * w, dry[1] + (wet[1] - dry[1]) * w);
+                t.write = (t.write + 1) % length;
+            }
+            break;
+        }
         case Kind::Gain: {
             const double gain = std::pow(10.0, e.values[0].load() / 20.0);
             const double pan = e.values[1].load() / 100.0;
@@ -881,6 +1082,14 @@ bool params_to_text(const clap_plugin_t* plugin, clap_id id, double value, char*
     const Example& e = self(plugin);
     if (id >= e.count) {
         return false;
+    }
+    if (e.kind == Kind::Tune && id == 0) {
+        std::snprintf(text, size, "%s", kKeyNames[std::clamp(static_cast<int>(std::lround(value)), 0, 11)]);
+        return true;
+    }
+    if (e.kind == Kind::Tune && id == 1) {
+        std::snprintf(text, size, "%s", kScaleNames[std::clamp(static_cast<int>(std::lround(value)), 0, 5)]);
+        return true;
     }
     std::snprintf(text, size, value >= 100.0 || value <= -100.0 ? "%.0f %s" : "%.1f %s", value, e.defs[id].unit);
     return true;
@@ -984,6 +1193,9 @@ std::uint32_t latency_get(const clap_plugin_t* plugin) {
     if (e.limiter != nullptr) {
         return static_cast<std::uint32_t>(e.limiter->length - 1);
     }
+    if (e.tune != nullptr) {
+        return static_cast<std::uint32_t>(e.tune->latency);
+    }
     return static_cast<std::uint32_t>(kFftLatency);
 }
 
@@ -1000,7 +1212,7 @@ const void* plugin_extension(const clap_plugin_t* plugin, const char* id) {
         return &kState;
     }
     if (std::strcmp(id, CLAP_EXT_LATENCY) == 0 &&
-        (self(plugin).kind == Kind::Denoise || self(plugin).kind == Kind::Limiter)) {
+        (self(plugin).kind == Kind::Denoise || self(plugin).kind == Kind::Limiter || self(plugin).kind == Kind::Tune)) {
         return &kLatency;
     }
     if (std::strcmp(id, CLAP_EXT_NOTE_PORTS) == 0 && self(plugin).kind == Kind::Synth) {
@@ -1014,8 +1226,8 @@ void plugin_on_main_thread(const clap_plugin_t*) {}
 // ---- The factory -----------------------------------------------------------------------------------
 
 const clap_plugin_descriptor_t* const kDescriptors[] = {&kEcho, &kTremolo, &kGain, &kSynth, &kGate, &kDenoise,
-                                                        &kEq, &kComp, &kLimit, &kReverb};
-constexpr std::uint32_t kPluginCount = 10;
+                                                        &kEq, &kComp, &kLimit, &kReverb, &kTune};
+constexpr std::uint32_t kPluginCount = 11;
 
 std::uint32_t factory_count(const clap_plugin_factory_t*) { return kPluginCount; }
 
@@ -1077,6 +1289,13 @@ const clap_plugin_t* factory_create(const clap_plugin_factory_t*, const clap_hos
         e->plugin.desc = &kReverb;
         e->reverb = new Reverb();
         e->reverb->prepare(48000.0);
+    } else if (std::strcmp(id, kTune.id) == 0) {
+        e->kind = Kind::Tune;
+        e->defs = kTuneParams;
+        e->count = 5;
+        e->plugin.desc = &kTune;
+        e->tune = new Tune();
+        e->tune->prepare(48000.0);
     } else if (std::strcmp(id, kDenoise.id) == 0) {
         e->kind = Kind::Denoise;
         e->defs = kDenoiseParams;

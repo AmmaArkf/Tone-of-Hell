@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.6
+
+- Tune: a new built-in effect (FX > Add an effect > Tune) that pulls a voice or an instrument onto the notes of a scale while it plays, like Waves Tune or Auto-Tune. Key and scale (chromatic, major, minor, both pentatonics, blues), Speed (0 ms: the robot voice; slower: natural), Amount and Mix. Notes in tune pass unchanged; the delay is made up for.
+
 ## 0.4.5
 
 - Surround sound: File > Export audio > "WAV 5.1 surround, 24-bit" writes six channels (L, R, C, LFE, Ls, Rs). Every track is rendered alone and placed by its direction between the two nearest loudspeakers, its stereo picture 30 degrees to either side.
