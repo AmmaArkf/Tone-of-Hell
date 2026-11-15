@@ -11,8 +11,16 @@ enum class Instrument : std::uint8_t {
     Organ,  ///< Steady drawbar-like tones.
     Pad,    ///< Slow, soft and wide.
     Pluck,  ///< A short plucked string.
+    // Synthesizers of level 3. They are computed from the time alone like the ones above, so
+    // their filters are spectra that move with envelopes (no state, real-time safe).
+    FmKeys,         ///< A frequency-modulated electric piano with a bell-like tine.
+    FmBell,         ///< An inharmonic FM bell that rings on.
+    AnalogBass,     ///< A saw wave through a low-pass filter that closes after the attack, plus a sub octave.
+    Supersaw,       ///< Five detuned saw waves, wide and bright.
+    WavetableLead,  ///< A lead that morphs from a dark saw to a hollow square, with vibrato.
+    SynthBrass,     ///< A saw whose filter swells open, like a brass section.
 };
-constexpr int kInstrumentCount = 4;
+constexpr int kInstrumentCount = 10;
 
 /// One note. `start` and `length` are in frames of the note list (0 = its first frame).
 struct Note {

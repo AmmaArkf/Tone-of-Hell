@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.1
+
+- Six new built-in synthesizers for instrument tracks (Instrument > Simple synthesizers): FM keys (a frequency-modulated electric piano), FM bell, Analog bass (a filtered saw with resonance and a sub octave), Supersaw (five detuned saws), Wavetable lead (morphs from a saw to a square, with vibrato) and Synth brass (a filter that swells open).
+- Like the other built-in instruments they need no files, play live notes, and sound the same in playback and exports.
+
 ## 0.4.0
 
 Level 2 is complete. What it brought since 0.3:

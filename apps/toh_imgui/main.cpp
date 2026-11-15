@@ -1187,7 +1187,9 @@ void draw_icon_popup(Session& session, UiState& ui, std::size_t track) {
 // ---- Instruments -------------------------------------------------------------------------
 
 const char* instrument_name(toh::core::Instrument instrument) {
-    static const char* const names[] = {"Keys", "Organ", "Pad", "Pluck"};
+    static const char* const names[] = {"Keys",       "Organ",    "Pad",           "Pluck",       "FM keys",
+                                        "FM bell",    "Analog bass", "Supersaw", "Wavetable lead", "Synth brass"};
+    static_assert(sizeof(names) / sizeof(names[0]) == toh::core::kInstrumentCount);
     return names[static_cast<int>(instrument)];
 }
 

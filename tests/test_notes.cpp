@@ -83,6 +83,23 @@ TEST_CASE("Every instrument sounds and goes quiet after its release") {
     }
 }
 
+TEST_CASE("The synthesizers stay below the Nyquist frequency and finite on every note") {
+    for (int k = 0; k < toh::core::kInstrumentCount; ++k) {
+        const auto instrument = static_cast<Instrument>(k);
+        CAPTURE(k);
+        for (const int pitch : {24, 60, 108, 127}) {
+            const Note note = make_note(0, kRate, pitch, 1.0f);
+            float loudest = 0.0f;
+            for (int frame = 0; frame < kRate; frame += 13) {
+                const float value = toh::core::note_sample(instrument, note, frame, kRate);
+                REQUIRE(std::isfinite(value));
+                loudest = std::max(loudest, std::fabs(value));
+            }
+            CHECK(loudest < 1.0f);
+        }
+    }
+}
+
 TEST_CASE("Notes are kept sorted and invalid ones are dropped") {
     Session session;
     session.add_instrument_track("Synth", Instrument::Keys, 1000, 10000);
