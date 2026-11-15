@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.24
+
+- External controllers: knobs, faders and buttons of MIDI controllers (control change messages). Right-click a track's volume or pan slider, its M or S button, a group's volume or the Master slider > "MIDI learn", then move the control. Faders give 0..200 %, buttons switch mute and solo.
+- Any action of the shortcut list can get a button of a MIDI controller too: Settings > Shortcuts > MIDI column (right-click forgets it). The assignments are kept in the settings.
+
 ## 0.3.23
 
 - Sidechain ducking: in the FX window of a track choose a key track; while the key is loud, this track gets quieter (for example a bass or pad making room for the kick). Threshold, how far down and how fast it comes back can be set. A key in a muted group still works without being heard.

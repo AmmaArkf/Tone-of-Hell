@@ -6,11 +6,16 @@
 
 namespace toh::app {
 
-/// A key pressed or released on a MIDI keyboard.
+/// A key pressed or released on a MIDI keyboard, or a knob, fader or button of a MIDI
+/// controller that moved (a control change: `control` is true).
 struct MidiEvent {
     bool on = true;
     int pitch = 60;
     float velocity = 0.8f;  // 0 to 1
+    bool control = false;
+    int channel = 0;     // 0..15
+    int controller = 0;  // 0..127
+    float value = 0.0f;  // 0 to 1
 };
 
 /// Notes from the MIDI keyboards connected to the computer (Windows: the system's MIDI inputs;

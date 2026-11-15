@@ -123,6 +123,10 @@ bool Settings::load(const std::filesystem::path& path) {
             show_library = value == "1" || value == "true";
         } else if (key == "library_folder") {
             library_folder = value;
+        } else if (key == "midi_control") {
+            if (!value.empty() && midi_controls.size() < 1000) {
+                midi_controls.push_back(value);
+            }
         } else if (key == "favorite") {
             if (!value.empty() && favorites.size() < 1000) {
                 favorites.push_back(value);
@@ -203,6 +207,9 @@ bool Settings::save(const std::filesystem::path& path) const {
     file << "library_folder=" << library_folder << "\n";
     for (const std::string& favorite : favorites) {
         file << "favorite=" << favorite << "\n";
+    }
+    for (const std::string& control : midi_controls) {
+        file << "midi_control=" << control << "\n";
     }
     file << "reverse_starts_playback=" << (reverse_starts_playback ? 1 : 0) << "\n";
     file << "reverse_off_at_start=" << (reverse_off_at_start ? 1 : 0) << "\n";

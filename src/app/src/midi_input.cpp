@@ -34,9 +34,21 @@ struct MidiInput::Impl {
     std::thread reader;
 #endif
 
-    // One complete channel message: note-ons and note-offs go to the queue.
+    // One complete channel message: note-ons, note-offs and control changes go to the queue.
     void message(unsigned status, unsigned data1, unsigned data2) {
         const unsigned type = status & 0xF0u;
+        if (type == 0xB0u) {
+            MidiEvent event;
+            event.control = true;
+            event.channel = static_cast<int>(status & 0x0Fu);
+            event.controller = static_cast<int>(data1 & 0x7Fu);
+            event.value = static_cast<float>(data2 & 0x7Fu) / 127.0f;
+            const std::lock_guard<std::mutex> lock(mutex);
+            if (queue.size() < 4096) {
+                queue.push_back(event);
+            }
+            return;
+        }
         if (type != 0x80u && type != 0x90u) {
             return;
         }

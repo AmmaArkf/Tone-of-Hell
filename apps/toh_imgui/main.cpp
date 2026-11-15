@@ -28,6 +28,7 @@
 #include "toh/app/library.h"
 #include "toh/app/log.h"
 #include "toh/app/midi_input.h"
+#include "toh/app/controllers.h"
 #include "toh/app/settings.h"
 #include "toh/app/session.h"
 #include "toh/core/clip.h"
@@ -274,6 +275,8 @@ struct UiState {
     Session::Clipboard clipboard;
     toh::app::MidiInput midi;            // MIDI keyboards
     std::vector<toh::app::MidiEvent> midi_events;
+    toh::app::Controllers controllers;          // knobs, faders and buttons of MIDI controllers
+    std::vector<toh::app::Action> controller_actions;  // pressed on a controller, to perform
     bool musical_keyboard = false;       // the letter keys play notes
     int keyboard_octave = 4;             // the A key plays C of this octave
     std::array<int, 16> key_pitch{};     // the note each letter key started (-1: none)
@@ -2539,12 +2542,73 @@ std::size_t live_target(const Session& session, const UiState& ui) {
     return Session::kNewTrack;
 }
 
+// The right-click menu of a slider or button that a MIDI controller can move ("MIDI learn").
+// Call it right after the item.
+void midi_learn_menu(UiState& ui, toh::app::ControlTarget target, int index) {
+    if (!ImGui::BeginPopupContextItem()) {
+        return;
+    }
+    const toh::app::ControlMapping* mapping = ui.controllers.find(target, index);
+    if (mapping != nullptr) {
+        ImGui::TextDisabled(T_("MIDI: CC %d, channel %d"), mapping->controller, mapping->channel + 1);
+    } else {
+        ImGui::TextDisabled("%s", T_("No MIDI control assigned."));
+    }
+    if (ImGui::MenuItem(T_("MIDI learn: move a knob, fader or button"))) {
+        ui.controllers.learn(target, index);
+        ui.notice = T_("Move the knob, fader or button of your MIDI controller now.");
+    }
+    if (mapping != nullptr && ImGui::MenuItem(T_("Forget the MIDI control"))) {
+        ui.controllers.forget(target, index);
+        ui.settings.midi_controls = ui.controllers.to_lines();
+        ui.settings_changed = true;
+    }
+    ImGui::EndPopup();
+}
+
+// The MIDI column of the shortcut table: a button of a MIDI controller for an action.
+void midi_action_button(UiState& ui, int action) {
+    const toh::app::ControlMapping* mapping = ui.controllers.find(toh::app::ControlTarget::Action, action);
+    const bool learning = ui.controllers.learning(toh::app::ControlTarget::Action, action);
+    char label[96];
+    if (learning) {
+        std::snprintf(label, sizeof(label), "%s", T_("Press a MIDI button..."));
+    } else if (mapping != nullptr) {
+        std::snprintf(label, sizeof(label), T_("CC %d, ch. %d"), mapping->controller, mapping->channel + 1);
+    } else {
+        std::snprintf(label, sizeof(label), "%s", T_("MIDI learn"));
+    }
+    if (ImGui::Button((std::string(label) + "##midi").c_str())) {
+        if (learning) {
+            ui.controllers.cancel_learning();
+        } else {
+            ui.controllers.learn(toh::app::ControlTarget::Action, action);
+        }
+    }
+    if (mapping != nullptr && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+        ui.controllers.forget(toh::app::ControlTarget::Action, action);
+        ui.settings.midi_controls = ui.controllers.to_lines();
+        ui.settings_changed = true;
+    }
+    tooltip(T_("A button of a MIDI controller for this action: click, then press the button. Right-click: forget it."));
+}
+
 // Notes from MIDI keyboards and, when switched on, from the letter keys:
 //   A W S E D F T G Y H U J K O L P  =  C C# D D# E F F# G G# A A# B C C# D D#,  Z / X: octave.
 void play_live_notes(Session& session, UiState& ui) {
     session.set_live_track(live_target(session, ui));
     ui.midi.take(ui.midi_events);
     for (const toh::app::MidiEvent& event : ui.midi_events) {
+        if (event.control) {
+            if (ui.controllers.handle(session, event.channel, event.controller, event.value, ui.controller_actions)) {
+                ui.settings.midi_controls = ui.controllers.to_lines();
+                ui.settings_changed = true;
+                char text[96];
+                std::snprintf(text, sizeof(text), T_("Assigned: CC %d, channel %d"), event.controller, event.channel + 1);
+                ui.notice = text;
+            }
+            continue;
+        }
         if (event.on) {
             session.note_on(event.pitch, event.velocity);
         } else {
@@ -3190,13 +3254,14 @@ void draw_settings_window(Session& session, UiState& ui) {
         // ---- Shortcuts ----
         if (ImGui::BeginTabItem(with_id(T_("Shortcuts"), "shortcuts").c_str())) {
             ImGui::TextDisabled("%s", T_("Click \"Change\", then press the new key, with Ctrl, Shift or Alt if you like."));
-            if (ImGui::BeginTable("shortcut table", 4,
+            if (ImGui::BeginTable("shortcut table", 5,
                                   ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
                                       ImGuiTableFlags_SizingStretchProp)) {
                 ImGui::TableSetupColumn(T_("Action"), ImGuiTableColumnFlags_WidthStretch, 3.0f);
                 ImGui::TableSetupColumn(T_("Shortcut"), ImGuiTableColumnFlags_WidthStretch, 1.5f);
                 ImGui::TableSetupColumn("##change", ImGuiTableColumnFlags_WidthFixed);
                 ImGui::TableSetupColumn("##clear", ImGuiTableColumnFlags_WidthFixed);
+                ImGui::TableSetupColumn("MIDI", ImGuiTableColumnFlags_WidthFixed);
                 ImGui::TableHeadersRow();
                 for (std::size_t i = 0; i < toh::app::kActionCount; ++i) {
                     const auto action = static_cast<Action>(i);
@@ -3237,6 +3302,8 @@ void draw_settings_window(Session& session, UiState& ui) {
                         shortcut.clear();
                         ui.settings_changed = true;
                     }
+                    ImGui::TableNextColumn();
+                    midi_action_button(ui, static_cast<int>(i));
                     ImGui::PopID();
                 }
                 ImGui::EndTable();
@@ -3755,6 +3822,7 @@ void draw_toolbar(Session& session, PendingFiles& pending, SDL_Window* window, U
                            ImGuiSliderFlags_AlwaysClamp)) {
         session.set_master_gain(percent / 100.0f);
     }
+    midi_learn_menu(ui, toh::app::ControlTarget::MasterVolume, 0);
     if (double_clicked()) {
         session.set_master_gain(1.0f);
     }
@@ -5682,6 +5750,7 @@ void draw_group_row(Session& session, UiState& ui, std::size_t g, float header_w
                            ImGuiSliderFlags_AlwaysClamp)) {
         session.set_group_gain(g, volume / 100.0f);
     }
+    midi_learn_menu(ui, toh::app::ControlTarget::GroupVolume, static_cast<int>(g));
     if (double_clicked()) {
         session.set_group_gain(g, 1.0f);
     }
@@ -5864,10 +5933,12 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     if (toggle_button(T_("M"), track.mute, ImVec4(0.75f, 0.55f, 0.15f, 1.0f))) {
         session.set_track_mute(i, !track.mute);
     }
+    midi_learn_menu(ui, toh::app::ControlTarget::TrackMute, static_cast<int>(i));
     tooltip(T_("Mute"));
     if (toggle_button(T_("S"), track.solo, ImVec4(0.20f, 0.60f, 0.85f, 1.0f))) {
         session.set_track_solo(i, !track.solo);
     }
+    midi_learn_menu(ui, toh::app::ControlTarget::TrackSolo, static_cast<int>(i));
     tooltip(T_("Solo"));
     const bool armed = ui.armed && ui.armed_track == i;
     if (toggle_button(T_("R"), armed, ImVec4(0.85f, 0.15f, 0.15f, 1.0f))) {
@@ -5978,6 +6049,7 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
                            ImGuiSliderFlags_AlwaysClamp)) {
         session.set_track_gain(i, volume / 100.0f);
     }
+    midi_learn_menu(ui, toh::app::ControlTarget::TrackVolume, static_cast<int>(i));
     if (double_clicked()) {
         session.set_track_gain(i, 1.0f);
     }
@@ -5997,6 +6069,7 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     if (ImGui::SliderFloat("##pan", &pan, -100.0f, 100.0f, pan_text, ImGuiSliderFlags_AlwaysClamp)) {
         session.set_track_pan(i, std::fabs(pan) < 3.0f ? 0.0f : pan / 100.0f);  // snap to centre
     }
+    midi_learn_menu(ui, toh::app::ControlTarget::TrackPan, static_cast<int>(i));
     if (double_clicked()) {
         session.set_track_pan(i, 0.0f);
     }
@@ -7102,6 +7175,7 @@ int main(int argc, char* argv[]) {
             ui.settings_path = std::filesystem::u8path(folder) / "settings.txt";
             SDL_free(folder);
             ui.settings.load(ui.settings_path);
+            ui.controllers.from_lines(ui.settings.midi_controls);
         }
         ui.window = window;
         ui.renderer = renderer;
@@ -7293,6 +7367,10 @@ int main(int argc, char* argv[]) {
 
             handle_shortcuts(session, ui, pending, window);
             play_live_notes(session, ui);
+            for (const Action action : ui.controller_actions) {
+                perform_action(session, ui, pending, window, action);
+            }
+            ui.controller_actions.clear();
 
             const ImGuiViewport* viewport = ImGui::GetMainViewport();
             ImGui::SetNextWindowPos(viewport->WorkPos);

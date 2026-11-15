@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "doctest.h"
+#include "toh/app/controllers.h"
 #include "toh/app/library.h"
 #include "toh/app/session.h"
 #include "toh/core/stock_sounds.h"
@@ -209,6 +210,52 @@ TEST_CASE("Sidechain ducking makes a track quieter while the key is loud") {
     REQUIRE(session.remove_track(1));
     CHECK(session.tracks()[0].duck_key == -1);  // its key is gone
     CHECK(settled_peak(session) == doctest::Approx(alone).epsilon(0.01));
+}
+
+TEST_CASE("MIDI controllers are learned and move volumes, mutes and actions") {
+    Session session;
+    REQUIRE(session.add_track("A", toh::core::make_sine_clip(441.0, 1.0, 48000, 2, 0.25f)));
+    toh::app::Controllers controllers;
+    std::vector<toh::app::Action> actions;
+    controllers.learn(toh::app::ControlTarget::TrackVolume, 0);
+    CHECK(controllers.learning());
+    CHECK(controllers.handle(session, 0, 7, 0.3f, actions));  // learned, nothing changes yet
+    CHECK(session.tracks()[0].gain == doctest::Approx(1.0f));
+    CHECK_FALSE(controllers.handle(session, 0, 7, 0.25f, actions));
+    CHECK(session.tracks()[0].gain == doctest::Approx(0.5f));
+    CHECK_FALSE(controllers.handle(session, 1, 7, 1.0f, actions));  // another channel
+    CHECK(session.tracks()[0].gain == doctest::Approx(0.5f));
+
+    controllers.learn(toh::app::ControlTarget::TrackMute, 0);
+    controllers.handle(session, 0, 20, 1.0f, actions);
+    CHECK_FALSE(session.tracks()[0].mute);
+    controllers.handle(session, 0, 20, 0.0f, actions);
+    controllers.handle(session, 0, 20, 1.0f, actions);  // pressed
+    CHECK(session.tracks()[0].mute);
+    controllers.handle(session, 0, 20, 1.0f, actions);  // still held: nothing new
+    CHECK(session.tracks()[0].mute);
+
+    controllers.learn(toh::app::ControlTarget::Action, static_cast<int>(toh::app::Action::PlayPause));
+    controllers.handle(session, 0, 21, 0.0f, actions);
+    controllers.handle(session, 0, 21, 1.0f, actions);
+    REQUIRE(actions.size() == 1);
+    CHECK(actions[0] == toh::app::Action::PlayPause);
+
+    // A control learned again for another target leaves the old one.
+    controllers.learn(toh::app::ControlTarget::MasterVolume, 0);
+    controllers.handle(session, 0, 7, 0.5f, actions);
+    CHECK(controllers.find(toh::app::ControlTarget::TrackVolume, 0) == nullptr);
+    controllers.handle(session, 0, 7, 0.25f, actions);
+    CHECK(session.master_gain() == doctest::Approx(0.5f));
+
+    toh::app::Controllers copy;
+    copy.from_lines(controllers.to_lines());
+    REQUIRE(copy.mappings().size() == controllers.mappings().size());
+    const auto* master = copy.find(toh::app::ControlTarget::MasterVolume, 0);
+    REQUIRE(master != nullptr);
+    CHECK(master->controller == 7);
+    copy.from_lines({"99|7|0|0", "bad", "0|200|0|0"});
+    CHECK(copy.mappings().empty());
 }
 
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {
