@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -158,6 +159,12 @@ struct GroupInfo {
     bool collapsed = false;
 };
 
+/// A clip of the clip grid: a region kept in a slot of a track, in one scene (a row of the grid).
+struct ClipSlot {
+    int scene = 0;
+    RegionInfo region;  // its start is not used
+};
+
 /// What a user interface needs to know about one track.
 struct TrackInfo {
     std::string name;  // UTF-8
@@ -197,6 +204,8 @@ struct TrackInfo {
     float duck_threshold_db = -30.0f;
     float duck_amount_db = 12.0f;
     float duck_release_ms = 150.0f;
+    /// The clips of this track in the clip grid, one per scene at most.
+    std::vector<ClipSlot> clips;
 };
 
 /// Settings of the built-in metronome. `bpm` counts quarter notes per minute; the time
@@ -386,6 +395,31 @@ public:
     /// `track` gets quieter. -1 (or the track itself) switches it off. The threshold is limited
     /// to -60..0 dB, the amount to 0..48 dB and the release to 10..2000 ms.
     bool set_track_ducking(std::size_t track, int key, float threshold_db, float amount_db, float release_ms);
+
+    // ---- Clip grid -----------------------------------------------------------------------
+    // Every track has a slot in every scene (a row). A launched clip plays in a loop on its
+    // track instead of the track's regions on the timeline, until the track goes back to the
+    // timeline. While playing, launching and stopping wait for the next bar.
+
+    static constexpr int kMaxScenes = 64;
+    int scene_count() const noexcept { return scene_count_; }
+    void add_scene() noexcept { scene_count_ = std::min(scene_count_ + 1, kMaxScenes); }
+    /// The clip in a slot, or null for an empty slot.
+    const RegionInfo* clip_slot(std::size_t track, int scene) const noexcept;
+    /// Puts a copy of a region of a track into a slot of that track: `scene`, or the first
+    /// empty one for -1. Returns the scene, or -1 when it cannot.
+    int put_clip(std::size_t track, std::size_t region, int scene = -1);
+    bool remove_clip(std::size_t track, int scene);
+    /// Plays a clip in a loop. Starts playback when it is stopped.
+    bool launch_clip(std::size_t track, int scene);
+    /// Launches the clips of a scene; the tracks without a clip there go back to the timeline.
+    void launch_scene(int scene);
+    /// The track goes back to its regions on the timeline.
+    void stop_clip(std::size_t track);
+    /// Every track goes back to the timeline at once.
+    void stop_all_clips();
+    /// The scene whose clip plays (or is about to) on a track, or -1.
+    int playing_clip(std::size_t track) const noexcept;
 
     // ---- Regions -------------------------------------------------------------------------
     // Edits never interrupt playback. Each returns false when the track or region does not
@@ -852,6 +886,23 @@ private:
     std::vector<core::TempoChange> tempo_changes_;  // sorted by frame, all after frame 0
     std::vector<Marker> markers_;                   // sorted by frame
     std::vector<GroupInfo> groups_;                 // group g sums on bus g of the engine
+    // What plays on each track: a clip of the grid from `at` on (scene -1: the timeline), and
+    // before that what played before.
+    struct Launch {
+        int scene = -1;
+        std::int64_t at = 0;
+        int previous = -1;
+        std::int64_t previous_at = 0;
+    };
+    std::vector<Launch> launches_;  // by track; missing entries: the timeline
+    int scene_count_ = 8;
+    void set_launch(std::size_t track, int scene);
+    /// The regions the engine plays on a track: the timeline, or clips of the grid.
+    std::vector<core::Region> track_content(std::size_t index) const;
+    /// Adds what plays on a track (a clip of `scene` looped from `at`, or with -1 the
+    /// timeline) between the frames `from` and `to`, cut at those frames.
+    void append_content(std::vector<core::Region>& regions, std::size_t track, int scene, std::int64_t at,
+                        std::int64_t from, std::int64_t to) const;
     /// Sends the faders and mutes of the groups to the buses of the engine.
     void sync_groups();
     void sort_markers();

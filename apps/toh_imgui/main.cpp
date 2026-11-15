@@ -304,6 +304,7 @@ struct UiState {
     float roll_canvas_x = 0.0f;
     int roll_preview = -1;                     // the note sounding while a note is dragged
     bool roll_score = false;                   // show the notes as a score instead
+    bool show_clip_grid = false;               // the clip grid window
     int score_preview = -1;                    // the note sounding after it was added on the score
     float roll_box_y = 0.0f;                   // where a selection box began, inside the canvas
     std::vector<char> roll_box_base;           // the selection before the box (kept with Ctrl)
@@ -3457,6 +3458,7 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
         if (ImGui::MenuItem(T_("Library"), nullptr, &ui.settings.show_library)) {
             ui.settings_changed = true;
         }
+        ImGui::MenuItem(T_("Clip grid"), nullptr, &ui.show_clip_grid);
         const bool full_screen = (SDL_GetWindowFlags(window) & SDL_WINDOW_FULLSCREEN) != 0;
         if (ImGui::MenuItem(T_("Full screen"), key_label(ui, Action::FullScreen), full_screen)) {
             SDL_SetWindowFullscreen(window, !full_screen);
@@ -5063,6 +5065,11 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
                             region != nullptr && (region->fade_in > 0 || region->fade_out > 0))) {
             session.set_region_fades(ui.selected_track, ui.selected_region, 0, 0);
         }
+        if (ImGui::MenuItem(T_("Put into the clip grid"), nullptr, false, region != nullptr)) {
+            if (session.put_clip(ui.selected_track, ui.selected_region) >= 0) {
+                ui.show_clip_grid = true;
+            }
+        }
         // Editing the sound of an audio region: it gets a new sound of its own.
         if (region != nullptr && !region->has_notes() && ImGui::BeginMenu(T_("Sound"))) {
             using toh::app::SoundEdit;
@@ -6418,6 +6425,125 @@ void draw_score(Session& session, UiState& ui, const RegionInfo& region) {
     ImGui::EndChild();
 }
 
+// ---- Clip grid ---------------------------------------------------------------------------
+
+// The clip grid: a column for every track, a row for every scene. A click on a clip plays it in a
+// loop on its track instead of the timeline (from the next bar while playing).
+void draw_clip_grid(Session& session, UiState& ui) {
+    if (!ui.show_clip_grid) {
+        return;
+    }
+    const float font = ImGui::GetFontSize();
+    ImGui::SetNextWindowSize(ImVec2(56.0f * font, 22.0f * font), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin((std::string(T_("Clip grid")) + "###clip grid").c_str(), &ui.show_clip_grid)) {
+        ImGui::End();
+        return;
+    }
+    if (ImGui::Button(T_("Back to the timeline"))) {
+        session.stop_all_clips();
+    }
+    tooltip(T_("Every track plays its regions on the timeline again, at once."));
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", T_("Click a clip: it plays in a loop from the next bar. Right-click a region on a track > "
+                                 "Put into the clip grid, or select a region and click an empty slot of its track."));
+    const std::size_t tracks = session.tracks().size();
+    if (tracks == 0) {
+        ImGui::TextDisabled("%s", T_("No tracks yet."));
+        ImGui::End();
+        return;
+    }
+    const int columns = static_cast<int>(std::min<std::size_t>(tracks, 63)) + 1;
+    if (ImGui::BeginTable("clip grid", columns,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollX | ImGuiTableFlags_ScrollY |
+                              ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupScrollFreeze(1, 1);
+        ImGui::TableSetupColumn(T_("Scene"), ImGuiTableColumnFlags_WidthFixed, 7.0f * font);
+        for (int t = 1; t < columns; ++t) {
+            const std::string name =
+                std::to_string(t) + ". " + session.tracks()[static_cast<std::size_t>(t - 1)].name + "##col" + std::to_string(t);
+            ImGui::TableSetupColumn(name.c_str(), ImGuiTableColumnFlags_WidthFixed, 9.0f * font);
+        }
+        ImGui::TableHeadersRow();
+        const ImVec2 cell(-FLT_MIN, 1.7f * font);
+        for (int scene = 0; scene < session.scene_count(); ++scene) {
+            ImGui::PushID(scene);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            char label[64];
+            std::snprintf(label, sizeof(label), T_("> Scene %d"), scene + 1);
+            if (ImGui::Button(label, cell)) {
+                session.launch_scene(scene);
+            }
+            tooltip(T_("Play every clip of this row; tracks without a clip here go back to the timeline."));
+            for (int t = 1; t < columns; ++t) {
+                const auto track = static_cast<std::size_t>(t - 1);
+                ImGui::TableNextColumn();
+                ImGui::PushID(t);
+                const RegionInfo* clip = session.clip_slot(track, scene);
+                const bool playing = session.playing_clip(track) == scene;
+                if (clip != nullptr) {
+                    if (playing) {
+                        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.55f, 0.25f, 1.0f));
+                        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.65f, 0.30f, 1.0f));
+                    }
+                    const std::string name = (playing ? "> " : "") + clip->source->name;
+                    if (ImGui::Button(fit_text(name, 8.0f * font).c_str(), cell)) {
+                        session.launch_clip(track, scene);
+                    }
+                    if (playing) {
+                        ImGui::PopStyleColor(2);
+                    }
+                    if (ImGui::BeginPopupContextItem("clip menu")) {
+                        if (ImGui::MenuItem(T_("Play this clip"))) {
+                            session.launch_clip(track, scene);
+                        }
+                        if (ImGui::MenuItem(T_("Back to the timeline on this track"), nullptr, false,
+                                            session.playing_clip(track) >= 0)) {
+                            session.stop_clip(track);
+                        }
+                        if (ImGui::MenuItem(T_("Remove the clip"))) {
+                            session.remove_clip(track, scene);
+                        }
+                        ImGui::EndPopup();
+                    }
+                } else {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
+                    const bool can_put = ui.selected && ui.selected_track == track &&
+                                         ui.selected_region < session.tracks()[track].regions.size();
+                    if (ImGui::Button(can_put ? "+" : "##empty", cell) && can_put) {
+                        session.put_clip(track, ui.selected_region, scene);
+                    }
+                    ImGui::PopStyleColor();
+                    if (can_put) {
+                        tooltip(T_("Put the selected region here"));
+                    }
+                }
+                ImGui::PopID();
+            }
+            ImGui::PopID();
+        }
+        // The last row: more scenes, and a stop button for every track.
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        if (ImGui::Button(T_("+ scene"), cell)) {
+            session.add_scene();
+        }
+        for (int t = 1; t < columns; ++t) {
+            const auto track = static_cast<std::size_t>(t - 1);
+            ImGui::TableNextColumn();
+            ImGui::PushID(1000 + t);
+            const bool active = session.playing_clip(track) >= 0;
+            if (toggle_button(T_("Timeline##clip"), !active, ImVec4(0.30f, 0.45f, 0.75f, 1.0f), false)) {
+                session.stop_clip(track);
+            }
+            tooltip(T_("The track plays its regions on the timeline (from the next bar while playing)."));
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
 void draw_piano_roll(Session& session, UiState& ui) {
     ui.roll_focused = false;
     if (!ui.roll_open) {
@@ -7644,6 +7770,7 @@ int main(int argc, char* argv[]) {
             draw_dialogs(ui);
             draw_settings_window(session, ui);
             draw_piano_roll(session, ui);
+            draw_clip_grid(session, ui);
             draw_effect_windows(session, ui);
             if (ui.settings_changed) {
                 save_settings(session, ui);

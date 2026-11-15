@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.26
+
+- Clip grid (View > Clip grid): a column for every track and a row for every scene. Right-click a region > "Put into the clip grid", or select a region and click an empty slot of its track.
+- A click on a clip plays it in a loop on its track instead of the timeline, from the next bar while playing (at once when stopped, which starts playback). "> Scene N" plays a whole row; "Timeline" under a track and "Back to the timeline" return to the regions on the timeline.
+- Clips are saved with the project (their sound too) and putting or removing them can be undone. Exports play the timeline.
+
 ## 0.3.25
 
 - Score editor: the "Score" button of the piano roll shows the notes of a note region on a grand staff (treble and bass clef) with the time signature, bar lines, ledger lines, sharps, note values (whole, half, quarter, eighth, sixteenth) and the playhead. Time runs left to right as on the piano roll, a faint line shows how long each note sounds.

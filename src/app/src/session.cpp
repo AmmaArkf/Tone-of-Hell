@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iterator>
+#include <limits>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -395,8 +396,18 @@ std::filesystem::path Session::new_cache_file(const char* kind, const char* exte
 
 void Session::update_streaming() {
     std::vector<StreamRegion> regions;
-    for (const TrackInfo& track : tracks_) {
-        for (const RegionInfo& info : track.regions) {
+    for (std::size_t t = 0; t < tracks_.size(); ++t) {
+        const bool launched = t < launches_.size() && (launches_[t].scene >= 0 || launches_[t].previous >= 0);
+        if (launched) {
+            // Clips of the grid: what the engine really plays (the clip again and again).
+            for (const core::Region& region : track_content(t)) {
+                if (region.clip && region.clip->disk) {
+                    regions.push_back({region.clip->disk, region.start, region.offset, region.length, region.rate});
+                }
+            }
+            continue;
+        }
+        for (const RegionInfo& info : tracks_[t].regions) {
             if (info.source && info.source->clip && info.source->clip->disk) {
                 regions.push_back(
                     {info.source->clip->disk, info.start, info.offset, info.length, info.rate});
@@ -1040,6 +1051,9 @@ bool Session::remove_track(std::size_t index) {
         return false;
     }
     tracks_.erase(tracks_.begin() + static_cast<std::ptrdiff_t>(index));
+    if (index < launches_.size()) {
+        launches_.erase(launches_.begin() + static_cast<std::ptrdiff_t>(index));
+    }
     // Sidechain keys follow the tracks that move up; a key that is gone switches ducking off.
     for (std::size_t t = 0; t < tracks_.size(); ++t) {
         TrackInfo& track = tracks_[t];
@@ -1066,25 +1080,79 @@ bool Session::remove_track(std::size_t index) {
     return true;
 }
 
+void Session::append_content(std::vector<core::Region>& regions, std::size_t track, int scene, std::int64_t at,
+                             std::int64_t from, std::int64_t to) const {
+    const TrackInfo& info = tracks_[track];
+    const auto add = [&](RegionInfo part) {
+        if (part.end() <= from || part.start >= to || part.length <= 0) {
+            return;
+        }
+        if (part.start < from) {
+            const std::int64_t cut = from - part.start;
+            part.offset += static_cast<std::int64_t>(std::floor(static_cast<double>(cut) * part.rate));
+            part.start = from;
+            part.length -= cut;
+            part.fade_in = 0;
+        }
+        if (part.end() > to) {
+            part.length = to - part.start;
+        }
+        part.fade_in = std::min(part.fade_in, part.length);
+        part.fade_out = std::min(part.fade_out, part.length);
+        core::Region region;
+        region.clip = part.source->clip;
+        region.start = part.start;
+        region.offset = part.offset;
+        region.length = part.length;
+        region.fade_in = part.fade_in;
+        region.fade_out = part.fade_out;
+        region.fade_shape = part.fade_shape;
+        region.rate = part.rate;
+        region.instrument = info.instrument;
+        region.program = info.program;
+        region.sampler = info.sampler;
+        regions.push_back(std::move(region));
+    };
+    if (scene < 0) {
+        for (const RegionInfo& part : info.regions) {
+            add(part);
+        }
+        return;
+    }
+    const RegionInfo* clip = clip_slot(track, scene);
+    if (clip == nullptr || clip->length <= 0) {
+        return;  // an empty slot: silence
+    }
+    // The clip again and again for half an hour.
+    const std::int64_t horizon = at + 1800 * static_cast<std::int64_t>(config_.sample_rate);
+    int count = 0;
+    for (std::int64_t start = at; start < horizon && start < to && count < 4000; start += clip->length, ++count) {
+        if (start + clip->length <= from) {
+            continue;
+        }
+        RegionInfo copy = *clip;
+        copy.start = start;
+        add(std::move(copy));
+    }
+}
+
+std::vector<core::Region> Session::track_content(std::size_t index) const {
+    std::vector<core::Region> regions;
+    const Launch launch = index < launches_.size() ? launches_[index] : Launch();
+    constexpr std::int64_t kNever = std::numeric_limits<std::int64_t>::max();
+    constexpr std::int64_t kAlways = std::numeric_limits<std::int64_t>::min();
+    if (launch.scene < 0 && launch.previous < 0) {
+        append_content(regions, index, -1, 0, kAlways, kNever);
+    } else {
+        append_content(regions, index, launch.previous, launch.previous_at, kAlways, launch.at);
+        append_content(regions, index, launch.scene, launch.at, launch.at, kNever);
+    }
+    return regions;
+}
+
 // Sends the regions of one track to the engine.
 void Session::sync_track_regions(std::size_t index) {
-    std::vector<core::Region> regions;
-    regions.reserve(tracks_[index].regions.size());
-    for (const RegionInfo& info : tracks_[index].regions) {
-        core::Region region;
-        region.clip = info.source->clip;
-        region.start = info.start;
-        region.offset = info.offset;
-        region.length = info.length;
-        region.fade_in = info.fade_in;
-        region.fade_out = info.fade_out;
-        region.fade_shape = info.fade_shape;
-        region.rate = info.rate;
-        region.instrument = tracks_[index].instrument;
-        region.program = tracks_[index].program;
-        region.sampler = tracks_[index].sampler;
-        regions.push_back(std::move(region));
-    }
+    const std::vector<core::Region> regions = track_content(index);
     const TrackPlugins plugins = track_plugins(tracks_[index]);
     engine_.set_track_regions(static_cast<std::uint32_t>(index), regions, plugins.effects,
                               plugins.instrument, plugins.latency, tracks_[index].volume_curve,
@@ -1435,6 +1503,127 @@ std::vector<std::size_t> Session::group_tracks(std::size_t group) const {
         }
     }
     return members;
+}
+
+// ---- Clip grid ---------------------------------------------------------------------------
+
+const RegionInfo* Session::clip_slot(std::size_t track, int scene) const noexcept {
+    if (track >= tracks_.size()) {
+        return nullptr;
+    }
+    for (const ClipSlot& slot : tracks_[track].clips) {
+        if (slot.scene == scene) {
+            return &slot.region;
+        }
+    }
+    return nullptr;
+}
+
+int Session::put_clip(std::size_t track, std::size_t region, int scene) {
+    if (track >= tracks_.size() || region >= tracks_[track].regions.size()) {
+        return -1;
+    }
+    if (scene < 0) {
+        scene = 0;
+        while (scene < kMaxScenes && clip_slot(track, scene) != nullptr) {
+            ++scene;
+        }
+    }
+    if (scene >= kMaxScenes) {
+        return -1;
+    }
+    auto& clips = tracks_[track].clips;
+    clips.erase(std::remove_if(clips.begin(), clips.end(), [&](const ClipSlot& slot) { return slot.scene == scene; }),
+                clips.end());
+    ClipSlot slot;
+    slot.scene = scene;
+    slot.region = tracks_[track].regions[region];
+    slot.region.start = 0;
+    clips.push_back(std::move(slot));
+    scene_count_ = std::max(scene_count_, scene + 1);
+    pending_label_ = "Put a clip into the grid";
+    if (playing_clip(track) == scene) {
+        sync_track_regions(track);
+    }
+    return scene;
+}
+
+bool Session::remove_clip(std::size_t track, int scene) {
+    if (clip_slot(track, scene) == nullptr) {
+        return false;
+    }
+    auto& clips = tracks_[track].clips;
+    clips.erase(std::remove_if(clips.begin(), clips.end(), [&](const ClipSlot& slot) { return slot.scene == scene; }),
+                clips.end());
+    pending_label_ = "Remove a clip";
+    if (playing_clip(track) == scene) {
+        sync_track_regions(track);
+    }
+    return true;
+}
+
+void Session::set_launch(std::size_t track, int scene) {
+    if (launches_.size() < tracks_.size()) {
+        launches_.resize(tracks_.size());
+    }
+    std::int64_t at = position_frames();
+    if (engine_.is_playing()) {
+        // The next bar.
+        const double bar = std::max(static_cast<double>(metronome_.beats_per_bar), 1.0);
+        const double beats = beats_at(at);
+        at = std::llround(frame_at(std::ceil(beats / bar - 1e-9) * bar));
+    }
+    Launch& launch = launches_[track];
+    launch.previous = launch.scene;
+    launch.previous_at = launch.at;
+    launch.scene = scene;
+    launch.at = at;
+    sync_track_regions(track);
+}
+
+bool Session::launch_clip(std::size_t track, int scene) {
+    if (clip_slot(track, scene) == nullptr) {
+        return false;
+    }
+    set_launch(track, scene);
+    if (!engine_.is_playing()) {
+        play();
+    }
+    return true;
+}
+
+void Session::launch_scene(int scene) {
+    for (std::size_t track = 0; track < tracks_.size(); ++track) {
+        if (clip_slot(track, scene) != nullptr) {
+            set_launch(track, scene);
+        } else if (playing_clip(track) >= 0) {
+            set_launch(track, -1);
+        }
+    }
+    if (!engine_.is_playing()) {
+        play();
+    }
+}
+
+void Session::stop_clip(std::size_t track) {
+    if (playing_clip(track) >= 0) {
+        set_launch(track, -1);
+    }
+}
+
+void Session::stop_all_clips() {
+    const std::vector<Launch> old = std::move(launches_);
+    launches_.clear();
+    for (std::size_t track = 0; track < old.size() && track < tracks_.size(); ++track) {
+        if (old[track].scene >= 0 || old[track].previous >= 0) {
+            sync_track_regions(track);
+        }
+    }
+    update_streaming();
+}
+
+int Session::playing_clip(std::size_t track) const noexcept {
+    return track < launches_.size() ? launches_[track].scene : -1;
 }
 
 bool Session::set_track_ducking(std::size_t track, int key, float threshold_db, float amount_db, float release_ms) {
@@ -2417,6 +2606,11 @@ std::vector<std::shared_ptr<const Source>> Session::used_sources() const {
                 sources.push_back(region.source);
             }
         }
+        for (const ClipSlot& clip : track.clips) {
+            if (std::find(sources.begin(), sources.end(), clip.region.source) == sources.end()) {
+                sources.push_back(clip.region.source);
+            }
+        }
     }
     return sources;
 }
@@ -2545,6 +2739,18 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
             out << "[region]\n";
             out << "source=" << index_of[region.source.get()] << "\n";
             out << "start=" << region.start << "\n";
+            out << "offset=" << region.offset << "\n";
+            out << "length=" << region.length << "\n";
+            out << "fade_in=" << region.fade_in << "\n";
+            out << "fade_out=" << region.fade_out << "\n";
+            out << "fade_shape=" << static_cast<int>(region.fade_shape) << "\n";
+            out << "rate=" << region.rate << "\n";
+        }
+        for (const ClipSlot& clip : track.clips) {
+            const RegionInfo& region = clip.region;
+            out << "[clip]\n";
+            out << "scene=" << clip.scene << "\n";
+            out << "source=" << index_of[region.source.get()] << "\n";
             out << "offset=" << region.offset << "\n";
             out << "length=" << region.length << "\n";
             out << "fade_in=" << region.fade_in << "\n";
@@ -2962,6 +3168,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         bool solo = false;
         long long group = -1;
         std::string duck;
+        std::vector<std::pair<long long, RegionEntry>> clips;  // scene, region
         long long instrument = 0;
         long long program = -1;
         bool sampler = false;
@@ -2983,7 +3190,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
     std::string tempo_text;
     long long grid = static_cast<long long>(grid_step_);
     std::filesystem::path original;  // in recovery files: the project file they belong to
-    enum class Section { Head, Source, Track, Region, Effect, Marker, Group } section = Section::Head;
+    enum class Section { Head, Source, Track, Region, Effect, Marker, Group, Clip } section = Section::Head;
     std::vector<Marker> markers;
     std::vector<GroupInfo> groups;
 
@@ -3010,6 +3217,14 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             }
             tracks.back().regions.emplace_back();
             section = Section::Region;
+            continue;
+        }
+        if (line == "[clip]") {
+            if (tracks.empty()) {
+                tracks.emplace_back();
+            }
+            tracks.back().clips.emplace_back();
+            section = Section::Clip;
             continue;
         }
         if (line == "[group]") {
@@ -3129,6 +3344,28 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     region.source = integer;
                 } else if (key == "start") {
                     region.start = integer;
+                } else if (key == "offset") {
+                    region.offset = integer;
+                } else if (key == "length") {
+                    region.length = integer;
+                } else if (key == "fade_in") {
+                    region.fade_in = integer;
+                } else if (key == "fade_out") {
+                    region.fade_out = integer;
+                } else if (key == "fade_shape") {
+                    region.fade_shape = integer;
+                } else if (key == "rate") {
+                    region.rate = real;
+                }
+                break;
+            }
+            case Section::Clip: {
+                auto& clip = tracks.back().clips.back();
+                RegionEntry& region = clip.second;
+                if (key == "scene") {
+                    clip.first = integer;
+                } else if (key == "source") {
+                    region.source = integer;
                 } else if (key == "offset") {
                     region.offset = integer;
                 } else if (key == "length") {
@@ -3423,6 +3660,34 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
             limit_fades(info);
             track.regions.push_back(std::move(info));
         }
+        for (const auto& [scene, region] : entry.clips) {
+            if (scene < 0 || scene >= kMaxScenes || region.source < 0 ||
+                static_cast<std::size_t>(region.source) >= loaded.size()) {
+                continue;
+            }
+            const auto& source = loaded[static_cast<std::size_t>(region.source)];
+            if (region.offset < 0 || region.length <= 0 ||
+                !(region.rate >= core::Engine::kMinSpeed && region.rate <= core::Engine::kMaxSpeed) ||
+                region.offset + core::clip_frames_used(region.length, region.rate) > source->clip->frames()) {
+                continue;
+            }
+            ClipSlot slot;
+            slot.scene = static_cast<int>(scene);
+            slot.region.source = source;
+            slot.region.offset = region.offset;
+            slot.region.length = region.length;
+            slot.region.rate = region.rate;
+            slot.region.fade_in = region.fade_in;
+            slot.region.fade_out = region.fade_out;
+            if (region.fade_shape >= 0 && region.fade_shape <= static_cast<long long>(core::FadeShape::SCurve)) {
+                slot.region.fade_shape = static_cast<core::FadeShape>(region.fade_shape);
+            }
+            limit_fades(slot.region);
+            track.clips.erase(std::remove_if(track.clips.begin(), track.clips.end(),
+                                             [&](const ClipSlot& other) { return other.scene == slot.scene; }),
+                              track.clips.end());
+            track.clips.push_back(std::move(slot));
+        }
         // Plugins: they are loaded again and get back their state.
         const auto load_plugin = [&](const EffectEntry& effect) -> std::shared_ptr<plugins::Plugin> {
             std::string problem;
@@ -3517,6 +3782,13 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         }
     }
     const std::size_t old_count = tracks_.size();
+    launches_.clear();
+    scene_count_ = 8;
+    for (const TrackInfo& track : fresh) {
+        for (const ClipSlot& clip : track.clips) {
+            scene_count_ = std::max(scene_count_, clip.scene + 1);
+        }
+    }
     tracks_ = std::move(fresh);
     groups_ = std::move(groups);
     sync_groups();
@@ -3556,6 +3828,8 @@ void Session::new_project() {
     stop_recording();  // a take that is still running is dropped: its track goes away
     engine_.stop();
     const std::size_t old_count = tracks_.size();
+    launches_.clear();
+    scene_count_ = 8;
     tracks_.clear();
     for (std::size_t slot = 0; slot < old_count; ++slot) {
         clear_engine_slot(slot);
@@ -3636,6 +3910,11 @@ std::string Session::edit_text() const {
             << static_cast<const void*>(track.sampler.get()) << "|" << track.group << "|" << track.duck_key
             << "|" << track.duck_threshold_db << "|" << track.duck_amount_db << "|" << track.duck_release_ms
             << "\n";
+        for (const ClipSlot& clip : track.clips) {
+            out << "L|" << clip.scene << "|" << static_cast<const void*>(clip.region.source.get()) << "|"
+                << clip.region.offset << "|" << clip.region.length << "|" << clip.region.fade_in << "|"
+                << clip.region.fade_out << "|" << clip.region.rate << "\n";
+        }
         for (const EffectSlot& slot : track.effects) {
             out << "E|" << static_cast<const void*>(slot.plugin.get()) << "|" << (slot.enabled ? 1 : 0)
                 << "\n";

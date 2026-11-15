@@ -258,6 +258,59 @@ TEST_CASE("MIDI controllers are learned and move volumes, mutes and actions") {
     CHECK(copy.mappings().empty());
 }
 
+namespace {
+
+// The loudest sample between two seconds of playback that is already running.
+float peak_between(Session& session, double from, double to) {
+    std::vector<float> block(2 * 4800);
+    float peak = 0.0f;
+    for (int k = 0; k < static_cast<int>(to * 10.0 + 0.5); ++k) {
+        session.engine().render(block.data(), 4800);
+        if (k >= static_cast<int>(from * 10.0 + 0.5)) {
+            for (const float value : block) {
+                peak = std::max(peak, std::fabs(value));
+            }
+        }
+    }
+    return peak;
+}
+
+}  // namespace
+
+TEST_CASE("A clip of the clip grid plays in a loop instead of the timeline") {
+    Session session;
+    REQUIRE(session.add_track("Tone", toh::core::make_sine_clip(441.0, 0.5, 48000, 2, 0.25f)));
+    REQUIRE(session.put_clip(0, 0) == 0);
+    REQUIRE(session.clip_slot(0, 0) != nullptr);
+    session.commit_edits();
+    CHECK(session.undo_label() == "Put a clip into the grid");
+    CHECK(settled_peak(session) < 0.001f);  // the timeline ends after half a second
+
+    REQUIRE(session.launch_clip(0, 0));  // stopped: starts now, and starts playback
+    CHECK(session.playing_clip(0) == 0);
+    CHECK(peak_between(session, 1.5, 2.0) == doctest::Approx(0.25f).epsilon(0.05));
+    session.stop();
+    session.stop_all_clips();
+    CHECK(session.playing_clip(0) == -1);
+    CHECK(settled_peak(session) < 0.001f);
+
+    const auto folder = std::filesystem::temp_directory_path() / "toh_clips";
+    std::filesystem::create_directories(folder);
+    const auto file = folder / "c.tohp";
+    std::string error;
+    REQUIRE(session.remove_region(0, 0));  // the clip keeps its sound
+    REQUIRE_MESSAGE(session.save_project(file, &error), error);
+    Session reopened;
+    REQUIRE_MESSAGE(reopened.open_project(file, &error), error);
+    REQUIRE(reopened.clip_slot(0, 0) != nullptr);
+    CHECK(reopened.clip_slot(0, 0)->length == 24000);
+    reopened.launch_scene(0);
+    CHECK(peak_between(reopened, 1.0, 1.5) == doctest::Approx(0.25f).epsilon(0.05));
+    std::filesystem::remove_all(folder);
+    CHECK(reopened.remove_clip(0, 0));
+    CHECK_FALSE(reopened.launch_clip(0, 0));
+}
+
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {
     REQUIRE(toh::core::stock_sound_count() >= 20);
     for (std::size_t k = 0; k < toh::core::stock_sound_count(); ++k) {
