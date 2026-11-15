@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.13
+
+- "Threads for the sound" set to Automatic takes at most half of the processor's threads. The helper threads sleep while nothing plays, so an idle program stays on one or two threads.
+
 ## 0.3.12
 
 - Several processor cores compute the tracks: each track (its regions, instrument and effects) is computed by one thread, the tracks are shared among the audio thread and helper threads, and then summed in their usual order, so the sound is exactly the same as on one core (a test checks it). Big projects can use the whole processor.

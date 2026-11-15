@@ -1741,8 +1741,9 @@ void Session::set_audio_threads(int threads) {
     audio_threads_ = threads;
     unsigned helpers = 0;
     if (threads < 0) {
+        // Half of the processor's threads at most, so the rest of the computer stays free.
         const unsigned cores = std::thread::hardware_concurrency();
-        helpers = cores > 2 ? cores - 2 : 0;  // the audio thread plus all but one of the rest
+        helpers = cores >= 4 ? cores / 2 - 1 : 0;
     } else if (threads > 1) {
         helpers = static_cast<unsigned>(threads - 1);
     }

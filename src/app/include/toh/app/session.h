@@ -453,8 +453,9 @@ public:
     /// more time and stops crackling, but the sound reacts later. Restarts a running device.
     /// The default latency correction of recordings follows the block size.
     bool set_buffer_frames(std::uint32_t frames, std::string* error = nullptr);
-    /// How many processor threads compute the tracks: -1 chooses by the processor (one fewer
-    /// than its cores, so the rest of the computer keeps one), 1 is the audio thread alone.
+    /// How many processor threads compute the tracks: -1 chooses by the processor (half of
+    /// its threads), 1 is the audio thread alone. The helper threads sleep while nothing
+    /// plays and are woken only for blocks with more than one track to compute.
     /// Restarts a running device.
     void set_audio_threads(int threads);
     int audio_threads() const noexcept { return audio_threads_; }
