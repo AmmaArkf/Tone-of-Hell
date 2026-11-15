@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.20
+
+- Fix: a loop over a range of its own did not loop in an empty project or past the end of the project, so loop recording went straight on; with the metronome on it did not loop either. Now the range loops wherever it lies.
+
 ## 0.3.19
 
 - Take comping: select a part of one take and choose Edit (or the region menu) > "Use the selection on the track" > the track you are putting together; that part replaces the same part there, the take stays as it is. Ctrl+Z takes it back.

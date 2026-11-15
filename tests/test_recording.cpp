@@ -132,6 +132,19 @@ TEST_CASE("A loop over a range records one take per pass, and punching replaces 
     CHECK(regions[1].offset == 36000);              // the second pass follows in the take
 }
 
+TEST_CASE("A loop over a range of its own also loops in an empty project, and records over it") {
+    Engine engine(kRate, 1);
+    FakeCard card(1);
+    REQUIRE(engine.set_metronome(true, 120.0, 4, 4, 0.5f));
+    REQUIRE(engine.set_loop(true, 1000, 3000));
+    REQUIRE(engine.start_recording());
+    REQUIRE(engine.play());
+    card.run(engine, 4000);  // 0 to 3000, then 1000 more from 1000
+    CHECK(engine.position_frames() == 2000);
+    CHECK(engine.is_recording());
+    CHECK(read_all(engine).size() == 4000);  // one take on and on over every pass
+}
+
 TEST_CASE("A part of one take replaces the same part of another track") {
     Session session;
     REQUIRE(session.add_track("Main", constant_clip(48000, 2, 0.1f)));

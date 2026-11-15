@@ -953,7 +953,20 @@ void Engine::finish_fade() noexcept {
 }
 
 bool Engine::loop_region(std::int64_t& start, std::int64_t& end) const noexcept {
-    if (!loop_enabled_ || project_frames_ <= 0) {
+    if (!loop_enabled_) {
+        return false;
+    }
+    if (loop_end_ >= 0) {
+        // A range of its own loops as it is, also where the project has nothing yet (an
+        // empty project, or past its end): that is where takes are recorded.
+        if (loop_end_ <= loop_start_) {
+            return false;
+        }
+        start = loop_start_;
+        end = loop_end_;
+        return true;
+    }
+    if (project_frames_ <= 0) {
         return false;
     }
     end = (loop_end_ < 0 || loop_end_ > project_frames_) ? project_frames_ : loop_end_;
@@ -1706,8 +1719,8 @@ void Engine::render(const float* in, float* out, std::uint32_t frames) noexcept 
     const std::int64_t begin_pos = looping ? loop_start : 0;
     std::int64_t end_pos = looping ? loop_end : project_frames_;
     const bool endless_metronome =
-        metronome_enabled_ &&
-        (project_frames_ <= 0 || (!looping && metronome_endless_.load(std::memory_order_relaxed)));
+        metronome_enabled_ && !looping &&
+        (project_frames_ <= 0 || metronome_endless_.load(std::memory_order_relaxed));
     // A loop over a range of its own goes on looping while recording (one take per pass).
     const bool record_loop = looping && loop_end_ >= 0;
     if ((record_armed_ && !record_loop) || endless_metronome) {
