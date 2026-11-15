@@ -2,6 +2,18 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.0
+
+Level 2 is complete. What it brought since 0.3:
+
+- **Recording:** loop recording with a take for every pass, punch in/out inside the loop range, take comping ("Use the selection on the track"), a "Hear yourself" button.
+- **Editing sound:** normalize, louder/quieter, reverse, invert, silence; time-stretch that keeps the pitch and pitch-shift that keeps the length; the speed of one track, with or without keeping the pitch.
+- **Mixing:** groups of tracks with one fader, mute and meter, folded into stacks; sidechain ducking; MIDI controllers with MIDI learn for faders, pan, mute, solo and every action.
+- **Notes:** a score editor on a grand staff next to the piano roll, which now opens full screen, copies and pastes notes and zooms with the wheel.
+- **Arranging:** markers, a clip grid with scenes that play clips in a loop from the next bar, a library of stock sounds, instruments, ready-made parts and effects with favorites.
+- **Speed:** tracks are computed on several processor cores, recorded instruments render in blocks, projects are saved in the background.
+- The roadmap marks level 2 as complete (video was left out).
+
 ## 0.3.26
 
 - Clip grid (View > Clip grid): a column for every track and a row for every scene. Right-click a region > "Put into the clip grid", or select a region and click an empty slot of its track.

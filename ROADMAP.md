@@ -19,7 +19,7 @@ A stage is done when the criterion in parentheses is met and has been checked on
 - [x] **9. Built-in effects.** Equalizer, compressor, reverb, delay and limiter (each is checked on test signals and produces no clicks).
 - [ ] **10. Advanced features by community demand.** The order is chosen by votes on issues.
 
-Level 0 is complete: version 0.2. Level 1 (stages 6 to 9) is complete: version 0.3 (see Releases). Level 2 comes next. A pre-release of level 0 comes out after stages 1 to 5, and of level 1 after stages 6 to 9. A stabilization phase runs before every release.
+Level 0 is complete: version 0.2. Level 1 (stages 6 to 9) is complete: version 0.3. Level 2 is complete: version 0.4 (see Releases). Level 3 comes next. A pre-release of level 0 comes out after stages 1 to 5, and of level 1 after stages 6 to 9. A stabilization phase runs before every release.
 
 ## Features by level
 
@@ -31,7 +31,7 @@ Audio engine, transport, tracks, regions on the timeline, mixer, audio recording
 
 MIDI and piano roll, hosting of CLAP and VST3 plugins, automation, tempo map, basic built-in effects and instruments, usability (shortcuts, multiple selection).
 
-### Level 2. Advanced
+### Level 2. Advanced (complete: version 0.4)
 
 Take comping, punch in/out and loop recording, waveform editing, time-stretch and pitch-shift, groups and stacks, sidechain, external controllers, score editor, clip grid, markers. (Video was left out: picture editing belongs to video editors.)
 
