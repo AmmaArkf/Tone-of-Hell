@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.5
+
+- Surround sound: File > Export audio > "WAV 5.1 surround, 24-bit" writes six channels (L, R, C, LFE, Ls, Rs). Every track is rendered alone and placed by its direction between the two nearest loudspeakers, its stereo picture 30 degrees to either side.
+- The FX window of a track sets its direction on a circle seen from above (0 in front, 180 behind) and how much goes to the subwoofer (below 120 Hz). Saved with the project and undoable; playback stays stereo.
+
 ## 0.4.4
 
 - Mastering assistant (File > Export audio > Mastering assistant...): listens to the whole mix silently and measures its loudness (LUFS, ITU-R BS.1770), peak, lows, highs and stereo width, then suggests a chain for a target: streaming (-14 LUFS), loud club (-9), podcast (-16) or gentle (-18), with the reasons.

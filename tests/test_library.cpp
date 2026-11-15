@@ -443,6 +443,35 @@ TEST_CASE("The mastering chain reaches the target loudness under the ceiling") {
     }
 }
 
+TEST_CASE("A 5.1 surround export puts every track where it was turned") {
+    Session session;
+    REQUIRE(session.add_track("Front", toh::core::make_sine_clip(441.0, 1.0, 48000, 2, 0.25f)));
+    REQUIRE(session.add_track("Behind", toh::core::make_sine_clip(441.0, 1.0, 48000, 2, 0.25f)));
+    REQUIRE(session.set_track_surround(1, 180.0f, 0.5f));
+    session.commit_edits();
+    CHECK(session.undo_label() == "Surround");
+    REQUIRE(session.set_track_mute(0, true));  // first only the track behind
+    const auto file = std::filesystem::temp_directory_path() / "toh_surround.wav";
+    std::string error;
+    REQUIRE_MESSAGE(session.export_surround_wav(file, toh::audio::SampleFormat::Float32, &error), error);
+    // 6 channels of 32-bit floats: the size says so.
+    CHECK(std::filesystem::file_size(file) >= 6u * 4u * 48000u);
+    std::filesystem::remove(file);
+
+    // The placement itself: 180 degrees with the stereo picture 30 degrees to either side lies
+    // between the two rear loudspeakers.
+    REQUIRE(session.set_track_mute(0, false));
+    const auto folder = std::filesystem::temp_directory_path() / "toh_surround_project";
+    std::filesystem::create_directories(folder);
+    REQUIRE_MESSAGE(session.save_project(folder / "s.tohp", &error), error);
+    Session reopened;
+    REQUIRE_MESSAGE(reopened.open_project(folder / "s.tohp", &error), error);
+    CHECK(reopened.tracks()[1].surround_angle == doctest::Approx(180.0f));
+    CHECK(reopened.tracks()[1].surround_lfe == doctest::Approx(0.5f));
+    CHECK(reopened.tracks()[0].surround_angle == doctest::Approx(0.0f));
+    std::filesystem::remove_all(folder);
+}
+
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {
     REQUIRE(toh::core::stock_sound_count() >= 20);
     for (std::size_t k = 0; k < toh::core::stock_sound_count(); ++k) {

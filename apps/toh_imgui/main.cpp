@@ -132,7 +132,7 @@ void SDLCALL export_dialog_callback(void* user_data, const char* const* file_lis
 // A path chosen in a project or folder dialog, waiting for the main loop.
 struct PendingPath {
     enum class Kind { SaveProject, OpenProject, ProjectsFolder, SoundFont, ImportMidi, ExportMidi,
-                      SamplerSound, ClapFile, ExportMastered };
+                      SamplerSound, ClapFile, ExportMastered, ExportSurround };
     std::mutex mutex;
     bool ready = false;
     Kind kind = Kind::SaveProject;
@@ -2241,9 +2241,10 @@ void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
         static const SDL_DialogFileFilter midi_filters[] = {{"MIDI file", "mid;midi"}};
         SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, midi_filters, 1,
                                nullptr, false);
-    } else if (kind == PendingPath::Kind::ExportMastered) {
+    } else if (kind == PendingPath::Kind::ExportMastered || kind == PendingPath::Kind::ExportSurround) {
         static const SDL_DialogFileFilter wav_filters[] = {{"WAV", "wav"}};
-        const std::string wav_location = (projects_folder(ui) / "Master.wav").u8string();
+        const std::string wav_location =
+            (projects_folder(ui) / (kind == PendingPath::Kind::ExportSurround ? "Surround 5.1.wav" : "Master.wav")).u8string();
         SDL_ShowSaveFileDialog(&path_dialog_callback, &ui.path_request, ui.window, wav_filters, 1,
                                wav_location.c_str());
     } else if (kind == PendingPath::Kind::ExportMidi) {
@@ -2370,6 +2371,18 @@ void handle_path_request(Session& session, UiState& ui) {
             fit_view(session, ui.view);
         } else {
             ui.error = std::string(T_("MIDI: ")) + error;
+        }
+        return;
+    }
+    if (kind == PendingPath::Kind::ExportSurround) {
+        std::filesystem::path file = std::filesystem::u8path(path);
+        if (file.extension() != ".wav") {
+            file += ".wav";
+        }
+        if (session.export_surround_wav(file, toh::audio::SampleFormat::Int24, &error)) {
+            ui.notice = std::string(T_("Exported: ")) + file.u8string();
+        } else {
+            ui.error = std::string(T_("Export: ")) + error;
         }
         return;
     }
@@ -3423,6 +3436,9 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
             ImGui::Separator();
             if (ImGui::MenuItem(T_("Mastering assistant..."))) {
                 ui.master_open = true;
+            }
+            if (ImGui::MenuItem(T_("WAV 5.1 surround, 24-bit..."))) {
+                open_path_dialog(session, ui, PendingPath::Kind::ExportSurround);
             }
             ImGui::Separator();
             if (ImGui::MenuItem(T_("MIDI file (the notes)..."))) {
@@ -5632,11 +5648,68 @@ void draw_ducking(Session& session, std::size_t track) {
     }
 }
 
+// Where a track sounds in a 5.1 surround export: a circle seen from above with the five
+// loudspeakers; a click or drag sets the direction.
+void draw_surround(Session& session, std::size_t track) {
+    const TrackInfo& info = session.tracks()[track];
+    const float font = ImGui::GetFontSize();
+    ImGui::TextUnformatted(T_("Surround 5.1"));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    tooltip(T_("Only for File > Export audio > WAV 5.1 surround. Playback stays stereo."));
+    const float size = 7.0f * font;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("surround circle", ImVec2(size, size));
+    const ImVec2 centre(origin.x + size * 0.5f, origin.y + size * 0.5f);
+    const float radius = size * 0.42f;
+    ImDrawList* d = ImGui::GetWindowDrawList();
+    d->AddCircle(centre, radius, IM_COL32(120, 120, 130, 255), 48);
+    const auto point = [&](float degrees, float r) {
+        const float a = degrees * 0.017453292f;
+        return ImVec2(centre.x + std::sin(a) * r, centre.y - std::cos(a) * r);
+    };
+    for (const float speaker : {-110.0f, -30.0f, 0.0f, 30.0f, 110.0f}) {
+        d->AddRectFilled(ImVec2(point(speaker, radius).x - 3.0f, point(speaker, radius).y - 3.0f),
+                         ImVec2(point(speaker, radius).x + 3.0f, point(speaker, radius).y + 3.0f),
+                         IM_COL32(200, 200, 210, 255));
+    }
+    d->AddCircleFilled(centre, 3.0f, IM_COL32(150, 150, 160, 255));  // the listener
+    // The two sides of the track's stereo picture and its direction.
+    d->AddLine(point(info.surround_angle - 30.0f, radius * 0.75f), point(info.surround_angle + 30.0f, radius * 0.75f),
+               IM_COL32(80, 160, 240, 200), 2.0f);
+    d->AddCircleFilled(point(info.surround_angle, radius * 0.75f), 5.0f, IM_COL32(255, 170, 60, 255));
+    float angle = info.surround_angle;
+    float lfe = info.surround_lfe * 100.0f;
+    bool changed = false;
+    if (ImGui::IsItemActive()) {
+        const ImVec2 mouse = ImGui::GetIO().MousePos;
+        angle = std::atan2(mouse.x - centre.x, centre.y - mouse.y) * 57.29578f;
+        changed = true;
+    }
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    ImGui::SetNextItemWidth(12.0f * font);
+    changed |= ImGui::SliderFloat("##surround angle", &angle, -180.0f, 180.0f, T_("Direction: %.0f degrees"));
+    if (double_clicked()) {
+        angle = 0.0f;
+        changed = true;
+    }
+    ImGui::SetNextItemWidth(12.0f * font);
+    changed |= ImGui::SliderFloat("##surround lfe", &lfe, 0.0f, 100.0f, T_("Subwoofer: %.0f%%"));
+    ImGui::TextDisabled("%s", T_("0 in front, -90 left, 90 right, 180 behind."));
+    ImGui::EndGroup();
+    if (changed) {
+        session.set_track_surround(track, angle, lfe / 100.0f);
+    }
+}
+
 void draw_effects_popup(Session& session, UiState& ui, std::size_t track) {
     if (!ImGui::BeginPopup("track effects")) {
         return;
     }
     draw_ducking(session, track);
+    ImGui::Separator();
+    draw_surround(session, track);
     ImGui::Separator();
     ImGui::TextDisabled("%s", T_("Effects of the track: the sound passes them from top to bottom."));
     bool open_picker = false;

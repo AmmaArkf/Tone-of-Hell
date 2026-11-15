@@ -214,6 +214,10 @@ struct TrackInfo {
     float duck_threshold_db = -30.0f;
     float duck_amount_db = 12.0f;
     float duck_release_ms = 150.0f;
+    /// Where the track sounds in a 5.1 surround export: the direction in degrees (0 in front,
+    /// -90 left, 90 right, 180 behind), and how much of it goes to the subwoofer (0 to 1).
+    float surround_angle = 0.0f;
+    float surround_lfe = 0.0f;
     /// The clips of this track in the clip grid, one per scene at most.
     std::vector<ClipSlot> clips;
 };
@@ -732,6 +736,14 @@ public:
                     std::string* error = nullptr) const;
     /// The whole project as it sounds (like an export), interleaved, in memory. At most 20 minutes.
     bool render_mix(std::vector<float>* mix, std::string* error = nullptr) const;
+    /// Sets where a track sounds in a surround export (see TrackInfo::surround_angle).
+    bool set_track_surround(std::size_t track, float angle, float lfe);
+    /// Exports the project as 5.1 surround (L, R, C, LFE, Ls, Rs) to a WAV file. Every track is
+    /// rendered alone and placed by its direction: the left side of its stereo picture 30
+    /// degrees to the left of that direction, the right side 30 degrees to the right, between
+    /// the two nearest loudspeakers. The subwoofer gets what the tracks send it, below 120 Hz.
+    bool export_surround_wav(const std::filesystem::path& path, audio::SampleFormat format,
+                             std::string* error = nullptr) const;
     /// Exports the project through the mastering chain (see core::master_audio) to a WAV file.
     /// `after` (if given) receives what the mastered sound measures.
     bool export_mastered_wav(const std::filesystem::path& path, const core::MasterSettings& settings,
@@ -854,7 +866,7 @@ private:
     void drain_recording();
     /// Renders the whole project offline and hands it to `sink` block by block. Stops and
     /// returns false as soon as `sink` returns false.
-    bool render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const;
+    bool render_project(const std::function<bool(const float*, std::uint32_t)>& sink, int only_track = -1) const;
     void finish_take();
     void finish_note_take();
 

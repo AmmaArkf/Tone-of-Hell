@@ -2889,6 +2889,10 @@ std::string Session::project_text(const std::vector<std::shared_ptr<const Source
             out << "duck=" << track.duck_key << "|" << track.duck_threshold_db << "|" << track.duck_amount_db
                 << "|" << track.duck_release_ms << "\n";
         }
+        if (track.surround_angle != 0.0f || track.surround_lfe != 0.0f) {
+            out << "surround_angle=" << track.surround_angle << "\n";
+            out << "surround_lfe=" << track.surround_lfe << "\n";
+        }
         for (const RegionInfo& region : track.regions) {
             out << "[region]\n";
             out << "source=" << index_of[region.source.get()] << "\n";
@@ -3322,6 +3326,8 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         bool solo = false;
         long long group = -1;
         std::string duck;
+        double surround_angle = 0.0;
+        double surround_lfe = 0.0;
         std::vector<std::pair<long long, RegionEntry>> clips;  // scene, region
         long long instrument = 0;
         long long program = -1;
@@ -3469,6 +3475,10 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                     tracks.back().group = integer;
                 } else if (key == "duck") {
                     tracks.back().duck = value;
+                } else if (key == "surround_angle") {
+                    tracks.back().surround_angle = real;
+                } else if (key == "surround_lfe") {
+                    tracks.back().surround_lfe = real;
                 } else if (key == "instrument") {
                     tracks.back().instrument = integer;
                 } else if (key == "program") {
@@ -3736,6 +3746,12 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
                 track.duck_amount_db = std::clamp(amount, 0.0f, 48.0f);
                 track.duck_release_ms = std::clamp(release, 10.0f, 2000.0f);
             }
+        }
+        if (std::isfinite(entry.surround_angle)) {
+            track.surround_angle = static_cast<float>(std::clamp(entry.surround_angle, -180.0, 180.0));
+        }
+        if (std::isfinite(entry.surround_lfe)) {
+            track.surround_lfe = static_cast<float>(std::clamp(entry.surround_lfe, 0.0, 1.0));
         }
         track.pan_curve = parse_curve(entry.pan_curve, -1.0f, 1.0f);
         // "frame:value,frame:value"
@@ -4063,7 +4079,7 @@ std::string Session::edit_text() const {
             << static_cast<int>(track.instrument) << "|" << track.program << "|"
             << static_cast<const void*>(track.sampler.get()) << "|" << track.group << "|" << track.duck_key
             << "|" << track.duck_threshold_db << "|" << track.duck_amount_db << "|" << track.duck_release_ms
-            << "\n";
+            << "|" << track.surround_angle << "|" << track.surround_lfe << "\n";
         for (const ClipSlot& clip : track.clips) {
             out << "L|" << clip.scene << "|" << static_cast<const void*>(clip.region.source.get()) << "|"
                 << clip.region.offset << "|" << clip.region.length << "|" << clip.region.fade_in << "|"
@@ -4428,7 +4444,122 @@ bool Session::export_mastered_wav(const std::filesystem::path& path, const core:
     return true;
 }
 
-bool Session::render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const {
+bool Session::set_track_surround(std::size_t track, float angle, float lfe) {
+    if (track >= tracks_.size() || !std::isfinite(angle) || !std::isfinite(lfe)) {
+        return false;
+    }
+    angle = std::fmod(angle, 360.0f);
+    if (angle > 180.0f) {
+        angle -= 360.0f;
+    } else if (angle < -180.0f) {
+        angle += 360.0f;
+    }
+    tracks_[track].surround_angle = angle;
+    tracks_[track].surround_lfe = std::clamp(lfe, 0.0f, 1.0f);
+    pending_label_ = "Surround";
+    return true;
+}
+
+namespace {
+
+// The gains of the five main loudspeakers of 5.1 (in the order L, R, C, Ls, Rs) for a sound
+// from `angle` degrees: between the two nearest ones, with constant power.
+std::array<float, 5> surround_gains(double angle) {
+    // The loudspeakers around the listener, by angle, and their place in the list.
+    static const double angles[6] = {-110.0, -30.0, 0.0, 30.0, 110.0, 250.0};
+    static const int speaker[6] = {3, 0, 2, 1, 4, 3};
+    angle = std::fmod(angle + 540.0, 360.0) - 180.0;  // -180 .. 180
+    if (angle < -110.0) {
+        angle += 360.0;  // behind, on the way from Rs round to Ls
+    }
+    std::array<float, 5> gains{};
+    for (int k = 0; k < 5; ++k) {
+        if (angle >= angles[k] && angle <= angles[k + 1]) {
+            const double t = (angle - angles[k]) / (angles[k + 1] - angles[k]);
+            gains[static_cast<std::size_t>(speaker[k])] += static_cast<float>(std::cos(t * 1.5707963267948966));
+            gains[static_cast<std::size_t>(speaker[k + 1])] += static_cast<float>(std::sin(t * 1.5707963267948966));
+            break;
+        }
+    }
+    return gains;
+}
+
+}  // namespace
+
+bool Session::export_surround_wav(const std::filesystem::path& path, audio::SampleFormat format,
+                                  std::string* error) const {
+    if (length_frames_ <= 0) {
+        set_error(error, "there is nothing to export");
+        return false;
+    }
+    if (length_frames_ > static_cast<std::int64_t>(config_.sample_rate) * 60 * 20) {
+        set_error(error, "the project is longer than 20 minutes");
+        return false;
+    }
+    const auto frames = static_cast<std::size_t>(length_frames_);
+    const std::size_t channels = config_.channels;
+    std::vector<float> out(frames * 6, 0.0f);
+    std::vector<float> lfe(frames, 0.0f);
+    std::vector<float> stem;
+    static const std::size_t place[5] = {0, 1, 2, 4, 5};  // L R C Ls Rs in the 5.1 order (LFE is 3)
+    for (std::size_t t = 0; t < tracks_.size(); ++t) {
+        const TrackInfo& track = tracks_[t];
+        if (track.regions.empty() || !track_audible(t)) {
+            continue;
+        }
+        stem.clear();
+        stem.reserve(frames * channels);
+        const bool done = render_project(
+            [&](const float* data, std::uint32_t count) {
+                stem.insert(stem.end(), data, data + static_cast<std::size_t>(count) * channels);
+                return true;
+            },
+            static_cast<int>(t));
+        if (!done) {
+            set_error(error, "the project could not be played");
+            return false;
+        }
+        const std::size_t sides = std::min<std::size_t>(channels, 2);
+        std::array<std::array<float, 5>, 2> gains{};
+        for (std::size_t side = 0; side < sides; ++side) {
+            const double spread = sides == 2 ? (side == 0 ? -30.0 : 30.0) : 0.0;
+            gains[side] = surround_gains(static_cast<double>(track.surround_angle) + spread);
+        }
+        const std::size_t count = std::min(frames, stem.size() / channels);
+        for (std::size_t i = 0; i < count; ++i) {
+            float sum = 0.0f;
+            for (std::size_t side = 0; side < sides; ++side) {
+                const float value = stem[i * channels + side];
+                sum += value;
+                for (std::size_t s = 0; s < 5; ++s) {
+                    out[i * 6 + place[s]] += value * gains[side][s];
+                }
+            }
+            lfe[i] += sum / static_cast<float>(sides) * track.surround_lfe;
+        }
+    }
+    // The subwoofer: below 120 Hz (two one-pole low-pass filters).
+    const auto a = static_cast<float>(1.0 - std::exp(-2.0 * 3.14159265358979 * 120.0 / config_.sample_rate));
+    float first = 0.0f;
+    float second = 0.0f;
+    for (std::size_t i = 0; i < frames; ++i) {
+        first += a * (lfe[i] - first);
+        second += a * (first - second);
+        out[i * 6 + 3] = second;
+    }
+    audio::WavWriter writer;
+    if (!writer.open(path, config_.sample_rate, 6, format, error)) {
+        return false;
+    }
+    if (!writer.write(out.data(), frames)) {
+        set_error(error, "cannot write the file (is the disk full?)");
+        return false;
+    }
+    writer.close();
+    return true;
+}
+
+bool Session::render_project(const std::function<bool(const float*, std::uint32_t)>& sink, int only_track) const {
     // A second engine renders the same project offline. A plugin cannot work for two engines at
     // once, so while the file is written the plugins are lent to the second engine: playback
     // stops, the playing engine lets go of them, and it gets them back afterwards.
@@ -4490,7 +4621,7 @@ bool Session::render_project(const std::function<bool(const float*, std::uint32_
                                    plugins.latency, track.volume_curve, track.pan_curve, plugins.params);
         offline->set_track_gain(slot, track.gain);
         offline->set_track_pan(slot, track.pan);
-        offline->set_track_mute(slot, silenced(track));
+        offline->set_track_mute(slot, silenced(track) || (only_track >= 0 && static_cast<int>(i) != only_track));
         offline->set_track_solo(slot, track.solo);
         offline->set_track_output(slot, track.group);
         offline->set_track_ducking(slot, track.duck_key, track.duck_threshold_db, track.duck_amount_db,
