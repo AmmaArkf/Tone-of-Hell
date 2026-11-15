@@ -2,6 +2,12 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.7
+
+- The pitch editor grew into a graphic editor for Tune: the "Editor" button of a Tune effect (in FX and in the effect list under the library) opens it on the recorded sound of the track and shares the key and scale with the effect.
+- Key and scale choice, light rows for the notes of the scale and a green line where the scale would put each note; "Correct to the scale" with a strength from 0 to 100 % (less keeps some of the singer's own pitch).
+- An overview of the whole sound on top shows the part in view; a click there goes to another part. A double-click on a note cuts it in two, so each part can be moved by itself.
+
 ## 0.4.6
 
 - Tune: a new built-in effect (FX > Add an effect > Tune) that pulls a voice or an instrument onto the notes of a scale while it plays, like Waves Tune or Auto-Tune. Key and scale (chromatic, major, minor, both pentatonics, blues), Speed (0 ms: the robot voice; slower: natural), Amount and Mix. Notes in tune pass unchanged; the delay is made up for.
