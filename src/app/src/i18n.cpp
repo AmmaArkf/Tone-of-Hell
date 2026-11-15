@@ -339,6 +339,13 @@ const Entry kRussian[] = {
     {"Buffer size", "Размер буфера"},
     {"Library", "Библиотека"},
     {"Loop the selection", "Зациклить выделенное"},
+    {"Saving...", "Сохранение..."},
+    {"Still saving, a moment please.", "Ещё сохраняется, минутку."},
+    {"Use the selection on the track", "Поставить выделенное на дорожку"},
+    {"Use a take", "выбор дубля"},
+    {"Putting the best takes together: select a part of one take, then choose the track it should replace "
+     "that part on.",
+     "Сборка лучших дублей: выделите часть одного дубля и выберите дорожку, на которой она заменит этот участок."},
     {"Loop the whole project", "Зациклить весь проект"},
     {"Punch in/out: record only inside the loop range", "Punch in/out: записывать только внутри цикла"},
     {"Select a part of the tracks and choose \"Loop the selection\" first. A take then replaces only that part; "

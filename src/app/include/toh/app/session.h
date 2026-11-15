@@ -397,6 +397,9 @@ public:
     /// Puts copied regions at `frame`, the first list onto `track` and the next ones onto the
     /// tracks below; tracks are added when there are not enough (kNewTrack: all new).
     bool paste(const Clipboard& clipboard, std::size_t track, std::int64_t frame);
+    /// Take comping: what lies inside `range` on its first track (a take) replaces the same
+    /// part of `track`. Returns false for an empty range or the same track.
+    bool comp_range(const Range& range, std::size_t track);
 
     // ---- Grid ----------------------------------------------------------------------------
 
@@ -524,6 +527,22 @@ public:
     /// of the project and the audio of every region. Returns false on failure (`error`, if
     /// given, says why); the file that was there before stays as it was.
     bool save_project(const std::filesystem::path& file, std::string* error = nullptr);
+    /// Saves in the background: the project is taken as it is now and another thread writes
+    /// the file, so the program goes on meanwhile (big audio takes a while to write). Returns
+    /// false while another background save is still running. Edits made meanwhile stay unsaved.
+    bool save_project_in_background(const std::filesystem::path& file);
+    /// The same for a recovery file (see save_recovery()).
+    bool save_recovery_in_background(const std::filesystem::path& file);
+    bool saving() const noexcept { return save_running_; }
+    struct SaveResult {
+        bool done = false;  // false: no background save has finished since the last call
+        bool ok = false;
+        bool recovery = false;
+        std::filesystem::path file;
+        std::string error;
+    };
+    /// How a background save went, once it is over (update() notices that); given out once.
+    SaveResult take_save_result();
     /// Replaces everything in the session with a project saved by save_project(). On failure
     /// nothing changes.
     bool open_project(const std::filesystem::path& file, std::string* error = nullptr);
@@ -665,6 +684,13 @@ private:
     /// zip compression level of the audio.
     bool write_project(const std::filesystem::path& file, std::string* error,
                        const std::string& head, int audio_level);
+    struct ProjectSnapshot;
+    std::shared_ptr<ProjectSnapshot> snapshot_project(const std::string& head, int audio_level) const;
+    static bool write_snapshot(const ProjectSnapshot& snapshot, const std::filesystem::path& file,
+                               std::string* error);
+    bool start_background_save(const std::filesystem::path& file, bool recovery);
+    void finish_background_save();
+    void wait_for_background_save();
     /// Every source that a region uses, in the order of the tracks.
     std::vector<std::shared_ptr<const Source>> used_sources() const;
     /// The text that describes the project, with `files[i]` naming the audio of `sources[i]`.
@@ -795,6 +821,16 @@ private:
     std::int64_t loader_hint_ = -1;  // a position just jumped to, not yet seen by the engine
     std::mutex prefetch_mutex_;      // one thread at a time fills the pages
     std::mutex loader_busy_;         // held by the loader while it holds copies of regions
+    // A save running in the background (see save_project_in_background()).
+    std::thread save_thread_;
+    bool save_running_ = false;
+    std::atomic<bool> save_done_{false};
+    bool save_ok_ = false;       // written by the save thread before save_done_
+    std::string save_error_;
+    std::string save_state_;     // state_text() when the save began
+    SaveResult save_result_;
+    std::uint64_t project_generation_ = 0;  // counts new and opened projects
+    std::uint64_t save_generation_ = 0;
     std::thread loader_;             // last: started when everything else exists
 };
 

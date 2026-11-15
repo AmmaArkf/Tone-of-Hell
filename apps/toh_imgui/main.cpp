@@ -2213,10 +2213,19 @@ void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
 
 // Ctrl+S: saves to the project's file, or asks for one the first time (then it returns false;
 // the save happens when the dialog answers).
-bool save_project(Session& session, UiState& ui) {
+// In the background unless something must wait for the file (quitting, opening another
+// project): then it is saved right away.
+bool save_project(Session& session, UiState& ui, bool background = true) {
     if (session.project_file().empty()) {
         open_path_dialog(session, ui, PendingPath::Kind::SaveProject);
         return false;
+    }
+    if (background) {
+        if (!session.save_project_in_background(session.project_file())) {
+            ui.notice = T_("Still saving, a moment please.");
+            return false;
+        }
+        return true;  // the notice comes when it is done
     }
     std::string error;
     if (session.save_project(session.project_file(), &error)) {
@@ -2388,7 +2397,7 @@ void draw_unsaved_popup(Session& session, UiState& ui) {
             if (session.project_file().empty()) {
                 ui.after_save = then;  // the "save as" dialog finishes the job
                 open_path_dialog(session, ui, PendingPath::Kind::SaveProject);
-            } else if (save_project(session, ui)) {
+            } else if (save_project(session, ui, false)) {
                 do_then(session, ui, then);
             }
         }
@@ -2471,6 +2480,29 @@ void draw_clipboard_items(Session& session, UiState& ui) {
     if (ImGui::MenuItem(T_("Keep only the selection"), key_label(ui, Action::KeepSelection), false,
                         has_range(ui))) {
         keep_selection(session, ui);
+    }
+    // Take comping: the selected part of one take goes onto the track that is being put together.
+    const bool one_track = has_range(ui) && ui.range_first == ui.range_last && ui.range_first < session.tracks().size();
+    if (ImGui::BeginMenu(T_("Use the selection on the track"), one_track)) {
+        for (std::size_t t = 0; t < session.tracks().size(); ++t) {
+            if (t == ui.range_first) {
+                continue;
+            }
+            const std::string label = std::to_string(t + 1) + ". " + session.tracks()[t].name;
+            if (ImGui::MenuItem(label.c_str())) {
+                toh::app::Session::Range range;
+                range.first_track = ui.range_first;
+                range.last_track = ui.range_first;
+                range.begin = ui.range_begin;
+                range.end = ui.range_end;
+                session.comp_range(range, t);
+            }
+        }
+        ImGui::EndMenu();
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::SetTooltip("%s", T_("Putting the best takes together: select a part of one take, then choose the "
+                                   "track it should replace that part on."));
     }
     if (ImGui::MenuItem(T_("Delete the selection"), key_label(ui, Action::RemoveRegion), false,
                         has_range(ui))) {
@@ -2598,16 +2630,11 @@ void autosave_tick(Session& session, UiState& ui) {
         return;
     }
     ui.last_autosave_ticks = now;
-    if (!session.needs_recovery_save()) {
+    if (session.saving() || !session.needs_recovery_save()) {
         return;
     }
-    std::string error;
-    if (session.save_recovery(ui.recovery_file, &error)) {
-        ui.recovery_written = true;
-        toh::app::logging::info("Autosaved the unsaved changes");
-    } else {
-        toh::app::logging::warning("Autosave failed: " + error);
-    }
+    // In the background; the main loop notes the result (see take_save_result()).
+    session.save_recovery_in_background(ui.recovery_file);
 }
 
 // After a crash: offers the project that autosave kept.
@@ -6608,6 +6635,12 @@ void draw_status_bar(const Session& session, const UiState& ui) {
         ImGui::TextDisabled("%s", T_("|"));
         ImGui::SameLine();
     }
+    if (session.saving()) {
+        ImGui::TextColored(ImVec4(0.95f, 0.80f, 0.30f, 1.0f), "%s", T_("Saving..."));
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", T_("|"));
+        ImGui::SameLine();
+    }
     ImGui::Text(T_("Tracks: %d   Regions: %d   Length: %s"), static_cast<int>(session.tracks().size()),
                 static_cast<int>(regions),
                 format_time(session.length_frames(), session.sample_rate()).c_str());
@@ -6892,6 +6925,22 @@ int main(int argc, char* argv[]) {
                 }
             }
             session.update();
+            {
+                // A save that ran in the background is over.
+                const Session::SaveResult saved = session.take_save_result();
+                if (saved.done && saved.recovery) {
+                    if (saved.ok) {
+                        ui.recovery_written = true;
+                        toh::app::logging::info("Autosaved the unsaved changes");
+                    } else {
+                        toh::app::logging::warning("Autosave failed: " + saved.error);
+                    }
+                } else if (saved.done && saved.ok) {
+                    ui.notice = std::string(T_("Saved: ")) + saved.file.u8string();
+                } else if (saved.done) {
+                    ui.error = std::string(T_("Save: ")) + saved.error;
+                }
+            }
 
             ImGui_ImplSDLRenderer3_NewFrame();
             ImGui_ImplSDL3_NewFrame();

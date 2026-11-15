@@ -1,8 +1,11 @@
 // Tests for the library: stock sounds, ready-made parts, and placing them on tracks.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <filesystem>
 #include <string>
+#include <thread>
 
 #include "doctest.h"
 #include "toh/app/library.h"
@@ -10,6 +13,37 @@
 #include "toh/core/stock_sounds.h"
 
 using toh::app::Session;
+
+TEST_CASE("A project is saved in the background while the program goes on") {
+    Session session;
+    const std::size_t track = session.add_empty_track("Drums");
+    REQUIRE(session.add_clip_region(track, 0, "Kick", toh::core::make_stock_sound(0, 48000, 2)));
+    const auto folder = std::filesystem::temp_directory_path() / "toh_background_save";
+    std::filesystem::create_directories(folder);
+    const auto file = folder / "b.tohp";
+    REQUIRE(session.save_project_in_background(file));
+    CHECK_FALSE(session.save_project_in_background(file));  // one at a time
+    session.add_marker(1000, "Made while saving");
+    toh::app::Session::SaveResult result;
+    for (int k = 0; k < 2000 && !result.done; ++k) {
+        session.update();
+        result = session.take_save_result();
+        if (!result.done) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
+    REQUIRE(result.done);
+    CHECK(result.ok);
+    CHECK_FALSE(session.saving());
+    CHECK(session.project_file() == file);
+    CHECK(session.modified());  // the marker came after the save began
+    Session reopened;
+    std::string error;
+    REQUIRE_MESSAGE(reopened.open_project(file, &error), error);
+    REQUIRE(reopened.tracks().size() == 1);
+    CHECK(reopened.markers().empty());
+    std::filesystem::remove_all(folder);
+}
 
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {
     REQUIRE(toh::core::stock_sound_count() >= 20);

@@ -319,6 +319,9 @@ Session::Session(const audio::DeviceConfig& config)
 }
 
 Session::~Session() {
+    if (save_thread_.joinable()) {
+        save_thread_.join();  // a background save finishes its file
+    }
     stop_audio();  // the audio callback must not run while the engine is destroyed
     {
         const std::lock_guard<std::mutex> lock(loader_mutex_);
@@ -493,6 +496,7 @@ bool Session::start_audio(std::string* error) {
 void Session::stop_audio() { device_.stop(); }
 
 void Session::update() {
+    finish_background_save();
     if (!device_.running()) {
         // No audio thread is running: apply the queued control messages here instead.
         engine_.render(nullptr, 0);
@@ -2410,6 +2414,7 @@ std::string Session::state_text() const {
 bool Session::modified() const { return state_text() != saved_state_; }
 
 bool Session::save_project(const std::filesystem::path& file, std::string* error) {
+    wait_for_background_save();
     if (!write_project(file, error, std::string(), MZ_BEST_SPEED)) {
         return false;
     }
@@ -2425,6 +2430,7 @@ bool Session::needs_recovery_save() const {
 }
 
 bool Session::save_recovery(const std::filesystem::path& file, std::string* error) {
+    wait_for_background_save();
     std::error_code code;
     std::filesystem::create_directories(file.parent_path(), code);
     // Fast rather than small: an autosave should not hold up the program.
@@ -2446,8 +2452,27 @@ bool Session::restore_recovery(const std::filesystem::path& file, std::string* e
     return true;
 }
 
-bool Session::write_project(const std::filesystem::path& file, std::string* error,
-                            const std::string& head, int audio_level) {
+// Everything a project file holds, taken on the main thread (plugins give their states only
+// there); writing it out can then happen on any thread.
+struct Session::ProjectSnapshot {
+    struct Entry {
+        std::string name;
+        std::string bytes;
+        int level = MZ_DEFAULT_LEVEL;
+    };
+    struct Audio {
+        std::string name;
+        std::shared_ptr<const Source> source;  // keeps its cache file alive
+    };
+    std::string text;
+    std::vector<Entry> entries;
+    std::vector<Audio> audio;
+    int audio_level = MZ_BEST_SPEED;
+};
+
+std::shared_ptr<Session::ProjectSnapshot> Session::snapshot_project(const std::string& head, int audio_level) const {
+    auto snapshot = std::make_shared<ProjectSnapshot>();
+    snapshot->audio_level = audio_level;
     const std::vector<std::shared_ptr<const Source>> sources = used_sources();
     std::vector<std::string> names;
     for (std::size_t i = 0; i < sources.size(); ++i) {
@@ -2458,7 +2483,8 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
     // Pictures of tracks that come from files travel inside the project, so they are there on
     // another computer too and when the file is moved.
     std::map<std::string, std::string> icons;
-    std::vector<std::pair<std::string, std::string>> pictures;  // entry name, file contents
+    std::size_t picture_count = 0;
+    std::vector<ProjectSnapshot::Entry> pictures;
     for (const TrackInfo& track : tracks_) {
         if (track.icon.rfind("file:", 0) != 0 || icons.count(track.icon) != 0) {
             continue;
@@ -2473,13 +2499,72 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
         for (char& c : extension) {
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
-        const std::string name = "picture-" + std::to_string(pictures.size() + 1) + extension;
+        const std::string name = "picture-" + std::to_string(++picture_count) + extension;
         icons[track.icon] = "embedded:" + name;
-        pictures.emplace_back(name, std::move(bytes));
+        pictures.push_back(ProjectSnapshot::Entry{"pictures/" + name, std::move(bytes), MZ_NO_COMPRESSION});
     }
-    std::string text = project_text(sources, names, &icons);
-    text.insert(text.find('\n') + 1, head);
+    snapshot->text = project_text(sources, names, &icons);
+    snapshot->text.insert(snapshot->text.find('\n') + 1, head);
 
+    // Sampler sounds: the mono samples as 32-bit floats.
+    for (std::size_t t = 0; t < tracks_.size(); ++t) {
+        if (!tracks_[t].sampler || !tracks_[t].sampler->data) {
+            continue;
+        }
+        const std::vector<float>& samples = *tracks_[t].sampler->data;
+        snapshot->entries.push_back(ProjectSnapshot::Entry{
+            "samples/sample-" + std::to_string(t + 1) + ".f32",
+            std::string(reinterpret_cast<const char*>(samples.data()), samples.size() * sizeof(float)),
+            MZ_DEFAULT_LEVEL});
+    }
+    // The states of the instrument plugins and effects, as the plugins write them.
+    for (std::size_t t = 0; t < tracks_.size(); ++t) {
+        const auto& instrument = tracks_[t].plugin_instrument.plugin;
+        std::vector<char> instrument_state;
+        if (instrument && instrument->save_state(instrument_state)) {
+            snapshot->entries.push_back(ProjectSnapshot::Entry{
+                instrument_state_entry(t), std::string(instrument_state.begin(), instrument_state.end()),
+                MZ_DEFAULT_LEVEL});
+        }
+    }
+    for (std::size_t t = 0; t < tracks_.size(); ++t) {
+        for (std::size_t e = 0; e < tracks_[t].effects.size(); ++e) {
+            const auto& plugin = tracks_[t].effects[e].plugin;
+            std::vector<char> state;
+            if (!plugin || !plugin->save_state(state)) {
+                continue;
+            }
+            snapshot->entries.push_back(
+                ProjectSnapshot::Entry{effect_state_entry(t, e), std::string(state.begin(), state.end()), MZ_DEFAULT_LEVEL});
+        }
+    }
+    for (auto& picture : pictures) {
+        snapshot->entries.push_back(std::move(picture));
+    }
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+        const core::ClipData& clip = *sources[i]->clip;
+        if (clip.notes != nullptr) {
+            // Notes: one line per note, "start length pitch velocity".
+            std::ostringstream notes_text;
+            notes_text.imbue(std::locale::classic());
+            notes_text.precision(9);
+            notes_text << "frames=" << clip.notes->frames << "\n";
+            for (const core::Note& note : clip.notes->notes) {
+                notes_text << note.start << " " << note.length << " " << static_cast<int>(note.pitch) << " "
+                           << note.velocity << "\n";
+            }
+            snapshot->entries.push_back(ProjectSnapshot::Entry{"notes/" + names[i], notes_text.str(), MZ_DEFAULT_LEVEL});
+            continue;
+        }
+        snapshot->audio.push_back(ProjectSnapshot::Audio{"audio/" + names[i], sources[i]});
+    }
+    return snapshot;
+}
+
+// Writes a snapshot as a project file. Any thread: it reads only the snapshot and the clips,
+// which never change.
+bool Session::write_snapshot(const ProjectSnapshot& snapshot, const std::filesystem::path& file,
+                             std::string* error) {
     // The archive is written under another name first, so a failed save never destroys the
     // project that was there.
     std::filesystem::path temporary = file;
@@ -2494,78 +2579,30 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
             return false;
         }
         zip.writing = mz_zip_writer_init_cfile(&zip.zip, zip.file, MZ_ZIP_FLAG_WRITE_ZIP64) != 0;
-        bool ok = zip.writing && mz_zip_writer_add_mem(&zip.zip, kProjectEntry, text.data(),
-                                                       text.size(), MZ_DEFAULT_LEVEL) != 0;
-        // Sampler sounds: the mono samples as 32-bit floats.
-        for (std::size_t t = 0; ok && t < tracks_.size(); ++t) {
-            if (!tracks_[t].sampler || !tracks_[t].sampler->data) {
-                continue;
-            }
-            const std::vector<float>& samples = *tracks_[t].sampler->data;
-            const std::string entry = "samples/sample-" + std::to_string(t + 1) + ".f32";
-            ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), samples.data(),
-                                       samples.size() * sizeof(float), MZ_DEFAULT_LEVEL) != 0;
+        bool ok = zip.writing && mz_zip_writer_add_mem(&zip.zip, kProjectEntry, snapshot.text.data(),
+                                                       snapshot.text.size(), MZ_DEFAULT_LEVEL) != 0;
+        for (std::size_t i = 0; ok && i < snapshot.entries.size(); ++i) {
+            const ProjectSnapshot::Entry& entry = snapshot.entries[i];
+            ok = mz_zip_writer_add_mem(&zip.zip, entry.name.c_str(), entry.bytes.data(), entry.bytes.size(),
+                                       static_cast<mz_uint>(entry.level)) != 0;
         }
-        // The states of the instrument plugins and effects, as the plugins write them.
-        for (std::size_t t = 0; ok && t < tracks_.size(); ++t) {
-            const auto& instrument = tracks_[t].plugin_instrument.plugin;
-            std::vector<char> instrument_state;
-            if (instrument && instrument->save_state(instrument_state)) {
-                const std::string entry = instrument_state_entry(t);
-                ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), instrument_state.data(),
-                                           instrument_state.size(), MZ_DEFAULT_LEVEL) != 0;
-            }
-        }
-        for (std::size_t t = 0; ok && t < tracks_.size(); ++t) {
-            for (std::size_t e = 0; ok && e < tracks_[t].effects.size(); ++e) {
-                const auto& plugin = tracks_[t].effects[e].plugin;
-                std::vector<char> state;
-                if (!plugin || !plugin->save_state(state)) {
-                    continue;
-                }
-                const std::string entry = effect_state_entry(t, e);
-                ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), state.data(), state.size(),
-                                           MZ_DEFAULT_LEVEL) != 0;
-            }
-        }
-        for (std::size_t i = 0; ok && i < pictures.size(); ++i) {
-            const std::string entry = "pictures/" + pictures[i].first;
-            ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), pictures[i].second.data(),
-                                       pictures[i].second.size(), MZ_NO_COMPRESSION) != 0;
-        }
-        for (std::size_t i = 0; ok && i < sources.size(); ++i) {
-            const core::ClipData& clip = *sources[i]->clip;
-            if (clip.notes != nullptr) {
-                // Notes: one line per note, "start length pitch velocity".
-                std::ostringstream notes_text;
-                notes_text.imbue(std::locale::classic());
-                notes_text.precision(9);
-                notes_text << "frames=" << clip.notes->frames << "\n";
-                for (const core::Note& note : clip.notes->notes) {
-                    notes_text << note.start << " " << note.length << " "
-                               << static_cast<int>(note.pitch) << " " << note.velocity << "\n";
-                }
-                const std::string body = notes_text.str();
-                const std::string note_entry = "notes/" + names[i];
-                ok = mz_zip_writer_add_mem(&zip.zip, note_entry.c_str(), body.data(), body.size(),
-                                           MZ_DEFAULT_LEVEL) != 0;
-                continue;
-            }
-            const std::string entry = "audio/" + names[i];
+        for (std::size_t i = 0; ok && i < snapshot.audio.size(); ++i) {
+            const core::ClipData& clip = *snapshot.audio[i].source->clip;
+            const std::string& entry = snapshot.audio[i].name;
             const auto bytes = static_cast<mz_uint64>(clip.frames()) * clip.channels * sizeof(float);
             if (clip.disk != nullptr) {
                 std::FILE* audio = core::open_file(clip.disk->path(), "rb");
                 ok = audio != nullptr &&
-                     mz_zip_writer_add_cfile(&zip.zip, entry.c_str(), audio, bytes, nullptr, nullptr,
-                                             0, static_cast<mz_uint>(audio_level), nullptr, 0,
-                                             nullptr, 0) != 0;
+                     mz_zip_writer_add_cfile(&zip.zip, entry.c_str(), audio, bytes, nullptr, nullptr, 0,
+                                             static_cast<mz_uint>(snapshot.audio_level), nullptr, 0, nullptr,
+                                             0) != 0;
                 if (audio != nullptr) {
                     std::fclose(audio);
                 }
             } else {
                 ok = mz_zip_writer_add_mem(&zip.zip, entry.c_str(), clip.samples.data(),
                                            static_cast<std::size_t>(bytes),
-                                           static_cast<mz_uint>(audio_level)) != 0;
+                                           static_cast<mz_uint>(snapshot.audio_level)) != 0;
             }
         }
         ok = ok && mz_zip_writer_finalize_archive(&zip.zip) != 0;
@@ -2595,6 +2632,89 @@ bool Session::write_project(const std::filesystem::path& file, std::string* erro
         return false;
     }
     return true;
+}
+
+bool Session::write_project(const std::filesystem::path& file, std::string* error,
+                            const std::string& head, int audio_level) {
+    return write_snapshot(*snapshot_project(head, audio_level), file, error);
+}
+
+bool Session::start_background_save(const std::filesystem::path& file, bool recovery) {
+    if (save_running_) {
+        return false;
+    }
+    std::shared_ptr<ProjectSnapshot> snapshot;
+    if (recovery) {
+        std::error_code code;
+        std::filesystem::create_directories(file.parent_path(), code);
+        snapshot = snapshot_project("original_file=" + project_file_.u8string() + "\n", MZ_NO_COMPRESSION);
+    } else {
+        snapshot = snapshot_project(std::string(), MZ_BEST_SPEED);
+    }
+    save_state_ = state_text();
+    save_generation_ = project_generation_;
+    save_result_ = SaveResult();
+    save_result_.file = file;
+    save_result_.recovery = recovery;
+    save_done_.store(false, std::memory_order_relaxed);
+    save_running_ = true;
+    save_thread_ = std::thread([this, snapshot, file] {
+        std::string error;
+        save_ok_ = write_snapshot(*snapshot, file, &error);
+        save_error_ = error;
+        save_done_.store(true, std::memory_order_release);
+    });
+    return true;
+}
+
+bool Session::save_project_in_background(const std::filesystem::path& file) {
+    return start_background_save(file, false);
+}
+
+bool Session::save_recovery_in_background(const std::filesystem::path& file) {
+    return start_background_save(file, true);
+}
+
+void Session::finish_background_save() {
+    if (!save_running_ || !save_done_.load(std::memory_order_acquire)) {
+        return;
+    }
+    if (save_thread_.joinable()) {
+        save_thread_.join();
+    }
+    save_running_ = false;
+    save_result_.done = true;
+    save_result_.ok = save_ok_;
+    save_result_.error = save_error_;
+    // Edits made while it was written stay unsaved; another project opened meanwhile is not
+    // touched.
+    if (save_ok_ && save_generation_ == project_generation_) {
+        if (save_result_.recovery) {
+            autosaved_state_ = save_state_;
+        } else {
+            project_file_ = save_result_.file;
+            saved_state_ = save_state_;
+            autosaved_state_ = save_state_;
+        }
+    }
+}
+
+Session::SaveResult Session::take_save_result() {
+    if (!save_result_.done) {
+        return SaveResult();
+    }
+    SaveResult result = save_result_;
+    save_result_ = SaveResult();
+    return result;
+}
+
+void Session::wait_for_background_save() {
+    if (save_running_) {
+        if (save_thread_.joinable()) {
+            save_thread_.join();
+        }
+        finish_background_save();
+    }
 }
 
 bool Session::open_project(const std::filesystem::path& file, std::string* error) {
@@ -3189,6 +3309,7 @@ bool Session::open_project(const std::filesystem::path& file, std::string* error
         grid_step_ = static_cast<GridStep>(grid);
     }
     seek_frames(0);
+    ++project_generation_;
     project_file_ = file;
     saved_state_ = state_text();
     autosaved_state_ = saved_state_;
@@ -3212,6 +3333,7 @@ void Session::new_project() {
     markers_.clear();
     set_loop_range(0, -1);
     rebuild_tempo();
+    ++project_generation_;
     project_file_.clear();
     saved_state_ = state_text();
     autosaved_state_ = saved_state_;
@@ -3893,6 +4015,29 @@ bool Session::change_track_speed(std::size_t index, double factor, std::string* 
     sync_track_regions(index);
     update_length();
     return true;
+}
+
+bool Session::comp_range(const Range& range, std::size_t track) {
+    if (range.empty() || range.first_track >= tracks_.size() || track >= tracks_.size() ||
+        track == range.first_track) {
+        return false;
+    }
+    Range from = range;
+    from.last_track = from.first_track;
+    const Clipboard copied = copy_range(from);
+    if (copied.empty()) {
+        return false;
+    }
+    Range to = from;
+    to.first_track = track;
+    to.last_track = track;
+    cut_range(to);
+    const bool pasted = paste(copied, track, range.begin);
+    pending_label_ = "Use a take";  // after paste(), which names its own step
+    std::stable_sort(tracks_[track].regions.begin(), tracks_[track].regions.end(),
+                     [](const RegionInfo& a, const RegionInfo& b) { return a.start < b.start; });
+    sync_track_regions(track);
+    return pasted;
 }
 
 void Session::sort_markers() {

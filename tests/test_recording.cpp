@@ -132,6 +132,28 @@ TEST_CASE("A loop over a range records one take per pass, and punching replaces 
     CHECK(regions[1].offset == 36000);              // the second pass follows in the take
 }
 
+TEST_CASE("A part of one take replaces the same part of another track") {
+    Session session;
+    REQUIRE(session.add_track("Main", constant_clip(48000, 2, 0.1f)));
+    REQUIRE(session.add_track("Take 2", constant_clip(48000, 2, 0.2f)));
+    session.commit_edits();
+    Session::Range range;
+    range.first_track = 1;
+    range.last_track = 1;
+    range.begin = 10000;
+    range.end = 20000;
+    CHECK_FALSE(session.comp_range(range, 1));
+    REQUIRE(session.comp_range(range, 0));
+    session.commit_edits();
+    CHECK(session.undo_label() == "Use a take");
+    const auto& regions = session.tracks()[0].regions;
+    REQUIRE(regions.size() == 3);
+    CHECK(regions[1].start == 10000);
+    CHECK(regions[1].length == 10000);
+    CHECK(regions[1].source == session.tracks()[1].regions[0].source);
+    CHECK(session.tracks()[1].regions.size() == 1);  // the take itself stays as it was
+}
+
 TEST_CASE("Recording captures the input in step with the timeline") {
     Engine engine(kRate, 1);
     FakeCard card(1);

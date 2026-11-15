@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.19
+
+- Take comping: select a part of one take and choose Edit (or the region menu) > "Use the selection on the track" > the track you are putting together; that part replaces the same part there, the take stays as it is. Ctrl+Z takes it back.
+- Saving no longer holds up the program: Ctrl+S and the autosave take the project as it is and write the file in the background ("Saving..." in the status bar, "Saved" when done). Edits made meanwhile stay unsaved. Before quitting or opening another project the save still happens right away.
+
 ## 0.3.18
 
 - Loop recording and punch in/out. Transport > "Loop the selection" loops a selected part of the tracks (a band on the ruler shows it; "Loop the whole project" goes back). With such a loop on, recording goes on over every pass and each pass becomes a take: the last whole pass stays on the track, the earlier ones go to new muted tracks to choose from.
