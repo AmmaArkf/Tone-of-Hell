@@ -523,6 +523,15 @@ public:
     /// one stays for undo). The part of the source the region plays is all that is kept.
     bool edit_region_sound(std::size_t track, std::size_t region, SoundEdit edit, double amount = 0.0,
                            std::string* error = nullptr);
+    /// Smart tempo: the tempo of the sound of an audio region, from its first two minutes, and
+    /// the timeline frame of its first beat. Returns false when no steady beat is found.
+    bool detect_region_tempo(std::size_t track, std::size_t region, double* bpm,
+                             std::int64_t* first_beat = nullptr) const;
+    /// The project takes the tempo of an audio region (its tempo changes are removed) and the
+    /// region moves (by less than a bar) so that its beats fall on the bars.
+    /// `bpm` other than 0 is used instead of the tempo found (for example twice or half of it,
+    /// when the beat was heard at the wrong speed).
+    bool adopt_region_tempo(std::size_t track, std::size_t region, std::string* error = nullptr, double bpm = 0.0);
 
     /// The markers, in order of time. Adding, moving, renaming and removing them are edits
     /// that can be undone, and they are saved with the project.

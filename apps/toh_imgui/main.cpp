@@ -305,6 +305,12 @@ struct UiState {
     int roll_preview = -1;                     // the note sounding while a note is dragged
     bool roll_score = false;                   // show the notes as a score instead
     bool show_clip_grid = false;               // the clip grid window
+    // The tempo found in the region of the region menu, kept while the region stays the same.
+    const void* tempo_source = nullptr;
+    std::int64_t tempo_offset = -1;
+    std::int64_t tempo_length = -1;
+    bool tempo_found = false;
+    double region_bpm = 0.0;
     int score_preview = -1;                    // the note sounding after it was added on the score
     float roll_box_y = 0.0f;                   // where a selection box began, inside the canvas
     std::vector<char> roll_box_base;           // the selection before the box (kept with Ctrl)
@@ -5071,6 +5077,50 @@ void draw_lane(Session& session, UiState& ui, std::size_t track_index, float row
             if (session.put_clip(ui.selected_track, ui.selected_region) >= 0) {
                 ui.show_clip_grid = true;
             }
+        }
+        // Smart tempo: the tempo of the recording, for the project or to fit the project.
+        if (region != nullptr && !region->has_notes() && ImGui::BeginMenu(T_("Tempo##region"))) {
+            if (ui.tempo_source != region->source.get() || ui.tempo_offset != region->offset ||
+                ui.tempo_length != region->length) {
+                ui.tempo_source = region->source.get();
+                ui.tempo_offset = region->offset;
+                ui.tempo_length = region->length;
+                ui.tempo_found = session.detect_region_tempo(ui.selected_track, ui.selected_region, &ui.region_bpm);
+            }
+            if (ui.tempo_found) {
+                ImGui::Text(T_("The region's tempo: %.1f BPM"), ui.region_bpm);
+                if (ImGui::MenuItem(T_("It is really twice as fast"), nullptr, false, ui.region_bpm * 2.0 <= 400.0)) {
+                    ui.region_bpm *= 2.0;
+                }
+                if (ImGui::MenuItem(T_("It is really half as fast"), nullptr, false, ui.region_bpm / 2.0 >= 20.0)) {
+                    ui.region_bpm /= 2.0;
+                }
+                ImGui::Separator();
+            } else {
+                ImGui::TextDisabled("%s", T_("No steady beat found in this region."));
+            }
+            if (ImGui::MenuItem(T_("Give the project this tempo and line the region up with the bars"), nullptr, false,
+                                ui.tempo_found)) {
+                std::string error;
+                if (!session.adopt_region_tempo(ui.selected_track, ui.selected_region, &error, ui.region_bpm)) {
+                    ui.error = error;
+                }
+                ui.tempo_source = nullptr;
+            }
+            const double project_bpm = session.bpm_at(region->start);
+            char fit[128];
+            std::snprintf(fit, sizeof(fit), T_("Fit the region to the project tempo (%.1f BPM)"), project_bpm);
+            const double factor = ui.tempo_found ? ui.region_bpm / project_bpm : 1.0;
+            if (ImGui::MenuItem(fit, nullptr, false, ui.tempo_found && std::fabs(factor - 1.0) > 0.001)) {
+                std::string error;
+                if (!session.edit_region_sound(ui.selected_track, ui.selected_region, toh::app::SoundEdit::Stretch,
+                                               factor, &error)) {
+                    ui.error = error;
+                }
+                ui.tempo_source = nullptr;
+            }
+            tooltip(T_("The region is stretched to the tempo of the project; its pitch stays."));
+            ImGui::EndMenu();
         }
         // Editing the sound of an audio region: it gets a new sound of its own.
         if (region != nullptr && !region->has_notes() && ImGui::BeginMenu(T_("Sound"))) {

@@ -13,6 +13,7 @@
 #include "toh/app/session.h"
 #include "toh/core/stock_sounds.h"
 #include "toh/core/stretch.h"
+#include "toh/core/tempo_detect.h"
 
 using toh::app::Session;
 
@@ -309,6 +310,59 @@ TEST_CASE("A clip of the clip grid plays in a loop instead of the timeline") {
     std::filesystem::remove_all(folder);
     CHECK(reopened.remove_clip(0, 0));
     CHECK_FALSE(reopened.launch_clip(0, 0));
+}
+
+namespace {
+
+// Short clicks (a decaying tone) at `bpm`, the first after `offset` frames.
+std::shared_ptr<toh::core::ClipData> click_track(double bpm, double seconds, std::int64_t offset) {
+    auto clip = std::make_shared<toh::core::ClipData>();
+    clip->channels = 2;
+    clip->sample_rate = 48000;
+    const auto frames = static_cast<std::size_t>(seconds * 48000.0);
+    clip->samples.assign(frames * 2, 0.0f);
+    const double period = 60.0 / bpm * 48000.0;
+    for (double beat = static_cast<double>(offset); beat < static_cast<double>(frames); beat += period) {
+        const auto start = static_cast<std::size_t>(std::llround(beat));
+        for (std::size_t i = 0; i < 2400 && start + i < frames; ++i) {
+            const float value = 0.6f * std::exp(-static_cast<float>(i) / 300.0f) *
+                                std::sin(6.2831853f * 1000.0f * static_cast<float>(i) / 48000.0f);
+            clip->samples[(start + i) * 2] = value;
+            clip->samples[(start + i) * 2 + 1] = value;
+        }
+    }
+    return clip;
+}
+
+}  // namespace
+
+TEST_CASE("Smart tempo finds the tempo of a recording and gives it to the project") {
+    for (const double bpm : {90.0, 128.0, 160.0}) {
+        CAPTURE(bpm);
+        const auto clip = click_track(bpm, 20.0, 4800);
+        const auto found = toh::core::detect_tempo(clip->samples.data(), clip->frames(), 2, 48000.0);
+        CHECK(found.bpm == doctest::Approx(bpm).epsilon(0.005));
+        CHECK(found.first_beat == doctest::Approx(4800.0).epsilon(0.08));
+    }
+    Session session;
+    REQUIRE(session.add_track("Drums", click_track(128.0, 20.0, 4800)));
+    double bpm = 0.0;
+    std::int64_t first = 0;
+    REQUIRE(session.detect_region_tempo(0, 0, &bpm, &first));
+    CHECK(bpm == doctest::Approx(128.0).epsilon(0.005));
+    REQUIRE(session.adopt_region_tempo(0, 0));
+    CHECK(session.metronome().bpm == doctest::Approx(128.0).epsilon(0.005));
+    // A beat of the region now falls on a bar line.
+    REQUIRE(session.detect_region_tempo(0, 0, &bpm, &first));
+    const double bars = static_cast<double>(first) / session.bar_frames();
+    CHECK(std::fabs(bars - std::round(bars)) * session.bar_frames() < 400.0);
+    session.commit_edits();
+    CHECK(session.undo_label() == "Take the tempo of a region");
+
+    // Silence and noise have no beat.
+    Session quiet;
+    REQUIRE(quiet.add_track("Tone", toh::core::make_sine_clip(441.0, 10.0, 48000, 2, 0.25f)));
+    CHECK_FALSE(quiet.detect_region_tempo(0, 0, &bpm));
 }
 
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {

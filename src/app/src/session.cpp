@@ -18,6 +18,7 @@
 
 #include "toh/audio/clip_loader.h"
 #include "toh/core/stretch.h"
+#include "toh/core/tempo_detect.h"
 #include "toh/audio/mp3_writer.h"
 #include "toh/app/midi_file.h"
 
@@ -1503,6 +1504,71 @@ std::vector<std::size_t> Session::group_tracks(std::size_t group) const {
         }
     }
     return members;
+}
+
+// ---- Smart tempo -------------------------------------------------------------------------
+
+bool Session::detect_region_tempo(std::size_t track, std::size_t region, double* bpm,
+                                  std::int64_t* first_beat) const {
+    if (track >= tracks_.size() || region >= tracks_[track].regions.size()) {
+        return false;
+    }
+    const RegionInfo& info = tracks_[track].regions[region];
+    if (info.has_notes() || !info.source || !info.source->clip) {
+        return false;
+    }
+    const core::ClipData& clip = *info.source->clip;
+    const std::size_t channels = std::max<std::size_t>(clip.channels, 1);
+    const auto frames = static_cast<std::size_t>(
+        std::min<std::int64_t>(info.source_frames(), static_cast<std::int64_t>(120.0 * config_.sample_rate)));
+    std::vector<float> samples(frames * channels);
+    const std::size_t got = core::read_clip_frames(clip, info.offset, frames, samples.data());
+    const core::TempoEstimate found =
+        core::detect_tempo(samples.data(), got, channels, static_cast<double>(config_.sample_rate));
+    if (found.bpm <= 0.0 || found.confidence < 1.15) {
+        return false;
+    }
+    // The region plays its sound `rate` times as fast.
+    const double tempo = found.bpm * info.rate;
+    if (tempo < 20.0 || tempo > 400.0) {
+        return false;
+    }
+    if (bpm != nullptr) {
+        *bpm = tempo;
+    }
+    if (first_beat != nullptr) {
+        *first_beat = info.start + std::llround(found.first_beat / info.rate);
+    }
+    return true;
+}
+
+bool Session::adopt_region_tempo(std::size_t track, std::size_t region, std::string* error, double wanted) {
+    double bpm = 0.0;
+    std::int64_t beat = 0;
+    if (!detect_region_tempo(track, region, &bpm, &beat)) {
+        set_error(error, "no steady beat was found in the region");
+        return false;
+    }
+    if (wanted >= 20.0 && wanted <= 400.0) {
+        bpm = wanted;
+    }
+    MetronomeSettings settings = metronome_;
+    settings.bpm = std::round(bpm * 100.0) / 100.0;
+    tempo_changes_.clear();
+    if (!set_metronome(settings)) {
+        rebuild_tempo();
+    }
+    // Move the region so that a beat lands on the nearest bar line (not before the start).
+    const double bar = bar_frames();
+    const RegionInfo& info = tracks_[track].regions[region];
+    double target = std::round(static_cast<double>(beat) / bar) * bar;
+    const double before = static_cast<double>(beat - info.start);  // from the region start to the beat
+    if (target < before) {
+        target += bar;
+    }
+    move_region(track, region, std::max<std::int64_t>(std::llround(target - before), 0));
+    pending_label_ = "Take the tempo of a region";
+    return true;
 }
 
 // ---- Clip grid ---------------------------------------------------------------------------

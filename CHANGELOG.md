@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.2
+
+- Smart tempo: right-click an audio region > Tempo shows the tempo found in its sound (from the onsets of the first two minutes). "Give the project this tempo and line the region up with the bars" sets the project tempo and moves the region so its beats fall on the bars; "Fit the region to the project tempo" stretches it to the project tempo and keeps its pitch.
+- When the beat was heard at the wrong speed, "It is really twice as fast" or "half as fast" corrects it before it is used. Both actions can be undone.
+
 ## 0.4.1
 
 - Six new built-in synthesizers for instrument tracks (Instrument > Simple synthesizers): FM keys (a frequency-modulated electric piano), FM bell, Analog bass (a filtered saw with resonance and a sub octave), Supersaw (five detuned saws), Wavetable lead (morphs from a saw to a square, with vibrato) and Synth brass (a filter that swells open).
