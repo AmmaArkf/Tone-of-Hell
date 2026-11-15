@@ -1396,6 +1396,9 @@ void add_effect(Session& session, UiState& ui, std::size_t track, const toh::plu
 
 // ---- Library -----------------------------------------------------------------------------
 
+void open_effect_window(UiState& ui, const std::shared_ptr<toh::plugins::Plugin>& plugin);
+void draw_plugin_params(toh::plugins::Plugin& plugin, float label_width);
+
 std::string lower_extension(const std::filesystem::path& path) {
     std::string extension = path.extension().u8string();
     for (char& c : extension) {
@@ -1596,6 +1599,47 @@ void library_drop_target(UiState& ui, std::size_t track, std::int64_t frame) {
     ImGui::EndDragDropTarget();
 }
 
+// The effects of one track with all their settings, shown under the library: each one can be
+// folded away and switched off.
+void draw_track_effect_list(Session& session, UiState& ui, std::size_t track) {
+    const float font = ImGui::GetFontSize();
+    const TrackInfo& info = session.tracks()[track];
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::Text(T_("Effects of track %d: %s"), static_cast<int>(track + 1), info.name.c_str());
+    if (info.effects.empty()) {
+        ImGui::TextDisabled("%s", T_("No effects. Drag one here from Effects above, or use the FX button of the track."));
+    }
+    ImGui::PopTextWrapPos();
+    std::size_t remove = info.effects.size();
+    for (std::size_t e = 0; e < info.effects.size(); ++e) {
+        const toh::app::EffectSlot& slot = info.effects[e];
+        ImGui::PushID(static_cast<int>(e));
+        bool on = slot.enabled;
+        if (ImGui::Checkbox("##on", &on)) {
+            session.set_effect_enabled(track, e, on);
+        }
+        tooltip(T_("On or off (off: the sound passes unchanged)"));
+        ImGui::SameLine();
+        if (ImGui::CollapsingHeader((slot.name + "##effect").c_str()) && slot.plugin) {
+            ImGui::Indent(0.5f * font);
+            draw_plugin_params(*slot.plugin, 7.0f * font);
+            if (ImGui::SmallButton(T_("Open"))) {
+                open_effect_window(ui, slot.plugin);
+            }
+            tooltip(T_("The plugin's window, or sliders for its parameters"));
+            ImGui::SameLine();
+            if (ImGui::SmallButton(T_("Remove"))) {
+                remove = e;
+            }
+            ImGui::Unindent(0.5f * font);
+        }
+        ImGui::PopID();
+    }
+    if (remove < info.effects.size()) {
+        session.remove_effect(track, remove);
+    }
+}
+
 // The library on the left: stock sounds, instruments, ready-made parts, effects and the
 // user's files, all to drag onto the tracks.
 void draw_library(Session& session, UiState& ui, float height) {
@@ -1617,7 +1661,21 @@ void draw_library(Session& session, UiState& ui, float height) {
     ImGui::TextDisabled("%s", T_("Drag onto a track, or below the tracks for a new one."));
     ImGui::PopTextWrapPos();
     ImGui::Separator();
-    ImGui::BeginChild("library items");
+    // The track whose effects are listed at the bottom: the selected one, or the one of the
+    // selected region.
+    std::size_t fx_track = session.tracks().size();
+    for (std::size_t t = 0; t < session.tracks().size(); ++t) {
+        if (session.tracks()[t].selected) {
+            fx_track = t;
+            break;
+        }
+    }
+    if (fx_track >= session.tracks().size() && ui.selected && ui.selected_track < session.tracks().size()) {
+        fx_track = ui.selected_track;
+    }
+    const bool fx_panel = fx_track < session.tracks().size();
+    const float fx_height = fx_panel ? std::max(ImGui::GetContentRegionAvail().y * 0.45f, 8.0f * font) : 0.0f;
+    ImGui::BeginChild("library items", ImVec2(0.0f, fx_panel ? -fx_height : 0.0f));
 
     if (ImGui::CollapsingHeader(T_("Sounds"), ImGuiTreeNodeFlags_DefaultOpen)) {
         std::string category;
@@ -1743,6 +1801,15 @@ void draw_library(Session& session, UiState& ui, float height) {
         }
     }
     ImGui::EndChild();
+    if (fx_panel) {
+        ImGui::Separator();
+        ImGui::BeginChild("track effects list");
+        draw_track_effect_list(session, ui, fx_track);
+        ImGui::EndChild();
+        if (ImGui::GetDragDropPayload() != nullptr) {
+            library_drop_target(ui, fx_track, session.position_frames());
+        }
+    }
     ImGui::EndChild();
 }
 
@@ -1912,6 +1979,43 @@ std::string escape_percent(const std::string& text) {
 }
 
 // Every frame: the plugins' own windows follow their plugins, and the slider windows are drawn.
+// Sliders for the parameters of a plugin (the ones it does not hide). `label_width` is the
+// room left for the names on the right of the sliders.
+void draw_plugin_params(toh::plugins::Plugin& plugin, float label_width) {
+    bool any = false;
+    for (const auto& param : plugin.params()) {
+        if (param.hidden) {
+            continue;
+        }
+        any = true;
+        const double value = plugin.param_value(param.id);
+        const std::string text = escape_percent(plugin.param_text(param.id, value));
+        const std::string label = param.name + "##" + std::to_string(param.id);
+        ImGui::SetNextItemWidth(-label_width);
+        if (param.stepped) {
+            int whole = static_cast<int>(std::lround(value));
+            if (ImGui::SliderInt(label.c_str(), &whole, static_cast<int>(param.min), static_cast<int>(param.max),
+                                 text.c_str())) {
+                plugin.set_param(param.id, whole);
+            }
+        } else {
+            auto changing = static_cast<float>(value);
+            if (ImGui::SliderFloat(label.c_str(), &changing, static_cast<float>(param.min),
+                                   static_cast<float>(param.max), text.c_str())) {
+                plugin.set_param(param.id, changing);
+            }
+        }
+        if (double_clicked()) {
+            plugin.set_param(param.id, param.default_value);
+        }
+    }
+    if (!any) {
+        ImGui::TextDisabled("%s", T_("This plugin has no parameters to show."));
+    } else {
+        ImGui::TextDisabled("%s", T_("Double-click a slider: back to its first value."));
+    }
+}
+
 void draw_effect_windows(Session& session, UiState& ui) {
     for (std::size_t i = 0; i < ui.plugin_windows.size();) {
         auto plugin = ui.plugin_windows[i].plugin.lock();
@@ -1942,38 +2046,7 @@ void draw_effect_windows(Session& session, UiState& ui) {
             if (!plugin->info().vendor.empty()) {
                 ImGui::TextDisabled("%s", plugin->info().vendor.c_str());
             }
-            bool any = false;
-            for (const auto& param : plugin->params()) {
-                if (param.hidden) {
-                    continue;
-                }
-                any = true;
-                const double value = plugin->param_value(param.id);
-                const std::string text = escape_percent(plugin->param_text(param.id, value));
-                const std::string label = param.name + "##" + std::to_string(param.id);
-                ImGui::SetNextItemWidth(-9.0f * font);
-                if (param.stepped) {
-                    int whole = static_cast<int>(std::lround(value));
-                    if (ImGui::SliderInt(label.c_str(), &whole, static_cast<int>(param.min),
-                                         static_cast<int>(param.max), text.c_str())) {
-                        plugin->set_param(param.id, whole);
-                    }
-                } else {
-                    auto changing = static_cast<float>(value);
-                    if (ImGui::SliderFloat(label.c_str(), &changing, static_cast<float>(param.min),
-                                           static_cast<float>(param.max), text.c_str())) {
-                        plugin->set_param(param.id, changing);
-                    }
-                }
-                if (double_clicked()) {
-                    plugin->set_param(param.id, param.default_value);
-                }
-            }
-            if (!any) {
-                ImGui::TextDisabled("%s", T_("This plugin has no parameters to show."));
-            } else {
-                ImGui::TextDisabled("%s", T_("Double-click a slider: back to its first value."));
-            }
+            draw_plugin_params(*plugin, 9.0f * font);
         }
         ImGui::End();
         if (!open) {
@@ -5318,31 +5391,28 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
     draw_track_icon(ui, track.icon, icon_origin, icon_size, icon_hovered);
     draw_icon_popup(session, ui, i);
     ImGui::SameLine();
+    // The buttons stand in a column between the picture and the name, volume and pan.
     ImGui::BeginGroup();
-    const float group_x = ImGui::GetCursorPosX();  // SameLine positions are relative to this
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 1.0f));
     if (toggle_button(T_("M"), track.mute, ImVec4(0.75f, 0.55f, 0.15f, 1.0f))) {
         session.set_track_mute(i, !track.mute);
     }
     tooltip(T_("Mute"));
-    ImGui::SameLine();
     if (toggle_button(T_("S"), track.solo, ImVec4(0.20f, 0.60f, 0.85f, 1.0f))) {
         session.set_track_solo(i, !track.solo);
     }
     tooltip(T_("Solo"));
-    ImGui::SameLine();
     const bool armed = ui.armed && ui.armed_track == i;
     if (toggle_button(T_("R"), armed, ImVec4(0.85f, 0.15f, 0.15f, 1.0f))) {
         ui.armed = !armed;
         ui.armed_track = i;
     }
     tooltip(T_("Arm for recording: the next take goes onto this track"));
-    ImGui::SameLine();
     if (toggle_button(T_("FX"), !track.effects.empty(), ImVec4(0.25f, 0.62f, 0.35f, 1.0f))) {
         ImGui::OpenPopup("track effects");
     }
     tooltip(T_("Effects of the track (CLAP and VST3 plugins)"));
     draw_effects_popup(session, ui, i);
-    ImGui::SameLine();
     if (ImGui::SmallButton("x1")) {
         ui.track_speed = 100.0f;
         ImGui::OpenPopup("track speed");
@@ -5383,13 +5453,18 @@ bool draw_track_header(Session& session, UiState& ui, std::size_t i, float heade
         ImGui::EndPopup();
     }
 
+    ImGui::PopStyleVar();
+    ImGui::EndGroup();
+    ImGui::SameLine();
+    ImGui::BeginGroup();
+    const float group_x = ImGui::GetCursorPosX();  // SameLine positions are relative to this
+
     // The remove button sits in the far corner, away from mute and solo, and asks first.
     // The track name gets the space in between and is shortened when it does not fit.
     const ImGuiStyle& style = ImGui::GetStyle();
     const float remove_width = ImGui::CalcTextSize("X").x + 2.0f * style.FramePadding.x;
     const float remove_x = ImGui::GetWindowWidth() - remove_width - style.WindowPadding.x;
 
-    ImGui::SameLine();
     const std::string title = std::to_string(i + 1) + ". " + track.name;
     const float title_width = remove_x - ImGui::GetCursorPosX() - style.ItemSpacing.x;
     ImGui::TextUnformatted(fit_text(title, title_width).c_str());

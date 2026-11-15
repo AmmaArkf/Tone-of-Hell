@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.3.16
+
+- Under the library, the effects of the selected track (or of the selected region's track): each with a box to switch it on or off, folding open to all its settings as sliders, with Open and Remove. Effects can be dragged there from the library, too.
+- The buttons of a track header (M, S, R, FX, x1) stand in a column between the picture and the name, volume and pan.
+
 ## 0.3.15
 
 - Fix: effects could not be dragged from the library (their description tooltip got in the way of the drag). Drops from the library and added effects are written to the log.
