@@ -15,6 +15,7 @@
 #include "toh/core/stretch.h"
 #include "toh/core/tempo_detect.h"
 #include "toh/core/pitch_track.h"
+#include "toh/core/mastering.h"
 
 using toh::app::Session;
 
@@ -404,6 +405,42 @@ TEST_CASE("The notes of a recorded voice are found and retuned") {
     REQUIRE(session.undo());
     REQUIRE(session.analyse_region_pitch(0, 0, nullptr, &found));
     CHECK(found.front().pitch == doctest::Approx(57.0f).epsilon(0.003));
+}
+
+TEST_CASE("The mastering chain reaches the target loudness under the ceiling") {
+    // A 1 kHz sine at -20 dBFS RMS measures -20 LUFS (K-weighting is about 0 dB there, plus the
+    // -0.691 offset that the stereo pair makes up for).
+    std::vector<float> tone(2 * 48000 * 5);
+    for (std::size_t i = 0; i < tone.size() / 2; ++i) {
+        const float value = 0.1f * std::sqrt(2.0f) * std::sin(6.2831853f * 1000.0f * static_cast<float>(i) / 48000.0f);
+        tone[2 * i] = value;
+        tone[2 * i + 1] = value;
+    }
+    const auto stats = toh::core::measure_mix(tone.data(), tone.size() / 2, 2, 48000.0);
+    CHECK(stats.loudness_lufs == doctest::Approx(-17.0).epsilon(0.03));  // two channels: +3 dB
+    CHECK(stats.peak_db == doctest::Approx(-17.0).epsilon(0.02));
+    CHECK(stats.width == doctest::Approx(0.0));
+
+    // Drum-like hits: loud peaks over a quiet bed.
+    std::vector<float> mix(2 * 48000 * 8);
+    for (std::size_t i = 0; i < mix.size() / 2; ++i) {
+        const double t = static_cast<double>(i) / 48000.0;
+        const double hit = std::fmod(t, 0.5);
+        const double value = 0.05 * std::sin(6.2831853 * 220.0 * t) + 0.8 * std::exp(-hit * 30.0) * std::sin(6.2831853 * 80.0 * hit);
+        mix[2 * i] = static_cast<float>(value);
+        mix[2 * i + 1] = static_cast<float>(value * 0.9);
+    }
+    const auto before = toh::core::measure_mix(mix.data(), mix.size() / 2, 2, 48000.0);
+    std::vector<std::string> reasons;
+    const auto settings = toh::core::suggest_master(before, -12.0, &reasons);
+    CHECK_FALSE(reasons.empty());
+    toh::core::master_audio(mix, 2, 48000.0, settings);
+    const auto after = toh::core::measure_mix(mix.data(), mix.size() / 2, 2, 48000.0);
+    CHECK(after.peak_db <= settings.ceiling_db + 0.01);
+    CHECK(after.loudness_lufs == doctest::Approx(-12.0).epsilon(0.1));
+    for (const float value : mix) {
+        REQUIRE(std::isfinite(value));
+    }
 }
 
 TEST_CASE("Every stock sound is made, is not silent and is always the same") {

@@ -2,6 +2,11 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.4
+
+- Mastering assistant (File > Export audio > Mastering assistant...): listens to the whole mix silently and measures its loudness (LUFS, ITU-R BS.1770), peak, lows, highs and stereo width, then suggests a chain for a target: streaming (-14 LUFS), loud club (-9), podcast (-16) or gentle (-18), with the reasons.
+- The chain: bass and treble shelves, a gentle "glue" compressor, the gain to the target loudness and a look-ahead limiter under a ceiling (-1 dB by default). Every setting can be changed; "Export the mastered WAV" writes the result and shows what it measures.
+
 ## 0.4.3
 
 - Pitch editor for recorded sound: right-click an audio region > "Notes of the sound (pitch editor)..." opens it like a piano roll. A yellow line shows the pitch that sounds and bars show the notes found in it, with how many cents each is off.

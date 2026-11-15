@@ -4383,6 +4383,51 @@ bool Session::export_mp3(const std::filesystem::path& path, int kbps, std::strin
     return true;
 }
 
+bool Session::render_mix(std::vector<float>* mix, std::string* error) const {
+    if (length_frames_ <= 0) {
+        set_error(error, "there is nothing to play");
+        return false;
+    }
+    const std::size_t most = static_cast<std::size_t>(config_.sample_rate) * 60 * 20 * config_.channels;
+    mix->clear();
+    const bool done = render_project([&](const float* data, std::uint32_t frames) {
+        const std::size_t count = static_cast<std::size_t>(frames) * config_.channels;
+        if (mix->size() + count > most) {
+            return false;
+        }
+        mix->insert(mix->end(), data, data + count);
+        return true;
+    });
+    if (!done) {
+        set_error(error, "the project is longer than 20 minutes");
+        return false;
+    }
+    return true;
+}
+
+bool Session::export_mastered_wav(const std::filesystem::path& path, const core::MasterSettings& settings,
+                                  audio::SampleFormat format, std::string* error, core::MixStats* after) const {
+    std::vector<float> mix;
+    if (!render_mix(&mix, error)) {
+        return false;
+    }
+    const double rate = static_cast<double>(config_.sample_rate);
+    core::master_audio(mix, config_.channels, rate, settings);
+    if (after != nullptr) {
+        *after = core::measure_mix(mix.data(), mix.size() / config_.channels, config_.channels, rate);
+    }
+    audio::WavWriter writer;
+    if (!writer.open(path, config_.sample_rate, config_.channels, format, error)) {
+        return false;
+    }
+    if (!writer.write(mix.data(), mix.size() / config_.channels)) {
+        set_error(error, "cannot write the file (is the disk full?)");
+        return false;
+    }
+    writer.close();
+    return true;
+}
+
 bool Session::render_project(const std::function<bool(const float*, std::uint32_t)>& sink) const {
     // A second engine renders the same project offline. A plugin cannot work for two engines at
     // once, so while the file is written the plugins are lent to the second engine: playback

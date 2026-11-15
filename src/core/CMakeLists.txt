@@ -1,6 +1,7 @@
 add_library(toh_core STATIC
     src/clip.cpp
     src/engine.cpp
+    src/mastering.cpp
     src/paged_file.cpp
     src/pitch_track.cpp
     src/sampler.cpp

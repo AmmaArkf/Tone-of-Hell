@@ -132,7 +132,7 @@ void SDLCALL export_dialog_callback(void* user_data, const char* const* file_lis
 // A path chosen in a project or folder dialog, waiting for the main loop.
 struct PendingPath {
     enum class Kind { SaveProject, OpenProject, ProjectsFolder, SoundFont, ImportMidi, ExportMidi,
-                      SamplerSound, ClapFile };
+                      SamplerSound, ClapFile, ExportMastered };
     std::mutex mutex;
     bool ready = false;
     Kind kind = Kind::SaveProject;
@@ -305,6 +305,15 @@ struct UiState {
     int roll_preview = -1;                     // the note sounding while a note is dragged
     bool roll_score = false;                   // show the notes as a score instead
     bool show_clip_grid = false;               // the clip grid window
+    // The mastering assistant.
+    bool master_open = false;
+    bool master_measured = false;
+    toh::core::MixStats master_before;
+    bool master_has_after = false;
+    toh::core::MixStats master_after;
+    toh::core::MasterSettings master;
+    int master_target = 0;
+    std::vector<std::string> master_reasons;
     // The pitch editor: the notes of a recorded voice or instrument, like on a piano roll.
     bool pitch_open = false;
     std::size_t pitch_track = 0;
@@ -2232,6 +2241,11 @@ void open_path_dialog(Session& session, UiState& ui, PendingPath::Kind kind) {
         static const SDL_DialogFileFilter midi_filters[] = {{"MIDI file", "mid;midi"}};
         SDL_ShowOpenFileDialog(&path_dialog_callback, &ui.path_request, ui.window, midi_filters, 1,
                                nullptr, false);
+    } else if (kind == PendingPath::Kind::ExportMastered) {
+        static const SDL_DialogFileFilter wav_filters[] = {{"WAV", "wav"}};
+        const std::string wav_location = (projects_folder(ui) / "Master.wav").u8string();
+        SDL_ShowSaveFileDialog(&path_dialog_callback, &ui.path_request, ui.window, wav_filters, 1,
+                               wav_location.c_str());
     } else if (kind == PendingPath::Kind::ExportMidi) {
         static const SDL_DialogFileFilter midi_filters[] = {{"MIDI file", "mid"}};
         const std::string midi_location = (projects_folder(ui) / "Song.mid").u8string();
@@ -2356,6 +2370,19 @@ void handle_path_request(Session& session, UiState& ui) {
             fit_view(session, ui.view);
         } else {
             ui.error = std::string(T_("MIDI: ")) + error;
+        }
+        return;
+    }
+    if (kind == PendingPath::Kind::ExportMastered) {
+        std::filesystem::path file = std::filesystem::u8path(path);
+        if (file.extension() != ".wav") {
+            file += ".wav";
+        }
+        if (session.export_mastered_wav(file, ui.master, toh::audio::SampleFormat::Int24, &error, &ui.master_after)) {
+            ui.master_has_after = true;
+            ui.notice = std::string(T_("Exported: ")) + file.u8string();
+        } else {
+            ui.error = std::string(T_("Export: ")) + error;
         }
         return;
     }
@@ -3392,6 +3419,10 @@ void draw_menu_bar(Session& session, PendingFiles& pending, PendingExport& expor
             }
             if (ImGui::MenuItem(T_("MP3, variable bit rate (best quality)..."))) {
                 open_export_dialog(exports, window, toh::audio::SampleFormat::Int24, 0);
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem(T_("Mastering assistant..."))) {
+                ui.master_open = true;
             }
             ImGui::Separator();
             if (ImGui::MenuItem(T_("MIDI file (the notes)..."))) {
@@ -6617,6 +6648,120 @@ void draw_clip_grid(Session& session, UiState& ui) {
     ImGui::End();
 }
 
+// ---- Mastering assistant -----------------------------------------------------------------
+
+struct MasterTarget {
+    const char* name;
+    double lufs;
+};
+constexpr MasterTarget kMasterTargets[] = {{"Streaming (-14 LUFS)", -14.0},
+                                           {"Loud: club and EDM (-9 LUFS)", -9.0},
+                                           {"Podcast and speech (-16 LUFS)", -16.0},
+                                           {"Gentle, with dynamics (-18 LUFS)", -18.0}};
+
+void show_mix_stats(const toh::core::MixStats& stats) {
+    ImGui::Text(T_("Loudness: %.1f LUFS"), stats.loudness_lufs);
+    ImGui::SameLine(14.0f * ImGui::GetFontSize());
+    ImGui::Text(T_("Peak: %.1f dBFS"), stats.peak_db);
+    ImGui::Text(T_("Lows: %.1f dB   Highs: %.1f dB"), stats.low_db, stats.high_db);
+    ImGui::SameLine(14.0f * ImGui::GetFontSize());
+    ImGui::Text(T_("Width: %.0f%%"), stats.width * 100.0);
+}
+
+// Measures the mix, suggests a mastering chain for a target loudness and exports the mastered
+// sound to a WAV file.
+void draw_mastering(Session& session, UiState& ui) {
+    if (!ui.master_open) {
+        return;
+    }
+    const float font = ImGui::GetFontSize();
+    ImGui::SetNextWindowSize(ImVec2(36.0f * font, 30.0f * font), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin((std::string(T_("Mastering assistant")) + "###mastering").c_str(), &ui.master_open)) {
+        ImGui::End();
+        return;
+    }
+    const auto suggest = [&]() {
+        ui.master_reasons.clear();
+        ui.master = toh::core::suggest_master(ui.master_before, kMasterTargets[ui.master_target].lufs, &ui.master_reasons);
+    };
+    if (ImGui::Button(T_("Listen to the mix and suggest"))) {
+        std::vector<float> mix;
+        std::string error;
+        if (session.render_mix(&mix, &error)) {
+            const std::size_t channels = session.config().channels;
+            ui.master_before = toh::core::measure_mix(mix.data(), mix.size() / channels, channels,
+                                                      static_cast<double>(session.sample_rate()));
+            ui.master_measured = true;
+            ui.master_has_after = false;
+            suggest();
+        } else {
+            ui.error = error;
+        }
+    }
+    tooltip(T_("Plays the whole project silently (like an export) and measures it."));
+    ImGui::SetNextItemWidth(18.0f * font);
+    if (ImGui::BeginCombo(T_("Target"), T_(kMasterTargets[ui.master_target].name))) {
+        for (int k = 0; k < static_cast<int>(std::size(kMasterTargets)); ++k) {
+            if (ImGui::Selectable(T_(kMasterTargets[k].name), k == ui.master_target)) {
+                ui.master_target = k;
+                if (ui.master_measured) {
+                    suggest();
+                } else {
+                    ui.master.target_lufs = kMasterTargets[k].lufs;
+                }
+            }
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Separator();
+    if (ui.master_measured) {
+        ImGui::TextUnformatted(T_("The mix now:"));
+        show_mix_stats(ui.master_before);
+        for (const std::string& reason : ui.master_reasons) {
+            ImGui::BulletText("%s", T_(reason.c_str()));
+        }
+    } else {
+        ImGui::TextDisabled("%s", T_("Press \"Listen to the mix and suggest\" first."));
+    }
+    ImGui::Separator();
+    ImGui::TextUnformatted(T_("The mastering chain"));
+    float low = static_cast<float>(ui.master.low_shelf_db);
+    float high = static_cast<float>(ui.master.high_shelf_db);
+    float glue = static_cast<float>(ui.master.glue * 100.0);
+    float target = static_cast<float>(ui.master.target_lufs);
+    float ceiling = static_cast<float>(ui.master.ceiling_db);
+    ImGui::SetNextItemWidth(18.0f * font);
+    if (ImGui::SliderFloat("##bass", &low, -8.0f, 8.0f, T_("Bass (120 Hz): %+.1f dB"))) {
+        ui.master.low_shelf_db = low;
+    }
+    ImGui::SetNextItemWidth(18.0f * font);
+    if (ImGui::SliderFloat("##treble", &high, -8.0f, 8.0f, T_("Treble (8 kHz): %+.1f dB"))) {
+        ui.master.high_shelf_db = high;
+    }
+    ImGui::SetNextItemWidth(18.0f * font);
+    if (ImGui::SliderFloat("##glue", &glue, 0.0f, 100.0f, T_("Glue (compressor): %.0f%%"))) {
+        ui.master.glue = glue / 100.0f;
+    }
+    ImGui::SetNextItemWidth(18.0f * font);
+    if (ImGui::SliderFloat("##target", &target, -24.0f, -6.0f, T_("Loudness: %.1f LUFS"))) {
+        ui.master.target_lufs = target;
+    }
+    ImGui::SetNextItemWidth(18.0f * font);
+    if (ImGui::SliderFloat("##ceiling", &ceiling, -3.0f, 0.0f, T_("Ceiling (limiter): %.1f dB"))) {
+        ui.master.ceiling_db = ceiling;
+    }
+    tooltip(T_("The limiter keeps every peak below this level. -1 dB leaves room for MP3 and streaming."));
+    if (ImGui::Button(T_("Export the mastered WAV (24-bit)..."))) {
+        open_path_dialog(session, ui, PendingPath::Kind::ExportMastered);
+    }
+    if (ui.master_has_after) {
+        ImGui::Separator();
+        ImGui::TextUnformatted(T_("The mastered file:"));
+        show_mix_stats(ui.master_after);
+    }
+    ImGui::End();
+}
+
 // ---- Pitch editor ------------------------------------------------------------------------
 
 // The notes of a recorded voice or instrument on a grid of keys: the line is the pitch that
@@ -8061,6 +8206,7 @@ int main(int argc, char* argv[]) {
             draw_piano_roll(session, ui);
             draw_clip_grid(session, ui);
             draw_pitch_editor(session, ui);
+            draw_mastering(session, ui);
             draw_effect_windows(session, ui);
             if (ui.settings_changed) {
                 save_settings(session, ui);

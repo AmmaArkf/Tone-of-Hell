@@ -20,6 +20,7 @@
 #include "toh/audio/wav_writer.h"
 #include "toh/core/clip.h"
 #include "toh/core/engine.h"
+#include "toh/core/mastering.h"
 #include "toh/core/pitch_track.h"
 #include "toh/plugins/clap_plugin.h"
 
@@ -729,6 +730,13 @@ public:
     /// ...) or 0 for variable bit rate at the best quality.
     bool export_mp3(const std::filesystem::path& path, int kbps,
                     std::string* error = nullptr) const;
+    /// The whole project as it sounds (like an export), interleaved, in memory. At most 20 minutes.
+    bool render_mix(std::vector<float>* mix, std::string* error = nullptr) const;
+    /// Exports the project through the mastering chain (see core::master_audio) to a WAV file.
+    /// `after` (if given) receives what the mastered sound measures.
+    bool export_mastered_wav(const std::filesystem::path& path, const core::MasterSettings& settings,
+                             audio::SampleFormat format, std::string* error = nullptr,
+                             core::MixStats* after = nullptr) const;
 
     // ---- Master --------------------------------------------------------------------------
 
