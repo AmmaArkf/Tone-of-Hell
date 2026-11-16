@@ -284,8 +284,9 @@ TEST_CASE("Tune pulls a voice onto the notes of the scale") {
     std::string error;
     auto tune = ClapPlugin::create(kExamples, "org.toneofhell.tune", 48000.0, 2, &error);
     REQUIRE_MESSAGE(tune != nullptr, error);
-    REQUIRE(tune->params().size() == 5);
+    REQUIRE(tune->params().size() == 7);
     CHECK(tune->param_text(0, 9.0) == "A");
+    CHECK(tune->param_text(5, 36.0) == "C2");
     CHECK(tune->param_text(1, 2.0) == "Minor");
     CHECK(tune->latency() > 0);
     // 452 Hz is almost half a semitone above A (440 Hz): it is pulled down to A.
@@ -298,6 +299,12 @@ TEST_CASE("Tune pulls a voice onto the notes of the scale") {
     REQUIRE(tune->set_param(1, 1.0));
     const double moved = frequency_through(*tune, 415.3);
     CHECK((std::fabs(moved - 392.0) < 3.0 || std::fabs(moved - 440.0) < 3.0));
+    // Outside the range of the voice nothing is changed.
+    tune->reset();
+    REQUIRE(tune->set_param(1, 0.0));
+    REQUIRE(tune->set_param(6, 60.0));  // up to C4: A4 is above it
+    CHECK(frequency_through(*tune, 452.0) == doctest::Approx(452.0).epsilon(0.004));
+    REQUIRE(tune->set_param(6, 84.0));
     // With the amount at 0 nothing is changed.
     tune->reset();
     REQUIRE(tune->set_param(3, 0.0));

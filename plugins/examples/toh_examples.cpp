@@ -94,7 +94,9 @@ const ParamDef kTuneParams[] = {{0, "Key", 0.0, 11.0, 0.0, "", true},
                                 {1, "Scale", 0.0, 5.0, 0.0, "", true},
                                 {2, "Speed", 0.0, 400.0, 40.0, "ms"},
                                 {3, "Amount", 0.0, 100.0, 100.0, "%"},
-                                {4, "Mix", 0.0, 100.0, 100.0, "%"}};
+                                {4, "Mix", 0.0, 100.0, 100.0, "%"},
+                                {5, "Lowest note", 24.0, 96.0, 36.0, "", true},
+                                {6, "Highest note", 24.0, 96.0, 84.0, "", true}};
 const char* const kTuneFeatures[] = {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, CLAP_PLUGIN_FEATURE_PITCH_CORRECTION,
                                      CLAP_PLUGIN_FEATURE_STEREO, nullptr};
 const char* const kKeyNames[12] = {"C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"};
@@ -932,6 +934,9 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
             const double speed_ms = e.values[2].load();
             const double amount = e.values[3].load() / 100.0;
             const double mix = e.values[4].load() / 100.0;
+            // The range of the voice: pitches outside it (a breath, a noise, an octave error) are left alone.
+            const double lowest = std::min(e.values[5].load(), e.values[6].load()) - 0.5;
+            const double highest = std::max(e.values[5].load(), e.values[6].load()) + 0.5;
             // How fast the correction follows: 0 ms jumps at once (the robot voice).
             const double follow = speed_ms <= 0.5 ? 1.0 : 1.0 - std::exp(-static_cast<double>(Tune::kStep) / (speed_ms / 1000.0 * e.rate));
             const double fade = 1.0 - std::exp(-1.0 / (0.010 * e.rate));
@@ -952,7 +957,7 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
                 if (++t.since >= Tune::kStep) {
                     t.since = 0;
                     t.found = t.read_pitch(e.rate);
-                    if (t.found > 0.0f) {
+                    if (t.found > 0.0f && t.found >= lowest && t.found <= highest) {
                         const double wanted = nearest_scale_note(t.found, key, scale) - t.found;
                         t.target = std::clamp(wanted * amount, -3.0, 3.0);
                     } else {
@@ -1091,6 +1096,11 @@ bool params_to_text(const clap_plugin_t* plugin, clap_id id, double value, char*
         std::snprintf(text, size, "%s", kScaleNames[std::clamp(static_cast<int>(std::lround(value)), 0, 5)]);
         return true;
     }
+    if (e.kind == Kind::Tune && (id == 5 || id == 6)) {
+        const int note = std::clamp(static_cast<int>(std::lround(value)), 0, 127);
+        std::snprintf(text, size, "%s%d", kKeyNames[note % 12], note / 12 - 1);
+        return true;
+    }
     std::snprintf(text, size, value >= 100.0 || value <= -100.0 ? "%.0f %s" : "%.1f %s", value, e.defs[id].unit);
     return true;
 }
@@ -1153,15 +1163,21 @@ bool state_load(const clap_plugin_t* plugin, const clap_istream_t* stream) {
     std::array<double, 8> data{};
     auto* bytes = reinterpret_cast<char*>(data.data());
     std::uint64_t left = sizeof(double) * e.count;
+    std::uint64_t got = 0;
     while (left > 0) {
         const std::int64_t read = stream->read(stream, bytes, left);
         if (read <= 0) {
-            return false;
+            break;  // an older state with fewer parameters: the others keep their defaults
         }
         bytes += read;
         left -= static_cast<std::uint64_t>(read);
+        got += static_cast<std::uint64_t>(read);
     }
-    for (std::uint32_t i = 0; i < e.count; ++i) {
+    if (got == 0) {
+        return false;
+    }
+    const auto complete = static_cast<std::uint32_t>(got / sizeof(double));
+    for (std::uint32_t i = 0; i < e.count && i < complete; ++i) {
         e.values[i].store(std::clamp(data[i], e.defs[i].min, e.defs[i].max));
     }
     if (e.denoise != nullptr) {
@@ -1292,7 +1308,7 @@ const clap_plugin_t* factory_create(const clap_plugin_factory_t*, const clap_hos
     } else if (std::strcmp(id, kTune.id) == 0) {
         e->kind = Kind::Tune;
         e->defs = kTuneParams;
-        e->count = 5;
+        e->count = 7;
         e->plugin.desc = &kTune;
         e->tune = new Tune();
         e->tune->prepare(48000.0);

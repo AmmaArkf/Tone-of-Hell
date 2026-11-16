@@ -354,6 +354,9 @@ struct UiState {
     float pitch_vib_delay = 200.0f; // ms
     float pitch_vib_attack = 300.0f;
     int pitch_transpose = 0;
+    int pitch_low = 36;           // the range of the voice: pitches outside are left alone
+    int pitch_high = 84;
+    toh::core::PitchCurve pitch_raw;  // the curve as found, before the range is applied
     // The tempo found in the region of the region menu, kept while the region stays the same.
     const void* tempo_source = nullptr;
     std::int64_t tempo_offset = -1;
@@ -6933,6 +6936,21 @@ void draw_mastering(Session& session, UiState& ui) {
 
 // ---- Pitch editor ------------------------------------------------------------------------
 
+// The pitch curve with the range of the voice applied (pitches outside it count as none), and
+// the notes found in it.
+void apply_pitch_range(UiState& ui) {
+    ui.pitch_curve = ui.pitch_raw;
+    const float low = static_cast<float>(std::min(ui.pitch_low, ui.pitch_high)) - 0.5f;
+    const float high = static_cast<float>(std::max(ui.pitch_low, ui.pitch_high)) + 0.5f;
+    for (float& value : ui.pitch_curve.midi) {
+        if (value >= 0.0f && (value < low || value > high)) {
+            value = -1.0f;
+        }
+    }
+    ui.pitch_notes = toh::core::find_pitch_notes(ui.pitch_curve, ui.pitch_tolerance / 100.0f);
+    ui.pitch_drawn.assign(ui.pitch_curve.midi.size(), -1.0f);
+}
+
 // The target of a hop for "Apply to every note": the note it belongs to pulled to its goal with
 // the speed, note transition and ratio of the editor, plus the vibrato as set.
 std::vector<float> correction_line(Session& session, const UiState& ui, const RegionInfo& region) {
@@ -7015,8 +7033,8 @@ void draw_pitch_editor(Session& session, UiState& ui) {
     const RegionInfo& region = session.tracks()[ui.pitch_track].regions[ui.pitch_region];
     if (ui.pitch_source != region.source.get() || ui.pitch_offset != region.offset ||
         ui.pitch_length != region.length) {
-        session.analyse_region_pitch(ui.pitch_track, ui.pitch_region, &ui.pitch_curve, nullptr);
-        ui.pitch_notes = toh::core::find_pitch_notes(ui.pitch_curve, ui.pitch_tolerance / 100.0f);
+        session.analyse_region_pitch(ui.pitch_track, ui.pitch_region, &ui.pitch_raw, nullptr);
+        apply_pitch_range(ui);
         ui.pitch_source = region.source.get();
         ui.pitch_offset = region.offset;
         ui.pitch_length = region.length;
@@ -7045,6 +7063,13 @@ void draw_pitch_editor(Session& session, UiState& ui) {
     if (ui.pitch_tune) {
         ui.pitch_key = std::clamp(static_cast<int>(std::lround(ui.pitch_tune->param_value(0))), 0, 11);
         ui.pitch_scale = std::clamp(static_cast<int>(std::lround(ui.pitch_tune->param_value(1))), 0, 5);
+        const auto low = static_cast<int>(std::lround(ui.pitch_tune->param_value(5)));
+        const auto high = static_cast<int>(std::lround(ui.pitch_tune->param_value(6)));
+        if (ui.pitch_tune->params().size() >= 7 && (low != ui.pitch_low || high != ui.pitch_high)) {
+            ui.pitch_low = low;
+            ui.pitch_high = high;
+            apply_pitch_range(ui);
+        }
     }
 
     // ---- The panel on the left: settings like the knobs of the plugin ----
@@ -7133,6 +7158,24 @@ void draw_pitch_editor(Session& session, UiState& ui) {
         ui.pitch_notes = toh::core::find_pitch_notes(ui.pitch_curve, ui.pitch_tolerance / 100.0f);
     }
     tooltip(T_("How far the pitch may wander before a new note begins."));
+    {
+        // The range of the voice, like the Range of the plugin.
+        const std::string low = pitch_name(ui.pitch_low);
+        const std::string high = pitch_name(ui.pitch_high);
+        ImGui::SetNextItemWidth(wide * 0.48f);
+        bool range = ImGui::SliderInt("##low", &ui.pitch_low, 24, 96, (std::string(T_("From ")) + low).c_str());
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(wide * 0.48f);
+        range |= ImGui::SliderInt("##high", &ui.pitch_high, 24, 96, (std::string(T_("to ")) + high).c_str());
+        if (range) {
+            if (ui.pitch_tune) {
+                ui.pitch_tune->set_param(5, ui.pitch_low);
+                ui.pitch_tune->set_param(6, ui.pitch_high);
+            }
+            apply_pitch_range(ui);
+        }
+        tooltip(T_("The range of the voice: pitches outside it (breaths, noises, octave slips) are left alone."));
+    }
 
     ImGui::SeparatorText(T_("Correction"));
     ImGui::SetNextItemWidth(wide);

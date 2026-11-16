@@ -2,6 +2,10 @@
 
 All notable changes to this project are listed here, newest first. The version numbers follow the rules in [docs/VERSIONING.md](docs/VERSIONING.md).
 
+## 0.4.9
+
+- Tune: the range of the voice (Lowest and Highest note, C2 to C6 by default), in the effect and in its editor. Pitches outside it (breaths, noises, octave slips) are left alone. Projects saved with the older Tune open with the default range.
+
 ## 0.4.8
 
 - The Tune editor has the tools of a pitch-correction plugin: Move notes, a Pencil that draws the pitch the sound should have, a Line for slides from note to note, and Scissors that cut notes.
