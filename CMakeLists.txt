@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(ToneOfHell
-        VERSION 0.4.9
+        VERSION 0.4.10
         DESCRIPTION "An open source digital audio workstation (DAW) in C++"
         LANGUAGES C CXX)
 

@@ -252,20 +252,21 @@ namespace {
 
 // Plays two seconds of a sine of `hz` through a plugin and counts the upward zero crossings of
 // the last second: its frequency.
-double frequency_through(ClapPlugin& plugin, double hz) {
+double frequency_through(ClapPlugin& plugin, double hz, double rate = 48000.0) {
     std::vector<float> block(2 * 512);
+    const int blocks = static_cast<int>(2.0 * rate / 512.0);
     int crossings = 0;
     float previous = 0.0f;
     std::size_t n = 0;
     std::size_t counted = 0;
-    for (int b = 0; b < 188; ++b) {
+    for (int b = 0; b < blocks; ++b) {
         for (std::size_t i = 0; i < 512; ++i, ++n) {
-            const auto value = static_cast<float>(0.3 * std::sin(2.0 * 3.14159265358979 * hz * static_cast<double>(n) / 48000.0));
+            const auto value = static_cast<float>(0.3 * std::sin(2.0 * 3.14159265358979 * hz * static_cast<double>(n) / rate));
             block[2 * i] = block[2 * i + 1] = value;
         }
         plugin.process(block.data(), 512, 2);
         plugin.idle();
-        if (b >= 94) {
+        if (b >= blocks / 2) {
             for (std::size_t i = 0; i < 512; ++i) {
                 if (previous < 0.0f && block[2 * i] >= 0.0f) {
                     ++crossings;
@@ -275,7 +276,7 @@ double frequency_through(ClapPlugin& plugin, double hz) {
             }
         }
     }
-    return static_cast<double>(crossings) / (static_cast<double>(counted) / 48000.0);
+    return static_cast<double>(crossings) / (static_cast<double>(counted) / rate);
 }
 
 }  // namespace
@@ -309,6 +310,22 @@ TEST_CASE("Tune pulls a voice onto the notes of the scale") {
     tune->reset();
     REQUIRE(tune->set_param(3, 0.0));
     CHECK(frequency_through(*tune, 452.0) == doctest::Approx(452.0).epsilon(0.004));
+}
+
+TEST_CASE("Tune hears low voices at high sample rates") {
+    // The lowest pitch it reads must not rise with the sample rate: 113 Hz (almost half a
+    // semitone above A2, 110 Hz) is pulled down to A2 and 76 Hz up to D#2 (77.8 Hz) at 44.1,
+    // 48, 96 and 192 kHz alike.
+    for (const double rate : {44100.0, 48000.0, 96000.0, 192000.0}) {
+        CAPTURE(rate);
+        std::string error;
+        auto tune = ClapPlugin::create(kExamples, "org.toneofhell.tune", rate, 2, &error);
+        REQUIRE_MESSAGE(tune != nullptr, error);
+        // The zero crossings of one second measure to a whole hertz, so 1.2 Hz is allowed.
+        CHECK(std::fabs(frequency_through(*tune, 113.0, rate) - 110.0) < 1.2);
+        tune->reset();
+        CHECK(std::fabs(frequency_through(*tune, 76.0, rate) - 77.78) < 1.2);
+    }
 }
 
 TEST_CASE("An instrument plugin plays the notes of its track, live keys too") {
