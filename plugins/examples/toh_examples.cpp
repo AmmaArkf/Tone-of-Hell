@@ -164,17 +164,19 @@ const clap_plugin_descriptor_t kTune = {
 
 enum class Kind { Echo, Tremolo, Gain, Synth, Gate, Denoise, Equalizer, Compressor, Limiter, Reverb, Tune };
 
-// The tuner: it follows the pitch of the sound (YIN on a copy at a quarter of the rate, every
-// 256 frames) and shifts it with two crossfading taps of a delay line that run faster or slower
+// The tuner: it follows the pitch of the sound (YIN on a copy at about 12 kHz, every 256 frames) and shifts it with two crossfading taps of a delay line that run faster or slower
 // than the sound. The dry sound is delayed by as much, so a sound in tune passes unchanged.
 struct Tune {
-    static constexpr std::size_t kDown = 4;
+    static constexpr double kLowRate = 12000.0;   // the rate of the copy the pitch is read from
     static constexpr std::size_t kStep = 256;     // frames between two pitch readings
-    static constexpr std::size_t kWindow = 300;   // samples of the quarter-rate copy per reading
-    static constexpr std::size_t kLongest = 200;  // the longest period read, in those samples (60 Hz at 48 kHz)
-    std::vector<float> low;          // the quarter-rate copy, a ring of kWindow + kLongest + 1 samples
+    static constexpr std::size_t kWindow = 300;   // samples of the copy per reading
+    static constexpr std::size_t kLongest = 200;  // the longest period read, in those samples (60 Hz)
+    // Frames averaged into one sample of the copy: 4 at 44.1 and 48 kHz, 8 at 96 kHz, 16 at 192 kHz.
+    // A fixed 4 would read only down to 120 Hz at 96 kHz and 240 Hz at 192 kHz.
+    std::size_t down = 4;
+    std::vector<float> low;          // the copy, a ring of kWindow + kLongest + 1 samples
     std::size_t low_position = 0;
-    float low_sum = 0.0f;            // the average of kDown frames that becomes one sample
+    float low_sum = 0.0f;            // the average of `down` frames that becomes one sample
     std::size_t low_count = 0;
     std::size_t since = 0;           // frames since the last reading
     std::vector<double> difference;
@@ -190,6 +192,7 @@ struct Tune {
     float found = -1.0f;             // the last pitch found, MIDI note, or -1
 
     void prepare(double rate) {
+        down = static_cast<std::size_t>(std::max(1L, std::lround(rate / kLowRate)));
         low.assign(kWindow + kLongest + 1, 0.0f);
         difference.assign(kLongest + 2, 0.0);
         grain = std::round(0.03 * rate);
@@ -212,7 +215,7 @@ struct Tune {
         wet = 0.0;
         found = -1.0f;
     }
-    // The pitch of the last kWindow + kLongest quarter-rate samples, as a MIDI note, or -1.
+    // The pitch of the last kWindow + kLongest samples of the copy, as a MIDI note, or -1.
     float read_pitch(double rate) {
         const std::size_t size = low.size();
         const auto at = [&](std::size_t k) { return low[(low_position + k) % size]; };  // oldest first
@@ -223,7 +226,7 @@ struct Tune {
         if (energy / static_cast<double>(kWindow) < 1e-6) {
             return -1.0f;  // too quiet
         }
-        const double quarter = rate / static_cast<double>(kDown);
+        const double quarter = rate / static_cast<double>(down);
         const auto shortest = static_cast<std::size_t>(quarter / 1000.0);
         double running = 0.0;
         for (std::size_t tau = 1; tau <= kLongest + 1 && tau + kWindow < size + 1; ++tau) {
@@ -946,10 +949,10 @@ clap_process_status plugin_process(const clap_plugin_t* plugin, const clap_proce
                 const float right = input(1, i);
                 t.line[t.write * 2] = left;
                 t.line[t.write * 2 + 1] = right;
-                // The quarter-rate copy for the pitch reading.
+                // The copy for the pitch reading.
                 t.low_sum += 0.5f * (left + right);
-                if (++t.low_count == Tune::kDown) {
-                    t.low[t.low_position] = t.low_sum / static_cast<float>(Tune::kDown);
+                if (++t.low_count == t.down) {
+                    t.low[t.low_position] = t.low_sum / static_cast<float>(t.down);
                     t.low_position = (t.low_position + 1) % t.low.size();
                     t.low_sum = 0.0f;
                     t.low_count = 0;
